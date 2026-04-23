@@ -1,0 +1,39 @@
+{
+  "tailnets": {
+    "source": {
+      "oauth": {
+        "client_id": "YOUR_SOURCE_CLIENT_ID",
+        "client_secret": "YOUR_SOURCE_CLIENT_SECRET"
+      },
+      "tailnet": "source-org.ts.net",
+      "tags": ["tag:tailnetlink"]
+    },
+    "dest": {
+      "oauth": {
+        "client_id": "YOUR_DEST_CLIENT_ID",
+        "client_secret": "YOUR_DEST_CLIENT_SECRET"
+      },
+      "tailnet": "dest-org.ts.net",
+      "tags": ["tag:tailnetlink"]
+    }
+  },
+  "bridges": [
+    {
+      "name": "api-servers",
+      "source_tailnet": "source",
+      "dest_tailnets": ["dest"],
+      "source_tag": "tag:api-server",
+      "ports": [8080, 8443]
+    },
+    {
+      "name": "databases",
+      "source_tailnet": "source",
+      "dest_tailnets": ["dest"],
+      "source_tag": "tag:database",
+      "ports": [5432]
+    }
+  ],
+  "poll_interval": "30s",
+  "dial_timeout": "10s",
+  "listen_addr": ":8888"
+}

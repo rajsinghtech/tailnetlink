@@ -1,0 +1,2200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TailnetLink</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%231f1e1e'/><circle cx='8' cy='16' r='5' fill='white' opacity='.9'/><circle cx='24' cy='16' r='5' fill='white' opacity='.9'/><line x1='13' y1='16' x2='19' y2='16' stroke='white' stroke-width='2.5' opacity='.7'/></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+  <style>
+    /* ─── Tailscale Design Tokens ─────────────────────────────────────────── */
+    :root {
+      --gray-0:    rgb(250, 249, 248);
+      --gray-50:   rgb(249, 247, 246);
+      --gray-100:  rgb(247, 245, 244);
+      --gray-200:  rgb(238, 235, 234);
+      --gray-300:  rgb(218, 214, 213);
+      --gray-400:  rgb(175, 172, 171);
+      --gray-500:  rgb(112, 110, 109);
+      --gray-600:  rgb(68,  67,  66);
+      --gray-700:  rgb(46,  45,  45);
+      --gray-800:  rgb(35,  34,  34);
+      --gray-900:  rgb(31,  30,  30);
+      --gray-1000: rgb(24,  23,  23);
+      --blue-0:   rgb(240, 245, 255);
+      --blue-100: rgb(173, 199, 252);
+      --blue-200: rgb(133, 170, 245);
+      --blue-500: rgb(75,  112, 204);
+      --blue-600: rgb(63,  93,  179);
+      --green-0:   rgb(239, 255, 237);
+      --green-50:  rgb(203, 244, 201);
+      --green-200: rgb(51,  194, 127);
+      --green-500: rgb(14,  98,  69);
+      --red-0:   rgb(255, 246, 244);
+      --red-100: rgb(255, 177, 171);
+      --red-300: rgb(228, 108, 99);
+      --red-500: rgb(180, 40,  40);
+      --red-600: rgb(148, 8,   33);
+      --yellow-0:   rgb(252, 249, 233);
+      --yellow-300: rgb(217, 121, 23);
+      --yellow-500: rgb(152, 55,  5);
+      --shadow-sm:   0 1px 2px 0 rgb(0 0 0 / .05);
+      --shadow-base: 0 1px 3px 0 rgb(0 0 0 / .10), 0 1px 2px -1px rgb(0 0 0 / .10);
+      --shadow-soft: 0 4px 12px 0 rgb(0 0 0 / .03);
+      --shadow-modal: 0 20px 60px 0 rgb(0 0 0 / .18);
+    }
+
+    /* ─── Reset ───────────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    a { color: inherit; text-decoration: none; }
+    button { cursor: pointer; border: none; background: none; font: inherit; }
+
+    /* ─── Base ────────────────────────────────────────────────────────────── */
+    body {
+      font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      color: var(--gray-800);
+      background: var(--gray-100);
+      min-height: 100vh;
+    }
+
+    /* ─── Header ──────────────────────────────────────────────────────────── */
+    .header-wrap {
+      background: white;
+      border-bottom: 1px solid var(--gray-200);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .header {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 0 24px;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .logo-area {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      flex-shrink: 0;
+    }
+    .logo-mark {
+      width: 32px;
+      height: 32px;
+      background: var(--gray-900);
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .logo-mark svg { color: white; }
+    .logo-name { font-size: 16px; font-weight: 600; color: var(--gray-800); white-space: nowrap; }
+    .nav {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      flex: 1;
+    }
+    .nav-link {
+      display: flex; align-items: center; gap: 6px; padding: 6px 10px;
+      border-radius: 6px; font-size: 14px; font-weight: 500; color: var(--gray-600);
+      transition: background .12s, color .12s; cursor: pointer; white-space: nowrap;
+    }
+    .nav-link:hover { background: var(--gray-100); color: var(--gray-800); }
+    .nav-link.active { background: var(--blue-0); color: var(--blue-600); }
+    .nav-link svg { opacity: .7; }
+    .nav-link.active svg { opacity: 1; }
+    .header-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+    .connection-pill {
+      display: flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500;
+      color: var(--gray-500); background: var(--gray-100); border: 1px solid var(--gray-200);
+      border-radius: 99px; padding: 3px 10px;
+    }
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+    .status-dot.green  { background: var(--green-200); box-shadow: 0 0 0 2px var(--green-50); }
+    .status-dot.yellow { background: var(--yellow-300); box-shadow: 0 0 0 2px var(--yellow-0); }
+    .status-dot.red    { background: var(--red-300); box-shadow: 0 0 0 2px var(--red-0); }
+    .status-dot.gray   { background: var(--gray-400); }
+
+    /* ─── Page layout ─────────────────────────────────────────────────────── */
+    .page-wrap { max-width: 1280px; margin: 0 auto; padding: 28px 24px; }
+    .page-header {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      margin-bottom: 24px; gap: 16px;
+    }
+    .page-title { font-size: 20px; font-weight: 600; color: var(--gray-800); }
+    .page-subtitle { font-size: 13px; color: var(--gray-500); margin-top: 3px; }
+    .view { display: none; }
+    .view.active { display: block; }
+
+    /* ─── Buttons ─────────────────────────────────────────────────────────── */
+    .btn {
+      display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px;
+      border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer;
+      border: 1px solid; transition: background .12s, box-shadow .12s;
+    }
+    .btn-primary {
+      background: var(--blue-600); border-color: var(--blue-600); color: white;
+      box-shadow: 0 1px 1px rgb(0 0 0 / .06);
+    }
+    .btn-primary:hover { background: var(--blue-500); border-color: var(--blue-500); }
+    .btn-secondary {
+      background: white; border-color: var(--gray-300); color: var(--gray-700);
+      box-shadow: 0 1px 1px rgb(0 0 0 / .04);
+    }
+    .btn-secondary:hover { background: var(--gray-50); }
+    .btn-danger {
+      background: white; border-color: var(--red-100); color: var(--red-600);
+    }
+    .btn-danger:hover { background: var(--red-0); border-color: var(--red-300); }
+    .btn-sm { padding: 4px 10px; font-size: 12px; }
+    .btn-icon {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 28px; height: 28px; padding: 0; border-radius: 5px;
+      border: 1px solid var(--gray-200); color: var(--gray-500);
+      transition: background .12s, color .12s, border-color .12s;
+    }
+    .btn-icon:hover { background: var(--gray-50); color: var(--gray-700); border-color: var(--gray-300); }
+    .btn-icon.danger:hover { background: var(--red-0); color: var(--red-600); border-color: var(--red-100); }
+
+    /* ─── Stats row ───────────────────────────────────────────────────────── */
+    .stats-row {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px; margin-bottom: 20px;
+    }
+    .stat-card {
+      background: white; border: 1px solid var(--gray-200); border-radius: 10px;
+      padding: 16px 20px; box-shadow: var(--shadow-soft);
+    }
+    .stat-label { font-size: 12px; font-weight: 500; color: var(--gray-500); text-transform: uppercase; letter-spacing: .04em; }
+    .stat-value { font-size: 28px; font-weight: 700; color: var(--gray-800); margin-top: 4px; line-height: 1; }
+    .stat-sub { font-size: 12px; color: var(--gray-400); margin-top: 4px; }
+
+    /* ─── Network cards ───────────────────────────────────────────────────── */
+    .networks-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 12px; margin-bottom: 20px;
+    }
+    .network-card {
+      background: white; border: 1px solid var(--gray-200); border-radius: 10px;
+      padding: 16px 18px; box-shadow: var(--shadow-soft);
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .network-card-header {
+      display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
+    }
+    .network-card-name {
+      font-size: 15px; font-weight: 600; color: var(--gray-800);
+    }
+    .network-card-fqdn {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 12px; color: var(--gray-500); margin-top: 1px;
+    }
+    .network-card-actions { display: flex; gap: 4px; flex-shrink: 0; }
+    .network-card-meta {
+      display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+    }
+    .tag-chip {
+      font-size: 11px; font-weight: 500; color: var(--blue-600);
+      background: var(--blue-0); border: 1px solid var(--blue-100);
+      border-radius: 4px; padding: 1px 7px;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    }
+    .add-network-card {
+      background: white; border: 2px dashed var(--gray-300); border-radius: 10px;
+      padding: 24px 18px; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 8px;
+      cursor: pointer; transition: border-color .15s, background .15s; min-height: 110px;
+    }
+    .add-network-card:hover { border-color: var(--blue-200); background: var(--blue-0); }
+    .add-network-card-icon {
+      width: 32px; height: 32px; background: var(--gray-100); border-radius: 8px;
+      display: flex; align-items: center; justify-content: center; color: var(--gray-500);
+    }
+    .add-network-card:hover .add-network-card-icon { background: var(--blue-100); color: var(--blue-600); }
+    .add-network-card-label { font-size: 13px; font-weight: 500; color: var(--gray-500); }
+    .add-network-card:hover .add-network-card-label { color: var(--blue-600); }
+
+    /* ─── Bridge rule cards (topology) ───────────────────────────────────── */
+    .bridge-rules-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+      gap: 12px; margin-bottom: 20px;
+    }
+    .brc { background: white; border: 1px solid var(--gray-200); border-radius: 10px; box-shadow: var(--shadow-soft); display: flex; flex-direction: column; }
+    .brc-header { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px 8px; }
+    .brc-name { font-size: 14px; font-weight: 600; font-family: "SFMono-Regular", Consolas, monospace; color: var(--blue-600); }
+    .brc-meta { padding: 6px 16px 10px; border-bottom: 1px solid var(--gray-100); display: flex; flex-direction: column; gap: 3px; }
+    .brc-meta-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .brc-meta-arrow { font-size: 10px; color: var(--gray-400); flex-shrink: 0; width: 10px; text-align: center; }
+    .brc-meta-net { font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; color: var(--gray-600); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .brc-meta-ports { font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; font-weight: 600; color: var(--gray-700); flex-shrink: 0; margin-left: auto; padding-left: 8px; }
+    .brc-filter { padding: 8px 16px 4px; }
+    .brc-filter-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--gray-400); margin-bottom: 3px; }
+    .brc-devices { padding: 4px 16px 10px; display: flex; flex-direction: column; gap: 2px; flex: 1; }
+    .brc-dest-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--gray-400); padding-top: 6px; padding-bottom: 2px; }
+    .brc-device-row { display: flex; align-items: center; gap: 5px; min-width: 0; }
+    .brc-device-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+    .brc-device-src { font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; color: var(--gray-700); flex: 0 0 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .brc-device-arr { font-size: 10px; color: var(--gray-300); flex-shrink: 0; }
+    .brc-device-vip { font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; color: var(--blue-500); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .brc-footer { display: flex; align-items: center; gap: 8px; padding: 8px 16px; border-top: 1px solid var(--gray-100); font-size: 12px; color: var(--gray-500); }
+
+    /* ─── Card ────────────────────────────────────────────────────────────── */
+    .card { background: white; border: 1px solid var(--gray-200); border-radius: 10px; box-shadow: var(--shadow-soft); overflow: hidden; }
+    .card-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 20px; border-bottom: 1px solid var(--gray-200);
+    }
+    .card-title { font-size: 14px; font-weight: 600; color: var(--gray-800); }
+    .card-count { font-size: 12px; color: var(--gray-400); font-weight: 500; }
+
+    /* ─── Table ───────────────────────────────────────────────────────────── */
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    thead th {
+      padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: .05em; color: var(--gray-500);
+      background: var(--gray-50); border-bottom: 1px solid var(--gray-200); white-space: nowrap;
+    }
+    thead th.sortable { cursor: pointer; user-select: none; }
+    thead th.sortable:hover { color: var(--gray-700); }
+    thead th.sort-asc::after  { content: " ▲"; font-size: 9px; }
+    thead th.sort-desc::after { content: " ▼"; font-size: 9px; }
+    tbody td { padding: 11px 16px; border-bottom: 1px solid var(--gray-100); vertical-align: middle; }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:hover td { background: var(--gray-50); }
+    .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 12px; }
+
+    /* ─── Badges ──────────────────────────────────────────────────────────── */
+    .badge {
+      display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500;
+      padding: 2px 9px; border-radius: 99px; border: 1px solid; white-space: nowrap;
+    }
+    .badge .dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+    .badge.active { color: var(--green-500); background: var(--green-0); border-color: var(--green-50); }
+    .badge.active .dot { background: var(--green-200); }
+    .badge.pending { color: var(--yellow-500); background: var(--yellow-0); border-color: rgb(245, 214, 165); }
+    .badge.pending .dot { background: var(--yellow-300); }
+    .badge.error { color: var(--red-600); background: var(--red-0); border-color: var(--red-100); }
+    .badge.error .dot { background: var(--red-300); }
+    .badge.neutral { color: var(--gray-600); background: var(--gray-100); border-color: var(--gray-200); }
+    .badge.neutral .dot { background: var(--gray-400); }
+    .badge.src { color: var(--blue-600); background: var(--blue-0); border-color: var(--blue-100); }
+    .badge.dst { color: var(--green-500); background: var(--green-0); border-color: var(--green-50); }
+
+    /* ─── Port chips ──────────────────────────────────────────────────────── */
+    .port-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+    .port-chip {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 11px; color: var(--gray-600); background: var(--gray-100);
+      border: 1px solid var(--gray-200); border-radius: 4px; padding: 1px 6px;
+    }
+
+    /* ─── Empty state ─────────────────────────────────────────────────────── */
+    .empty-state { text-align: center; padding: 48px 24px; color: var(--gray-500); }
+    .empty-state-icon {
+      width: 40px; height: 40px; background: var(--gray-100); border-radius: 10px;
+      display: inline-flex; align-items: center; justify-content: center; margin-bottom: 12px;
+    }
+    .empty-title { font-size: 15px; font-weight: 600; color: var(--gray-700); margin-bottom: 6px; }
+    .empty-sub { font-size: 13px; color: var(--gray-500); }
+
+    /* ─── Log stream ──────────────────────────────────────────────────────── */
+    .log-stream {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 12px; padding: 12px 0; max-height: 300px; overflow-y: auto;
+    }
+    .log-entry { display: flex; align-items: flex-start; gap: 12px; padding: 3px 16px; line-height: 1.5; }
+    .log-entry:hover { background: var(--gray-50); }
+    .log-time { color: var(--gray-400); white-space: nowrap; flex-shrink: 0; }
+    .log-level { font-size: 11px; font-weight: 600; text-transform: uppercase; width: 36px; flex-shrink: 0; }
+    .log-level.info  { color: var(--blue-500); }
+    .log-level.error { color: var(--red-300); }
+    .log-level.warn  { color: var(--yellow-300); }
+    .log-level.debug { color: var(--gray-400); }
+    .log-msg { color: var(--gray-700); word-break: break-word; }
+
+    /* ─── Search ──────────────────────────────────────────────────────────── */
+    .search-wrap { position: relative; }
+    .search-input {
+      width: 260px; padding: 7px 12px 7px 34px; border: 1px solid var(--gray-300);
+      border-radius: 6px; font-size: 13px; font-family: inherit; color: var(--gray-800);
+      background: white; outline: none; transition: border-color .15s;
+    }
+    .search-input:focus { border-color: var(--blue-200); box-shadow: 0 0 0 3px var(--blue-0); }
+    .search-icon {
+      position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+      color: var(--gray-400); pointer-events: none;
+    }
+
+    .uptime-chip { font-size: 12px; color: var(--gray-500); }
+    .bytes-chip { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 12px; color: var(--gray-500); }
+
+    /* ─── Config viewer ───────────────────────────────────────────────────── */
+    .json-viewer {
+      width: 100%; min-height: 300px;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 12px; line-height: 1.6; color: var(--gray-700);
+      background: var(--gray-50); border: 1px solid var(--gray-200);
+      border-radius: 8px; padding: 16px; overflow-x: auto; white-space: pre;
+    }
+
+    /* ─── Modal ───────────────────────────────────────────────────────────── */
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgb(0 0 0 / .4);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 1000; padding: 24px;
+    }
+    .modal-overlay[hidden] { display: none; }
+    .modal-card {
+      background: white; border-radius: 12px; width: 100%; max-width: 480px;
+      box-shadow: var(--shadow-modal); display: flex; flex-direction: column;
+      max-height: calc(100vh - 48px);
+    }
+    .modal-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 20px 24px 16px; border-bottom: 1px solid var(--gray-200);
+      flex-shrink: 0;
+    }
+    .modal-title { font-size: 16px; font-weight: 600; color: var(--gray-800); }
+    .modal-close {
+      width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--gray-200);
+      display: flex; align-items: center; justify-content: center;
+      color: var(--gray-500); font-size: 16px; line-height: 1; cursor: pointer;
+      transition: background .12s;
+    }
+    .modal-close:hover { background: var(--gray-100); color: var(--gray-800); }
+    .modal-body { padding: 20px 24px; display: flex; flex-direction: column; gap: 16px; overflow-y: auto; flex: 1; }
+    .modal-footer {
+      padding: 16px 24px; border-top: 1px solid var(--gray-200);
+      display: flex; justify-content: flex-end; gap: 8px; flex-shrink: 0;
+    }
+
+    /* ─── Forms ───────────────────────────────────────────────────────────── */
+    .form-group { display: flex; flex-direction: column; gap: 5px; }
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .form-label { font-size: 13px; font-weight: 500; color: var(--gray-700); }
+    .form-input, .form-select {
+      padding: 8px 12px; border: 1px solid var(--gray-300); border-radius: 6px;
+      font-size: 13px; font-family: inherit; color: var(--gray-800);
+      background: white; outline: none; transition: border-color .15s;
+      width: 100%;
+    }
+    .form-input:focus, .form-select:focus { border-color: var(--blue-200); box-shadow: 0 0 0 3px var(--blue-0); }
+    .form-input.mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 12px; }
+    .form-hint { font-size: 12px; color: var(--gray-500); }
+    .form-error { font-size: 12px; color: var(--red-600); display: none; }
+    .form-error.visible { display: block; }
+    .form-section-title {
+      font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
+      color: var(--gray-400); padding-bottom: 12px; border-bottom: 1px solid var(--gray-100);
+    }
+
+    /* ─── Destination chip picker ───────────────────────────────────────── */
+    .dest-picker { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; border: 1px solid var(--gray-200); border-radius: 8px; min-height: 40px; align-items: flex-start; align-content: flex-start; }
+    .dest-chip {
+      font-size: 12px; font-weight: 500; padding: 4px 11px; border-radius: 5px;
+      border: 1px solid var(--gray-200); background: var(--gray-50); color: var(--gray-600);
+      cursor: pointer; user-select: none; transition: background .1s, color .1s, border-color .1s;
+    }
+    .dest-chip:hover { background: var(--gray-100); border-color: var(--gray-300); }
+    .dest-chip.selected { background: var(--blue-0); color: var(--blue-600); border-color: var(--blue-100); font-weight: 600; }
+    .dest-chip-empty { font-size: 12px; color: var(--gray-400); font-style: italic; padding: 2px; }
+
+    /* ─── Source picker ──────────────────────────────────────────────────── */
+    .src-picker { border: 1px solid var(--gray-200); border-radius: 8px; overflow: hidden; }
+    .src-picker-tabs { display: flex; border-bottom: 1px solid var(--gray-200); background: var(--gray-50); }
+    .src-tab {
+      flex: 1; padding: 8px 12px; font-size: 12px; font-weight: 500; color: var(--gray-500);
+      border: none; background: none; cursor: pointer; border-bottom: 2px solid transparent;
+      transition: color .12s, border-color .12s;
+    }
+    .src-tab.active { color: var(--blue-600); border-bottom-color: var(--blue-600); background: white; }
+    .src-picker-panel { display: none; padding: 10px; max-height: 220px; overflow-y: auto; }
+    .src-picker-panel.active { display: block; }
+    .tag-row {
+      display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px;
+      cursor: pointer; transition: background .1s;
+    }
+    .tag-row:hover { background: var(--gray-50); }
+    .tag-row input[type=radio] { accent-color: var(--blue-600); flex-shrink: 0; }
+    .tag-row-label { font-size: 12px; font-family: "SFMono-Regular", Consolas, monospace; color: var(--gray-800); }
+    .tag-row-count { font-size: 11px; color: var(--gray-400); margin-left: auto; }
+    .device-search { width: 100%; padding: 6px 10px; border: 1px solid var(--gray-200); border-radius: 6px; font-size: 12px; margin-bottom: 8px; outline: none; }
+    .device-search:focus { border-color: var(--blue-200); box-shadow: 0 0 0 3px var(--blue-0); }
+    .device-row {
+      display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px;
+      cursor: pointer; transition: background .1s;
+    }
+    .device-row:hover { background: var(--gray-50); }
+    .device-row input[type=checkbox] { accent-color: var(--blue-600); flex-shrink: 0; }
+    .device-row-name { font-size: 12px; font-family: "SFMono-Regular", Consolas, monospace; color: var(--gray-800); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .device-row-tags { display: flex; gap: 3px; flex-wrap: wrap; }
+    .device-tag { padding: 1px 6px; border-radius: 99px; font-size: 10px; background: var(--gray-100); color: var(--gray-600); font-family: "SFMono-Regular", Consolas, monospace; }
+    .src-picker-loading { padding: 16px; text-align: center; font-size: 12px; color: var(--gray-400); font-style: italic; }
+    .src-picker-selection { padding: 6px 10px; border-top: 1px solid var(--gray-100); font-size: 12px; color: var(--gray-500); background: var(--gray-50); }
+    .device-dns-expand { display: none; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 3px 8px 6px 28px; }
+    .device-dns-expand.visible { display: flex; }
+    .device-dns-label { font-size: 11px; color: var(--gray-400); white-space: nowrap; flex-shrink: 0; }
+    .dns-disabled-hint { padding: 8px 10px; font-size: 11px; color: var(--gray-400); font-style: italic; }
+    .device-dns-input {
+      padding: 3px 7px; border: 1px solid var(--gray-200); border-radius: 4px;
+      font-size: 11px; font-family: "SFMono-Regular", Consolas, monospace; color: var(--gray-800);
+      background: white; outline: none; width: 160px; transition: border-color .15s;
+    }
+    .device-dns-input.short { width: 90px; }
+    .device-dns-input:focus { border-color: var(--blue-200); box-shadow: 0 0 0 2px var(--blue-0); }
+
+    /* ─── Setup wizard ────────────────────────────────────────────────────── */
+    .wizard-overlay {
+      position: fixed; inset: 0; background: rgb(0 0 0 / .5);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 2000; padding: 24px;
+    }
+    .wizard-overlay[hidden] { display: none; }
+    .wizard-card {
+      background: white; border-radius: 16px; width: 100%; max-width: 520px;
+      box-shadow: var(--shadow-modal); position: relative;
+      display: flex; flex-direction: column; max-height: calc(100vh - 48px);
+    }
+    .wizard-dismiss {
+      position: absolute; top: 12px; right: 12px; z-index: 10;
+      width: 28px; height: 28px; border-radius: 6px;
+      border: 1px solid rgb(255 255 255 / .25);
+      display: flex; align-items: center; justify-content: center;
+      color: rgb(255 255 255 / .6); font-size: 18px; line-height: 1;
+      background: none; cursor: pointer; transition: background .12s, color .12s;
+    }
+    .wizard-dismiss:hover { background: rgb(255 255 255 / .15); color: white; }
+    .wizard-header {
+      background: var(--gray-900); color: white; padding: 28px 32px 24px;
+      flex-shrink: 0; border-radius: 16px 16px 0 0; overflow: hidden;
+    }
+    .wizard-step-indicator {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 16px;
+    }
+    .wizard-step-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: rgb(255 255 255 / .3); transition: background .2s;
+    }
+    .wizard-step-dot.active { background: white; }
+    .wizard-step-dot.done { background: var(--green-200); }
+    .wizard-eyebrow { font-size: 12px; font-weight: 500; color: rgb(255 255 255 / .5); margin-bottom: 6px; }
+    .wizard-title { font-size: 22px; font-weight: 700; color: white; line-height: 1.2; }
+    .wizard-subtitle { font-size: 14px; color: rgb(255 255 255 / .6); margin-top: 6px; }
+    .wizard-body { padding: 24px 32px; display: flex; flex-direction: column; gap: 16px; overflow-y: auto; flex: 1; }
+    .wizard-footer {
+      padding: 16px 32px 24px; display: flex; justify-content: space-between; align-items: center;
+      flex-shrink: 0; border-top: 1px solid var(--gray-200);
+    }
+    .wizard-error {
+      background: var(--red-0); border: 1px solid var(--red-100); color: var(--red-600);
+      border-radius: 6px; padding: 10px 14px; font-size: 13px; display: none;
+    }
+    .wizard-error.visible { display: block; }
+
+    /* ─── Responsive ──────────────────────────────────────────────────────── */
+    @media (max-width: 700px) {
+      .nav-link span { display: none; }
+      .form-row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ─── Header ──────────────────────────────────────────────────────────────── -->
+<div class="header-wrap">
+  <header class="header">
+    <div class="logo-area">
+      <div class="logo-mark">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+          <circle cx="4" cy="9" r="3" fill="white" opacity=".9"/>
+          <circle cx="14" cy="9" r="3" fill="white" opacity=".9"/>
+          <line x1="7" y1="9" x2="11" y2="9" stroke="white" stroke-width="1.5" opacity=".7"/>
+          <line x1="9" y1="7" x2="9" y2="11" stroke="white" stroke-width="1.5" opacity=".5"/>
+        </svg>
+      </div>
+      <span class="logo-name">TailnetLink</span>
+    </div>
+    <nav class="nav">
+      <a class="nav-link active" data-view="networks" onclick="showView('networks')">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/>
+          <path d="M12 8v5M8.5 17.5L12 13l3.5 4.5"/>
+        </svg>
+        <span>Networks</span>
+      </a>
+      <a class="nav-link" data-view="services" onclick="showView('services')">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 16V8a2 2 0 0 0-1-1.73L13 2.27a2 2 0 0 0-2 0L4 6.27A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73L11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+        </svg>
+        <span>Services</span>
+      </a>
+      <a class="nav-link" data-view="connections" onclick="showView('connections')">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 8h1a4 4 0 0 1 0 8h-1"/><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"/>
+          <line x1="6" y1="1" x2="6" y2="4"/><line x1="10" y1="1" x2="10" y2="4"/><line x1="14" y1="1" x2="14" y2="4"/>
+        </svg>
+        <span>Connections</span>
+      </a>
+      <a class="nav-link" data-view="config" onclick="showView('config')">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.07 4.93A10 10 0 0 0 4.93 4.93M4.93 19.07A10 10 0 0 0 19.07 19.07M12 2v2M12 20v2M2 12h2M20 12h2"/>
+        </svg>
+        <span>Config</span>
+      </a>
+    </nav>
+    <div class="header-right">
+      <div class="connection-pill" id="conn-pill">
+        <span class="status-dot gray" id="conn-dot"></span>
+        <span id="conn-text">Connecting…</span>
+      </div>
+    </div>
+  </header>
+</div>
+
+<!-- ─── Page ─────────────────────────────────────────────────────────────────── -->
+<div class="page-wrap">
+
+  <!-- ── Networks ─────────────────────────────────────────────────────────── -->
+  <div class="view active" id="view-networks">
+    <div class="page-header">
+      <div>
+        <div class="page-title">Networks</div>
+        <div class="page-subtitle">Connected tailnets. Uptime: <span id="stat-uptime" class="uptime-chip">—</span></div>
+      </div>
+      <button class="btn btn-primary" onclick="openModal('modal-add-network')">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Add network
+      </button>
+    </div>
+
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-label">Service Bridges</div>
+        <div class="stat-value" id="stat-bridges">—</div>
+        <div class="stat-sub">active</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Active Connections</div>
+        <div class="stat-value" id="stat-conns">—</div>
+        <div class="stat-sub">open TCP sessions</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Data Transferred</div>
+        <div class="stat-value" id="stat-bytes" style="font-size:22px;margin-top:7px">—</div>
+        <div class="stat-sub">total in + out</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Networks</div>
+        <div class="stat-value" id="stat-nets">—</div>
+        <div class="stat-sub">configured tailnets</div>
+      </div>
+    </div>
+
+    <!-- Configured network cards -->
+    <div class="networks-grid" id="networks-grid">
+      <!-- populated by JS -->
+    </div>
+
+    <!-- Bridge rules topology -->
+    <div style="margin-bottom:4px">
+      <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--gray-400);margin-bottom:12px">Bridges</div>
+      <div class="bridge-rules-grid" id="bridge-rules-grid"></div>
+    </div>
+
+    <!-- Activity -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Activity</span>
+        <span class="card-count" id="log-count">0 events</span>
+      </div>
+      <div class="log-stream" id="log-stream">
+        <div class="empty-state" style="padding:20px"><div class="empty-sub">No events yet</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Services ──────────────────────────────────────────────────────────── -->
+  <div class="view" id="view-services">
+    <div class="page-header">
+      <div>
+        <div class="page-title">Services</div>
+        <div class="page-subtitle">Bridged services exposed on the destination tailnet.</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <div class="search-wrap">
+          <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+          </svg>
+          <input class="search-input" id="service-search" placeholder="Search services…" oninput="filterServices()">
+        </div>
+        <button class="btn btn-primary" onclick="openModal('modal-add-bridge')">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add bridge rule
+        </button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Advertised services</span>
+        <span class="card-count" id="services-count">0 services</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="sortable" onclick="setSort('services','service_name')">Service</th>
+              <th class="sortable" onclick="setSort('services','route')">Route</th>
+              <th class="sortable" onclick="setSort('services','source_host')">Source host</th>
+              <th class="sortable" onclick="setSort('services','source_ip')">Source IP</th>
+              <th class="sortable" onclick="setSort('services','dest_vip')">Endpoint VIP</th>
+              <th>Ports</th>
+              <th class="sortable" onclick="setSort('services','status')">Status</th>
+              <th class="sortable" onclick="setSort('services','conn_count')">Connections</th>
+              <th class="sortable" onclick="setSort('services','traffic')">Traffic</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="services-tbody">
+            <tr><td colspan="10"><div class="empty-state">
+              <div class="empty-state-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 0 0-1-1.73L13 2.27a2 2 0 0 0-2 0L4 6.27A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73L11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+              </div>
+              <div class="empty-title">No services bridged yet</div>
+              <div class="empty-sub">Add a bridge rule to get started.</div>
+            </div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Bridge rules config -->
+    <div style="margin-top:20px">
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Bridge rules</span>
+          <span class="card-count" id="rules-count">0 rules</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="sortable" onclick="setSort('rules','name')">Rule name</th>
+                <th class="sortable" onclick="setSort('rules','source_tailnet')">↑ Source tailnet</th>
+                <th class="sortable" onclick="setSort('rules','dest_tailnet')">↓ Dest tailnet</th>
+                <th>Device filter</th>
+                <th>Ports</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="rules-tbody">
+              <tr><td colspan="6"><div class="empty-state" style="padding:24px">
+                <div class="empty-sub">No bridge rules configured.</div>
+              </div></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Connections ───────────────────────────────────────────────────────── -->
+  <div class="view" id="view-connections">
+    <div class="page-header">
+      <div>
+        <div class="page-title">Connections</div>
+        <div class="page-subtitle">Active and recent TCP sessions through bridges (last 5 min).</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Connections</span>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span class="card-count" id="conns-count">0 connections</span>
+          <button class="btn btn-secondary btn-sm" id="btn-conns-filter" onclick="toggleConnsFilter()">Show history</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th></th>
+              <th class="sortable" onclick="setSort('conns','src')">Src</th>
+              <th class="sortable" onclick="setSort('conns','dst')">Dst</th>
+              <th class="sortable" onclick="setSort('conns','bytes_in')">In</th>
+              <th class="sortable" onclick="setSort('conns','bytes_out')">Out</th>
+              <th class="sortable" onclick="setSort('conns','duration')">Duration</th>
+            </tr>
+          </thead>
+          <tbody id="conns-tbody">
+            <tr><td colspan="6"><div class="empty-state">
+              <div class="empty-title">No recent connections</div>
+              <div class="empty-sub">Connections appear here when clients connect to bridged services.</div>
+            </div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Config ────────────────────────────────────────────────────────────── -->
+  <div class="view" id="view-config">
+    <div class="page-header">
+      <div>
+        <div class="page-title">Configuration</div>
+        <div class="page-subtitle">Live config stored in <code style="font-size:12px;background:var(--gray-200);padding:1px 5px;border-radius:3px">tailnetlink.json</code></div>
+      </div>
+    </div>
+    <div class="card" style="overflow:visible">
+      <div class="card-header">
+        <span class="card-title">tailnetlink.json</span>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-secondary btn-sm" id="btn-toggle-secrets" onclick="toggleSecrets()">Show secrets</button>
+          <button class="btn btn-secondary btn-sm" onclick="copyConfig()">Copy JSON</button>
+        </div>
+      </div>
+      <div style="padding:16px">
+        <div class="json-viewer" id="json-viewer"></div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /page-wrap -->
+
+<!-- ─── Modals ───────────────────────────────────────────────────────────────── -->
+
+<!-- Add Network -->
+<div class="modal-overlay" id="modal-add-network" hidden>
+  <div class="modal-card">
+    <div class="modal-header">
+      <div class="modal-title">Add network</div>
+      <button class="modal-close" onclick="closeModal('modal-add-network')">×</button>
+    </div>
+    <form onsubmit="submitAddNetwork(event)">
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">Network alias</label>
+          <input class="form-input" name="name" placeholder="source" required autocomplete="off">
+          <div class="form-hint">Short name used to reference this tailnet in bridge rules (e.g. source, prod).</div>
+        </div>
+        <div class="form-section-title" style="margin-top:4px">OAuth credentials</div>
+        <div class="form-hint" style="margin-top:-8px">Create an OAuth client at admin.tailscale.com/settings/oauth with scopes: <code>devices:read</code>, <code>keys:write</code>, <code>network-locks:read</code>, <code>vip-services:write</code>.</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Client ID</label>
+            <input class="form-input mono" name="client_id" required autocomplete="off" spellcheck="false" onblur="tryDetectTailnet(this.closest('form'), 'modal-tailnet-field')">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Client secret</label>
+            <input class="form-input mono" name="client_secret" type="password" required autocomplete="off" onblur="tryDetectTailnet(this.closest('form'), 'modal-tailnet-field')">
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Tailnet domain <span style="font-weight:400;color:var(--gray-400)">(auto-detected)</span></label>
+          <input class="form-input mono" name="tailnet" id="modal-tailnet-field" placeholder="detecting after credentials…" autocomplete="off">
+          <div class="form-hint">Auto-filled from your credentials. Leave blank to use the default tailnet.</div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Tags (comma-separated)</label>
+          <input class="form-input mono" name="tags" placeholder="tag:tailnetlink" autocomplete="off">
+          <div class="form-hint">Tags applied to the ephemeral tsnet node. Must exist in your ACLs.</div>
+        </div>
+        <div class="wizard-error" id="add-network-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-add-network')">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="add-network-submit">Add network</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Add / Edit Bridge Rule -->
+<div class="modal-overlay" id="modal-add-bridge" hidden>
+  <div class="modal-card">
+    <div class="modal-header">
+      <div class="modal-title" id="bridge-modal-title">Add bridge rule</div>
+      <button class="modal-close" onclick="closeModal('modal-add-bridge')">×</button>
+    </div>
+    <form onsubmit="submitAddBridge(event)">
+      <input type="hidden" id="bridge-edit-name">
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">Rule name</label>
+          <input class="form-input" id="bridge-name-input" placeholder="api-servers" required autocomplete="off">
+          <div class="form-hint">A unique identifier for this bridge rule.</div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Source network</label>
+            <select class="form-select" required id="bridge-source-select" onchange="loadSourcePicker('bridge')">
+              <option value="">Select…</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Destination network(s)</label>
+            <div class="dest-picker" id="bridge-dest-picker"><span class="dest-chip-empty">No networks configured</span></div>
+            <div class="form-hint">Click to toggle. Select one or more destinations.</div>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Source — select by tag or specific devices</label>
+          <div class="src-picker" id="bridge-src-picker">
+            <div class="src-picker-loading">Select a source network first</div>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Ports (comma-separated)</label>
+          <input class="form-input mono" id="bridge-ports-input" placeholder="8080, 8443" required autocomplete="off">
+          <div class="form-hint">TCP ports to forward from source devices.</div>
+        </div>
+        <div class="wizard-error" id="add-bridge-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-add-bridge')">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="bridge-modal-submit">Add bridge rule</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ─── Setup Wizard ──────────────────────────────────────────────────────────── -->
+<div class="wizard-overlay" id="wizard-overlay" hidden>
+  <div class="wizard-card">
+    <button class="wizard-dismiss" onclick="document.getElementById('wizard-overlay').hidden=true" title="Dismiss">×</button>
+    <div class="wizard-header">
+      <div class="wizard-step-indicator">
+        <div class="wizard-step-dot active" id="wdot-0"></div>
+        <div class="wizard-step-dot" id="wdot-1"></div>
+        <div class="wizard-step-dot" id="wdot-2"></div>
+      </div>
+      <div class="wizard-eyebrow" id="wizard-eyebrow">Step 1 of 3</div>
+      <div class="wizard-title" id="wizard-title">Add your source network</div>
+      <div class="wizard-subtitle" id="wizard-subtitle">Connect the tailnet where your services live.</div>
+    </div>
+
+    <!-- Step 0: source tailnet -->
+    <div id="wstep-0">
+      <form onsubmit="wizardNext(event, 0)">
+        <div class="wizard-body">
+          <div class="form-group">
+            <label class="form-label">Network alias</label>
+            <input class="form-input" id="w0-name" placeholder="source" value="source" required autocomplete="off">
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">OAuth client ID</label>
+              <input class="form-input mono" id="w0-cid" required autocomplete="off" spellcheck="false" onblur="tryDetectTailnet(null, 'w0-tailnet', 'w0-cid', 'w0-csec')">
+            </div>
+            <div class="form-group">
+              <label class="form-label">OAuth client secret</label>
+              <input class="form-input mono" id="w0-csec" type="password" required autocomplete="off" onblur="tryDetectTailnet(null, 'w0-tailnet', 'w0-cid', 'w0-csec')">
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Tailnet domain <span style="font-weight:400;color:var(--gray-400)">(auto-detected)</span></label>
+            <input class="form-input mono" id="w0-tailnet" placeholder="detecting after credentials…" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Tags</label>
+            <input class="form-input mono" id="w0-tags" placeholder="tag:tailnetlink" autocomplete="off">
+          </div>
+          <div class="wizard-error" id="w0-error"></div>
+        </div>
+        <div class="wizard-footer">
+          <div></div>
+          <button type="submit" class="btn btn-primary">Continue →</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Step 1: dest tailnet -->
+    <div id="wstep-1" hidden>
+      <form onsubmit="wizardNext(event, 1)">
+        <div class="wizard-body">
+          <div class="form-group">
+            <label class="form-label">Network alias</label>
+            <input class="form-input" id="w1-name" placeholder="dest" value="dest" required autocomplete="off">
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">OAuth client ID</label>
+              <input class="form-input mono" id="w1-cid" required autocomplete="off" spellcheck="false" onblur="tryDetectTailnet(null, 'w1-tailnet', 'w1-cid', 'w1-csec')">
+            </div>
+            <div class="form-group">
+              <label class="form-label">OAuth client secret</label>
+              <input class="form-input mono" id="w1-csec" type="password" required autocomplete="off" onblur="tryDetectTailnet(null, 'w1-tailnet', 'w1-cid', 'w1-csec')">
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Tailnet domain <span style="font-weight:400;color:var(--gray-400)">(auto-detected)</span></label>
+            <input class="form-input mono" id="w1-tailnet" placeholder="detecting after credentials…" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Tags</label>
+            <input class="form-input mono" id="w1-tags" placeholder="tag:tailnetlink" autocomplete="off">
+          </div>
+          <div class="wizard-error" id="w1-error"></div>
+        </div>
+        <div class="wizard-footer">
+          <button type="button" class="btn btn-secondary" onclick="wizardBack(1)">← Back</button>
+          <button type="submit" class="btn btn-primary">Continue →</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Step 2: bridge rule -->
+    <div id="wstep-2" hidden>
+      <form onsubmit="wizardNext(event, 2)">
+        <div class="wizard-body">
+          <div class="form-group">
+            <label class="form-label">Rule name</label>
+            <input class="form-input" id="w2-name" placeholder="my-services" required autocomplete="off">
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Source network</label>
+              <select class="form-select" id="w2-src" required onchange="loadSourcePicker('w2')"></select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Destination network(s)</label>
+              <div class="dest-picker" id="w2-dest-picker"><span class="dest-chip-empty">No networks configured</span></div>
+              <div class="form-hint">Click to toggle. Select one or more destinations.</div>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Source — select by tag or specific devices</label>
+            <div class="src-picker" id="w2-src-picker">
+              <div class="src-picker-loading">Select a source network first</div>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Ports</label>
+            <input class="form-input mono" id="w2-ports" placeholder="8080, 443" required autocomplete="off">
+          </div>
+          <div class="wizard-error" id="w2-error"></div>
+        </div>
+        <div class="wizard-footer">
+          <button type="button" class="btn btn-secondary" onclick="wizardBack(2)">← Back</button>
+          <button type="submit" class="btn btn-primary">Finish setup</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- ─── JavaScript ────────────────────────────────────────────────────────────── -->
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+let state = { status: null, bridges: [], connections: [], logs: [], config: { tailnets: {}, bridges: [] } };
+let serviceFilter = "";
+
+// ── Sorting ───────────────────────────────────────────────────────────────────
+const sortState = { services: { col: null, dir: 1 }, rules: { col: null, dir: 1 }, conns: { col: null, dir: 1 } };
+
+function setSort(table, col) {
+  const s = sortState[table];
+  if (s.col === col) { s.dir *= -1; } else { s.col = col; s.dir = 1; }
+  updateSortHeaders(table);
+  if (table === 'services') renderBridges();
+  else if (table === 'rules') renderRules();
+  else if (table === 'conns') renderConns();
+}
+
+function updateSortHeaders(table) {
+  const s = sortState[table];
+  const thMap = { services: 'services-tbody', rules: 'rules-tbody', conns: 'conns-tbody' };
+  const tbody = document.getElementById(thMap[table]);
+  if (!tbody) return;
+  const ths = tbody.closest('table').querySelectorAll('thead th.sortable');
+  ths.forEach(th => {
+    th.classList.remove('sort-asc', 'sort-desc');
+    const col = th.getAttribute('onclick').match(/setSort\('[^']+','([^']+)'\)/)?.[1];
+    if (col === s.col) th.classList.add(s.dir === 1 ? 'sort-asc' : 'sort-desc');
+  });
+}
+
+function sortArr(arr, col, dir, keyFn) {
+  if (!col) return arr;
+  return [...arr].sort((a, b) => {
+    const av = keyFn(a, col), bv = keyFn(b, col);
+    if (av < bv) return -dir;
+    if (av > bv) return dir;
+    return 0;
+  });
+}
+
+// ── Navigation ────────────────────────────────────────────────────────────────
+function showView(name) {
+  document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
+  document.querySelectorAll(".nav-link").forEach(l => l.classList.remove("active"));
+  document.getElementById("view-" + name).classList.add("active");
+  document.querySelector('[data-view="' + name + '"]').classList.add("active");
+}
+
+// ── Modal ─────────────────────────────────────────────────────────────────────
+function openModal(id) {
+  if (id === 'modal-add-bridge') openAddBridgeModal();
+  else document.getElementById(id).hidden = false;
+}
+function closeModal(id) {
+  document.getElementById(id).hidden = true;
+  const err = document.querySelector('#' + id + ' .wizard-error');
+  if (err) { err.textContent = ''; err.classList.remove('visible'); }
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape') {
+  document.querySelectorAll('.modal-overlay:not([hidden])').forEach(m => m.hidden = true);
+}});
+
+function openAddBridgeModal() {
+  document.getElementById('bridge-modal-title').textContent = 'Add bridge rule';
+  document.getElementById('bridge-modal-submit').textContent = 'Add bridge rule';
+  document.getElementById('bridge-edit-name').value = '';
+  document.getElementById('bridge-name-input').value = '';
+  document.getElementById('bridge-name-input').disabled = false;
+  document.getElementById('bridge-ports-input').value = '';
+  document.getElementById('bridge-src-picker').innerHTML = '<div class="src-picker-loading">Select a source network first</div>';
+  populateBridgeSelects();
+  document.getElementById('modal-add-bridge').hidden = false;
+}
+
+function openEditBridgeModal(ruleName) {
+  const rule = (state.config.bridges || []).find(b => b.name === ruleName);
+  if (!rule) return;
+  document.getElementById('bridge-modal-title').textContent = 'Edit bridge rule';
+  document.getElementById('bridge-modal-submit').textContent = 'Save changes';
+  document.getElementById('bridge-edit-name').value = rule.name;
+  document.getElementById('bridge-name-input').value = rule.name;
+  document.getElementById('bridge-name-input').disabled = true;
+  document.getElementById('bridge-ports-input').value = (rule.ports || []).join(', ');
+  populateBridgeSelects(rule.source_tailnet, rule.dest_tailnets || []);
+  document.getElementById('modal-add-bridge').hidden = false;
+  // Load picker then restore previous selection
+  loadSourcePicker('bridge').then(() => {
+    const ps = pickerState['bridge'];
+    if (!ps) return;
+    if (rule.source_services && rule.source_services.length > 0) {
+      ps.tab = 'service';
+      rule.source_services.forEach(spec => ps.selServices.set(spec.name, { dns: spec.dns_name || '', short: spec.short_name || '' }));
+    } else if (rule.source_devices && rule.source_devices.length > 0) {
+      ps.tab = 'device';
+      rule.source_devices.forEach(spec => ps.selDevices.set(spec.fqdn, { dns: spec.dns_name || '', short: spec.short_name || '' }));
+    } else if (rule.source_tag) {
+      ps.tab = 'tag';
+      ps.selTag = rule.source_tag;
+    }
+    renderSourcePicker('bridge');
+  });
+}
+
+// ── Source picker (shared between modal and wizard) ───────────────────────────
+// prefix: 'bridge' (modal) or 'w2' (wizard)
+const pickerState = {}; // keyed by prefix: { devices: [], services: [], tab: 'tag'|'device'|'service', selTag: '', selDevices: Set, selServices: Set }
+
+async function loadSourcePicker(prefix) {
+  const srcSelect = document.getElementById(prefix === 'bridge' ? 'bridge-source-select' : 'w2-src');
+  const container = document.getElementById(prefix + '-src-picker');
+  const tailnet   = srcSelect.value;
+  if (!tailnet) { container.innerHTML = '<div class="src-picker-loading">Select a source network first</div>'; return; }
+
+  pickerState[prefix] = { devices: [], services: [], tab: 'tag', selTag: '', selDevices: new Map(), selServices: new Map() };
+  // selDevices: Map<fqdn, {dns, short}>   selServices: Map<name, {dns, short}>
+  container.innerHTML = '<div class="src-picker-loading">Loading…</div>';
+
+  try {
+    const [devRes, svcRes] = await Promise.all([
+      fetch(`/api/tailnets/${encodeURIComponent(tailnet)}/devices`),
+      fetch(`/api/tailnets/${encodeURIComponent(tailnet)}/services`),
+    ]);
+    if (!devRes.ok) throw new Error(await devRes.text());
+    pickerState[prefix].devices  = (await devRes.json()) || [];
+    pickerState[prefix].services = svcRes.ok ? ((await svcRes.json()) || []) : [];
+    renderSourcePicker(prefix);
+  } catch(err) {
+    container.innerHTML = `<div class="src-picker-loading">Failed to load: ${esc(err.message)}</div>`;
+  }
+}
+
+function renderSourcePicker(prefix) {
+  const ps  = pickerState[prefix];
+  const container = document.getElementById(prefix + '-src-picker');
+  const devices   = ps.devices;
+  const services  = ps.services;
+
+  // Build tag → count map (from devices)
+  const tagCount = {};
+  devices.forEach(d => (d.tags || []).forEach(t => { tagCount[t] = (tagCount[t]||0)+1; }));
+  const tags = Object.keys(tagCount).sort();
+
+  // Tabs
+  const tagTab    = ps.tab === 'tag'     ? ' active' : '';
+  const deviceTab = ps.tab === 'device'  ? ' active' : '';
+  const serviceTab = ps.tab === 'service' ? ' active' : '';
+
+  // Tag panel content
+  const tagPanel = tags.length === 0
+    ? '<div class="src-picker-loading">No tagged devices in this tailnet</div>'
+    : tags.map(t => `
+      <label class="tag-row">
+        <input type="radio" name="${prefix}-tag-radio" value="${esc(t)}" ${ps.selTag===t?'checked':''}
+          onchange="pickerSelectTag('${prefix}','${esc(t)}')">
+        <span class="tag-row-label">${esc(t)}</span>
+        <span class="tag-row-count">${tagCount[t]} device${tagCount[t]!==1?'s':''}</span>
+      </label>`).join('');
+
+  // Device panel content (with search filter)
+  const devRows = devices.map(d => {
+    const checked = ps.selDevices.has(d.name);
+    const entry = checked ? ps.selDevices.get(d.name) : null;
+    const dnsVal = entry ? entry.dns : '';
+    const shortVal = entry ? entry.short : '';
+    const tagChips = (d.tags||[]).map(t=>`<span class="device-tag">${esc(t)}</span>`).join('');
+    return `<label class="device-row" data-fqdn="${esc(d.name)}">
+      <input type="checkbox" value="${esc(d.name)}" ${checked?'checked':''}
+        onchange="pickerToggleDevice('${prefix}',this.value,this.checked,'${esc(d.name)}')">
+      <span class="device-row-name" title="${esc(d.name)}">${esc(d.hostname||d.name)}</span>
+      <span class="device-row-tags">${tagChips}</span>
+    </label>
+    <div class="device-dns-expand${checked?' visible':''}" data-fqdn="${esc(d.name)}">
+      <span class="device-dns-label" style="color:var(--green-500)" title="Always configured">${esc(d.name)}</span>
+      <span class="device-dns-label">+</span>
+      <input class="device-dns-input" placeholder="custom hostname (optional)" value="${esc(dnsVal)}"
+        oninput="pickerSetHostname('${prefix}','${esc(d.name)}','dns',this.value)">
+      <span class="device-dns-label">Short</span>
+      <input class="device-dns-input short" placeholder="optional" value="${esc(shortVal)}"
+        oninput="pickerSetHostname('${prefix}','${esc(d.name)}','short',this.value)">
+    </div>`;
+  }).join('');
+
+  // VIP Services panel content
+  const svcRows = services.map(s => {
+    const sChecked = ps.selServices.has(s.name);
+    const sEntry = sChecked ? ps.selServices.get(s.name) : null;
+    const sDnsVal = sEntry ? sEntry.dns : '';
+    const sShortVal = sEntry ? sEntry.short : '';
+    const addr = (s.addrs||[])[0] || '—';
+    const ports = (s.ports||[]).slice(0, 3).join(', ');
+    return `<label class="device-row" data-fqdn="${esc(s.name)}">
+      <input type="checkbox" value="${esc(s.name)}" ${sChecked?'checked':''}
+        onchange="pickerToggleService('${prefix}',this.value,this.checked,'${esc(s.name)}')">
+      <span class="device-row-name" title="${esc(s.name)}">${esc(s.name)}</span>
+      <span style="font-size:11px;color:var(--gray-400);font-family:monospace;flex-shrink:0">${esc(addr)}${ports ? ' · ' + esc(ports) : ''}</span>
+    </label>
+    <div class="device-dns-expand${sChecked?' visible':''}" data-fqdn="${esc(s.name)}">
+      <span class="device-dns-label" style="color:var(--green-500)" title="Always configured">${esc(s.name)}</span>
+      <span class="device-dns-label">+</span>
+      <input class="device-dns-input" placeholder="custom hostname (optional)" value="${esc(sDnsVal)}"
+        oninput="pickerSetHostname('${prefix}','${esc(s.name)}','dns',this.value)">
+      <span class="device-dns-label">Short</span>
+      <input class="device-dns-input short" placeholder="optional" value="${esc(sShortVal)}"
+        oninput="pickerSetHostname('${prefix}','${esc(s.name)}','short',this.value)">
+    </div>`;
+  }).join('');
+
+  // Selection summary
+  let summary = '';
+  if (ps.tab === 'tag' && ps.selTag)
+    summary = `Tag: <strong>${esc(ps.selTag)}</strong> (${tagCount[ps.selTag]||0} devices)`;
+  else if (ps.tab === 'device' && ps.selDevices.size > 0)
+    summary = `<strong>${ps.selDevices.size}</strong> device${ps.selDevices.size!==1?'s':''} selected`;
+  else if (ps.tab === 'service' && ps.selServices.size > 0)
+    summary = `<strong>${ps.selServices.size}</strong> service${ps.selServices.size!==1?'s':''} selected`;
+  else
+    summary = 'Nothing selected yet';
+
+  const svcTabLabel = 'Services';
+  const tagDnsHint = `<div class="dns-disabled-hint">Hostnames can't be pre-assigned to tag-discovered machines — switch to Machines or Services to use split DNS.</div>`;
+  const svcPanelContent = svcRows || `<div class="src-picker-loading" style="font-size:11px;line-height:1.6">No services found in this tailnet.</div>`;
+
+  container.innerHTML = `
+    <div class="src-picker-tabs">
+      <button type="button" class="src-tab${tagTab}"     onclick="pickerSetTab('${prefix}','tag')">By tag</button>
+      <button type="button" class="src-tab${deviceTab}"  onclick="pickerSetTab('${prefix}','device')">Machines</button>
+      <button type="button" class="src-tab${serviceTab}" onclick="pickerSetTab('${prefix}','service')">${svcTabLabel}</button>
+    </div>
+    <div class="src-picker-panel${tagTab}" id="${prefix}-tab-tag">${tagPanel}${tagDnsHint}</div>
+    <div class="src-picker-panel${deviceTab}" id="${prefix}-tab-device">
+      <input class="device-search" placeholder="Search machines…" oninput="pickerFilter('${prefix}',this.value)">
+      <div id="${prefix}-device-list">${devRows || '<div class="src-picker-loading">No machines found</div>'}</div>
+    </div>
+    <div class="src-picker-panel${serviceTab}" id="${prefix}-tab-service">${svcPanelContent}</div>
+    <div class="src-picker-selection">${summary}</div>`;
+}
+
+function pickerSetTab(prefix, tab) {
+  pickerState[prefix].tab = tab;
+  renderSourcePicker(prefix);
+}
+
+function pickerSelectTag(prefix, tag) {
+  pickerState[prefix].selTag = tag;
+  // Update summary without full re-render
+  const ps = pickerState[prefix];
+  const tagCount = {};
+  ps.devices.forEach(d => (d.tags||[]).forEach(t => { tagCount[t] = (tagCount[t]||0)+1; }));
+  const sel = document.querySelector(`#${prefix}-src-picker .src-picker-selection`);
+  if (sel) sel.innerHTML = `Tag: <strong>${esc(tag)}</strong> (${tagCount[tag]||0} devices)`;
+}
+
+function pickerToggleDevice(prefix, fqdn, checked) {
+  const ps = pickerState[prefix];
+  if (checked) {
+    ps.selDevices.set(fqdn, { dns: '', short: '' });
+  } else {
+    ps.selDevices.delete(fqdn);
+  }
+  const expand = document.querySelector(`#${prefix}-src-picker .device-dns-expand[data-fqdn="${CSS.escape(fqdn)}"]`);
+  if (expand) expand.classList.toggle('visible', checked);
+  const sel = document.querySelector(`#${prefix}-src-picker .src-picker-selection`);
+  if (sel) sel.innerHTML = ps.selDevices.size > 0
+    ? `<strong>${ps.selDevices.size}</strong> device${ps.selDevices.size!==1?'s':''} selected`
+    : 'Nothing selected yet';
+}
+
+function pickerSetHostname(prefix, key, field, value) {
+  const ps = pickerState[prefix];
+  const map = ps.selDevices.has(key) ? ps.selDevices : ps.selServices.has(key) ? ps.selServices : null;
+  if (!map) return;
+  const entry = map.get(key);
+  map.set(key, { ...entry, [field]: value });
+}
+
+function pickerToggleService(prefix, name, checked) {
+  const ps = pickerState[prefix];
+  if (checked) {
+    ps.selServices.set(name, { dns: '', short: '' });
+  } else {
+    ps.selServices.delete(name);
+  }
+  const expand = document.querySelector(`#${prefix}-src-picker .device-dns-expand[data-fqdn="${CSS.escape(name)}"]`);
+  if (expand) expand.classList.toggle('visible', checked);
+  const sel = document.querySelector(`#${prefix}-src-picker .src-picker-selection`);
+  if (sel) sel.innerHTML = ps.selServices.size > 0
+    ? `<strong>${ps.selServices.size}</strong> service${ps.selServices.size!==1?'s':''} selected`
+    : 'Nothing selected yet';
+}
+
+function pickerFilter(prefix, q) {
+  const lower = q.toLowerCase();
+  document.querySelectorAll(`#${prefix}-device-list .device-row`).forEach(row => {
+    const fqdn = row.dataset.fqdn || '';
+    row.style.display = fqdn.toLowerCase().includes(lower) ? '' : 'none';
+  });
+}
+
+function getPickerSelection(prefix) {
+  const ps = pickerState[prefix];
+  if (!ps) return {};
+  if (ps.tab === 'service' && ps.selServices.size > 0) {
+    const source_services = [...ps.selServices.entries()].map(([name, e]) => {
+      const spec = { name };
+      if (e.dns)   spec.dns_name   = e.dns;
+      if (e.short) spec.short_name = e.short;
+      return spec;
+    });
+    return { source_services, source_devices: [], source_tag: '' };
+  }
+  if (ps.tab === 'device' && ps.selDevices.size > 0) {
+    const source_devices = [...ps.selDevices.entries()].map(([fqdn, e]) => {
+      const spec = { fqdn };
+      if (e.dns)   spec.dns_name   = e.dns;
+      if (e.short) spec.short_name = e.short;
+      return spec;
+    });
+    return { source_devices, source_services: [], source_tag: '' };
+  }
+  return { source_tag: ps.selTag || '', source_devices: [], source_services: [] };
+}
+
+
+
+// ── Destination chip picker ───────────────────────────────────────────────────
+const destPickerSel = { bridge: new Set(), w2: new Set() };
+
+function renderDestPicker(prefix) {
+  const el = document.getElementById(prefix === 'bridge' ? 'bridge-dest-picker' : 'w2-dest-picker');
+  if (!el) return;
+  const names = Object.keys(state.config.tailnets || {});
+  if (names.length === 0) {
+    el.innerHTML = '<span class="dest-chip-empty">No networks configured</span>';
+    return;
+  }
+  el.innerHTML = names.map(n => {
+    const cls = destPickerSel[prefix].has(n) ? ' selected' : '';
+    return `<span class="dest-chip${cls}" onclick="toggleDest('${esc(n)}','${prefix}')">${esc(n)}</span>`;
+  }).join('');
+}
+
+function toggleDest(name, prefix) {
+  if (destPickerSel[prefix].has(name)) destPickerSel[prefix].delete(name);
+  else destPickerSel[prefix].add(name);
+  renderDestPicker(prefix);
+}
+
+function getSelectedDests(prefix) {
+  return Array.from(destPickerSel[prefix]);
+}
+
+function populateBridgeSelects(preselectedSrc, preselectedDsts) {
+  const names = Object.keys(state.config.tailnets || {});
+  document.getElementById('bridge-source-select').innerHTML =
+    '<option value="">Select…</option>' + names.map(n =>
+      `<option value="${esc(n)}"${n===preselectedSrc?' selected':''}>${esc(n)}</option>`
+    ).join('');
+  destPickerSel.bridge = new Set(preselectedDsts || []);
+  renderDestPicker('bridge');
+}
+
+// ── SSE ───────────────────────────────────────────────────────────────────────
+let sseConnected = false;
+
+function connect() {
+  const dot  = document.getElementById("conn-dot");
+  const text = document.getElementById("conn-text");
+  const es = new EventSource("/api/events");
+
+  es.onopen = () => { sseConnected = true; dot.className = "status-dot green"; text.textContent = "Connected"; };
+
+  es.addEventListener("init", e => {
+    const data = JSON.parse(e.data);
+    state.status      = data.status;
+    state.bridges     = data.bridges || [];
+    state.connections = data.connections || [];
+    state.logs        = data.logs || [];
+    if (data.config) {
+      // data.config is already a parsed object (json.RawMessage embeds inline)
+      state.config = data.config;
+    }
+    renderAll();
+    checkFirstRun();
+  });
+
+  es.addEventListener("tailnet_updated", e => {
+    const t = JSON.parse(e.data);
+    if (!state.status) return;
+    if (t === null) {
+      // a tailnet was removed — refresh status
+      fetch('/api/status').then(r=>r.json()).then(s=>{ state.status=s; renderNetworks(); updateStats(); });
+      return;
+    }
+    state.status.tailnets = (state.status.tailnets||[]).filter(x => x.role !== t.role);
+    state.status.tailnets.push(t);
+    renderNetworks(); renderTopology(); updateStats();
+  });
+
+  es.addEventListener("bridge_created", e => {
+    const b = JSON.parse(e.data);
+    state.bridges = state.bridges.filter(x => x.id !== b.id);
+    state.bridges.push(b);
+    renderBridges(); renderTopology(); updateStats();
+  });
+
+  es.addEventListener("bridge_updated", e => {
+    const b = JSON.parse(e.data);
+    const idx = state.bridges.findIndex(x => x.id === b.id);
+    if (idx >= 0) state.bridges[idx] = b; else state.bridges.push(b);
+    renderBridges(); renderTopology(); updateStats();
+  });
+
+  es.addEventListener("bridge_deleted", e => {
+    const id = JSON.parse(e.data);
+    state.bridges = state.bridges.filter(x => x.id !== id);
+    renderBridges(); renderTopology(); updateStats();
+  });
+
+  es.addEventListener("conn_opened", e => {
+    const c = JSON.parse(e.data);
+    state.connections = state.connections.filter(x => x.id !== c.id);
+    state.connections.push(c);
+    renderConns(); updateStats();
+  });
+
+  es.addEventListener("conn_closed", e => {
+    // Full ConnEntry with closed_at set — update in-place, or add if not seen yet.
+    const c = JSON.parse(e.data);
+    const idx = state.connections.findIndex(x => x.id === c.id);
+    if (idx >= 0) state.connections[idx] = c; else state.connections.push(c);
+    renderConns(); updateStats();
+  });
+
+  es.addEventListener("log", e => {
+    const entry = JSON.parse(e.data);
+    state.logs.unshift(entry);
+    if (state.logs.length > 200) state.logs = state.logs.slice(0, 200);
+    renderLogs();
+  });
+
+  es.onerror = () => {
+    sseConnected = false;
+    dot.className = "status-dot red"; text.textContent = "Disconnected";
+    es.close(); setTimeout(connect, 3000);
+  };
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+function renderAll() {
+  updateStats(); renderNetworks(); renderTopology();
+  renderBridges(); renderRules(); renderConns(); renderLogs(); renderConfig();
+}
+
+function checkFirstRun() {
+  const tailnetCount = Object.keys(state.config.tailnets || {}).length;
+  const bridgeCount = (state.config.bridges || []).length;
+
+  // Setup is complete once at least one bridge rule exists
+  if (bridgeCount > 0) {
+    document.getElementById('wizard-overlay').hidden = true;
+    return;
+  }
+
+  // Determine which step to start on
+  let startStep = 0;
+  if (tailnetCount >= 2) {
+    startStep = 2;
+  } else if (tailnetCount === 1) {
+    startStep = 1;
+  }
+
+  document.getElementById('wizard-overlay').hidden = false;
+  for (let i = 0; i < 3; i++) {
+    document.getElementById('wstep-' + i).hidden = (i !== startStep);
+  }
+  updateWizardHeader(startStep);
+
+  // Pre-populate bridge selects when jumping straight to step 2
+  if (startStep === 2) {
+    const names = Object.keys(state.config.tailnets || {});
+    document.getElementById('w2-src').innerHTML = names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+    destPickerSel.w2 = new Set();
+    renderDestPicker('w2');
+    loadSourcePicker('w2');
+  }
+}
+
+function updateStats() {
+  if (!state.status) return;
+  const s = state.status;
+  setText("stat-uptime",  s.uptime || "—");
+  setText("stat-bridges", String(state.bridges.length));
+  setText("stat-conns",   String(state.connections.filter(c => !c.closed_at).length));
+  setText("stat-bytes",   fmtBytes(s.bytes_total || 0));
+  const nets = Object.keys(state.config.tailnets || {}).length;
+  setText("stat-nets", String(nets));
+}
+
+function renderNetworks() {
+  const grid = document.getElementById('networks-grid');
+  const tailnets = state.config.tailnets || {};
+  const liveStatus = {};
+  ((state.status && state.status.tailnets) || []).forEach(t => { liveStatus[t.role] = t; });
+
+  const cards = Object.entries(tailnets).map(([name, tc]) => {
+    const live = liveStatus[name];
+    const connected = live && live.connected;
+    const dotClass = connected ? 'green' : 'gray';
+    const tagChips = (tc.tags || []).map(t => `<span class="tag-chip">${esc(t)}</span>`).join('');
+    return `
+      <div class="network-card">
+        <div class="network-card-header">
+          <div>
+            <div class="network-card-name">${esc(name)}</div>
+            <div class="network-card-fqdn">${esc(tc.tailnet || '—')}</div>
+          </div>
+          <div class="network-card-actions">
+            <button class="btn-icon danger" title="Remove network" onclick="deleteNetwork('${esc(name)}')">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="network-card-meta">
+          <span class="badge ${connected ? 'active' : 'neutral'}" style="font-size:11px">
+            <span class="dot"></span>${connected ? 'Connected' : 'Connecting…'}
+          </span>
+          ${tagChips}
+        </div>
+      </div>`;
+  }).join('');
+
+  grid.innerHTML = cards + `
+    <div class="add-network-card" onclick="openModal('modal-add-network')">
+      <div class="add-network-card-icon">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      </div>
+      <div class="add-network-card-label">Add network</div>
+    </div>`;
+}
+
+function renderTopology() {
+  const grid    = document.getElementById("bridge-rules-grid");
+  const rules   = state.config.bridges || [];
+  const cfgNets = state.config.tailnets || {};
+
+  const byRule = {};
+  state.bridges.forEach(b => { (byRule[b.rule_name] = byRule[b.rule_name] || []).push(b); });
+
+  if (rules.length === 0) {
+    grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1;padding:40px 24px">
+      <div class="empty-title">No bridge rules yet</div>
+      <div class="empty-sub">Add a bridge rule to connect services between tailnets.</div>
+    </div>`;
+    return;
+  }
+
+  grid.innerHTML = rules.map(rule => {
+    const live = byRule[rule.name] || [];
+    const status = live.length === 0 ? 'pending'
+      : live.some(b => b.status === 'error') ? 'error'
+      : live.some(b => b.status === 'active') ? 'active' : 'pending';
+    const totalConns = live.reduce((s, b) => s + (b.conn_count || 0), 0);
+    const totalBytes = live.reduce((s, b) => s + (b.bytes_in || 0) + (b.bytes_out || 0), 0);
+
+    const srcLabel  = (cfgNets[rule.source_tailnet] || {}).tailnet || rule.source_tailnet || '—';
+    const dstLabels = (rule.dest_tailnets || []).map(dt => (cfgNets[dt] || {}).tailnet || dt);
+    const ports     = (rule.ports || []).map(p => `:${p}`).join(' ');
+    const multiDest = dstLabels.length > 1;
+
+    const srcNames = (arr, fn) => {
+      const names = arr.slice(0, 4).map(fn).join(', ');
+      return arr.length > 4 ? names + ` +${arr.length - 4}` : names;
+    };
+    const filterHtml = rule.source_tag
+      ? `<span class="tag-chip" style="font-size:11px">${esc(rule.source_tag)}</span>`
+      : rule.source_devices && rule.source_devices.length > 0
+        ? `<span class="mono" style="font-size:12px;color:var(--gray-700)">${esc(srcNames(rule.source_devices, d => d.short_name || d.fqdn.split('.')[0]))}</span>`
+        : rule.source_services && rule.source_services.length > 0
+          ? `<span class="mono" style="font-size:12px;color:var(--gray-700)">${esc(srcNames(rule.source_services, s => s.short_name || s.name))}</span>`
+          : '<span style="font-size:12px;color:var(--gray-500)">—</span>';
+
+    // Group live entries by dest tailnet
+    const byDest = {};
+    for (const b of live) {
+      const dt = b.dest_tailnet || '';
+      (byDest[dt] = byDest[dt] || []).push(b);
+    }
+    const maxPerDest = multiDest ? 4 : 7;
+
+    let devicesHtml;
+    if (live.length === 0) {
+      devicesHtml = `<div style="font-size:11px;color:var(--gray-400);font-style:italic">No active bridges</div>`;
+    } else {
+      devicesHtml = Object.entries(byDest).map(([dt, bridges]) => {
+        const rows = bridges.slice(0, maxPerDest).map(b => {
+          const src   = b.source_host.split('.')[0];
+          const dotBg = b.status === 'active' ? 'var(--green-200)' : b.status === 'error' ? 'var(--red-300)' : 'var(--gray-400)';
+          return `<div class="brc-device-row">
+            <span class="brc-device-dot" style="background:${dotBg}"></span>
+            <span class="brc-device-src" title="${esc(b.source_host)}">${esc(src)}</span>
+            <span class="brc-device-arr">→</span>
+            <span class="brc-device-vip" title="${esc(b.service_name||'—')}">${esc(b.service_name||'—')}</span>
+          </div>`;
+        }).join('');
+        const extra = bridges.length > maxPerDest
+          ? `<div style="font-size:10px;color:var(--gray-400);padding-left:10px">+${bridges.length - maxPerDest} more</div>` : '';
+        const label = multiDest ? `<div class="brc-dest-label">${esc(dt)}</div>` : '';
+        return label + rows + extra;
+      }).join('');
+    }
+
+    return `<div class="brc">
+      <div class="brc-header">
+        <span class="brc-name">${esc(rule.name)}</span>
+        ${statusBadge(status, '')}
+      </div>
+      <div class="brc-meta">
+        <div class="brc-meta-row">
+          <span class="brc-meta-arrow">↑</span>
+          <span class="brc-meta-net" title="${esc(srcLabel)}">${esc(srcLabel)}</span>
+        </div>
+        <div class="brc-meta-row">
+          <span class="brc-meta-arrow">↓</span>
+          <span class="brc-meta-net" title="${esc(dstLabels.join(' · '))}">${esc(dstLabels.join(' · '))}</span>
+          <span class="brc-meta-ports">${esc(ports)}</span>
+        </div>
+      </div>
+      <div class="brc-filter">
+        <div class="brc-filter-label">Source</div>
+        ${filterHtml}
+      </div>
+      <div class="brc-devices">${devicesHtml}</div>
+      <div class="brc-footer">
+        <span>${totalConns} conn${totalConns !== 1 ? 's' : ''}</span>
+        <span>·</span>
+        <span class="bytes-chip">${fmtBytes(totalBytes)}</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderBridges() {
+  const tbody = document.getElementById("services-tbody");
+  const { col, dir } = sortState.services;
+  const keyFn = (b, c) => {
+    if (c === 'traffic') return (b.bytes_in||0) + (b.bytes_out||0);
+    if (c === 'route') { const r = (state.config.bridges||[]).find(x=>x.name===b.rule_name); return (r?r.source_tailnet:'') + (b.dest_tailnet||''); }
+    return (b[c] ?? '').toString().toLowerCase();
+  };
+  const base = state.bridges.filter(b =>
+    !serviceFilter || (b.service_name && b.service_name.toLowerCase().includes(serviceFilter)) ||
+    (b.source_host && b.source_host.toLowerCase().includes(serviceFilter))
+  );
+  const filtered = sortArr(base, col, dir, keyFn);
+  setText("services-count", filtered.length + " service" + (filtered.length !== 1 ? "s" : ""));
+  updateSortHeaders('services');
+
+  if (filtered.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="10"><div class="empty-state">
+      <div class="empty-state-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 0 0-1-1.73L13 2.27a2 2 0 0 0-2 0L4 6.27A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73L11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></div>
+      <div class="empty-title">${serviceFilter ? "No matching services" : "No services bridged yet"}</div>
+      <div class="empty-sub">${serviceFilter ? "Try clearing your search." : "Add a bridge rule above to get started."}</div>
+    </div></td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = filtered.map(b => {
+    const ports = (b.ports || []).map(p => `<span class="port-chip">${p}</span>`).join('');
+    const badge = statusBadge(b.status, b.error);
+    const traffic = fmtBytes((b.bytes_in||0) + (b.bytes_out||0));
+    const rule = (state.config.bridges || []).find(r => r.name === b.rule_name);
+    const srcTailnet = rule ? rule.source_tailnet : '?';
+    const dstTailnet = b.dest_tailnet || '?';
+    const route = `<span style="white-space:nowrap;font-size:12px">
+      <span class="badge src" style="font-size:10px">${esc(srcTailnet)}</span>
+      <span style="color:var(--gray-400);margin:0 3px">→</span>
+      <span class="badge dst" style="font-size:10px">${esc(dstTailnet)}</span>
+    </span>`;
+    return `<tr>
+      <td><span class="mono" style="font-size:12px">${esc(b.service_name||'—')}</span></td>
+      <td>${route}</td>
+      <td><div style="font-size:13px;font-weight:500">${esc(b.source_host||'—')}</div></td>
+      <td><span class="mono" style="font-size:12px">${esc(b.source_ip||'—')}</span></td>
+      <td><span class="mono" style="color:var(--blue-600);font-size:12px">${esc(b.dest_vip||'—')}</span></td>
+      <td><div class="port-chips">${ports}</div></td>
+      <td>${badge}</td>
+      <td><span style="font-size:13px;font-weight:600;color:var(--gray-700)">${b.conn_count||0}</span></td>
+      <td><span class="bytes-chip">${traffic}</span></td>
+      <td></td>
+    </tr>`;
+  }).join('');
+}
+
+function renderRules() {
+  const tbody = document.getElementById('rules-tbody');
+  const { col, dir } = sortState.rules;
+  const keyFn = (r, c) => {
+    if (c === 'dest_tailnet') return (r.dest_tailnets||[]).join(',').toLowerCase();
+    return (r[c] ?? '').toString().toLowerCase();
+  };
+  const rules = sortArr(state.config.bridges || [], col, dir, keyFn);
+  setText('rules-count', rules.length + ' rule' + (rules.length !== 1 ? 's' : ''));
+  updateSortHeaders('rules');
+
+  if (rules.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6"><div class="empty-state" style="padding:24px"><div class="empty-sub">No bridge rules configured.</div></div></td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rules.map(r => {
+    const ports = (r.ports||[]).map(p=>`<span class="port-chip">${p}</span>`).join('');
+    const ruleNames = (arr, fn) => {
+      const ns = arr.slice(0, 3).map(fn).join(', ');
+      return arr.length > 3 ? ns + ` +${arr.length - 3}` : ns;
+    };
+    const srcLabel = r.source_services && r.source_services.length > 0
+      ? ruleNames(r.source_services, s => s.short_name || s.name)
+      : r.source_devices && r.source_devices.length > 0
+        ? ruleNames(r.source_devices, d => d.short_name || d.fqdn.split('.')[0])
+        : (r.source_tag || '—');
+    return `<tr>
+      <td>${esc(r.name)}</td>
+      <td><span class="badge src" style="font-size:11px">↑ ${esc(r.source_tailnet)}</span></td>
+      <td>${(r.dest_tailnets||[]).map(dt=>`<span class="badge dst" style="font-size:11px">↓ ${esc(dt)}</span>`).join(' ')}</td>
+      <td><span class="mono" style="font-size:12px">${esc(srcLabel)}</span></td>
+      <td><div class="port-chips">${ports}</div></td>
+      <td style="display:flex;gap:6px">
+        <button class="btn-icon" title="Edit rule" onclick="openEditBridgeModal('${esc(r.name)}')">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+        </button>
+        <button class="btn-icon danger" title="Delete rule" onclick="deleteBridgeRule('${esc(r.name)}')">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>
+        </button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function connDuration(c) {
+  if (c.closed_at) {
+    const ms = new Date(c.closed_at) - new Date(c.opened_at);
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return s + "s";
+    if (s < 3600) return Math.floor(s/60) + "m " + (s%60) + "s";
+    return Math.floor(s/3600) + "h " + Math.floor((s%3600)/60) + "m";
+  }
+  return c.opened_at ? timeSince(c.opened_at) : '—';
+}
+
+let connsShowAll = false;
+
+function toggleConnsFilter() {
+  connsShowAll = !connsShowAll;
+  const btn = document.getElementById('btn-conns-filter');
+  if (btn) btn.textContent = connsShowAll ? 'Active only' : 'Show history';
+  renderConns();
+}
+
+function renderConns() {
+  // Prune connections closed more than 5 minutes ago from client state.
+  const cutoff = Date.now() - 5 * 60 * 1000;
+  state.connections = state.connections.filter(c => !c.closed_at || new Date(c.closed_at) > cutoff);
+
+  const tbody = document.getElementById("conns-tbody");
+  const active = state.connections.filter(c => !c.closed_at);
+  const total  = state.connections.length;
+  setText("conns-count", active.length + " active" + (total > active.length ? ", " + (total - active.length) + " recent" : ""));
+
+  const pool = connsShowAll ? state.connections : active;
+
+  if (pool.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6"><div class="empty-state">
+      <div class="empty-title">${connsShowAll ? 'No recent connections' : 'No active connections'}</div>
+      <div class="empty-sub">${connsShowAll ? 'Connections appear here when clients connect to bridged services.' : 'Click "Show history" to see recently closed connections.'}</div>
+    </div></td></tr>`;
+    return;
+  }
+
+  const { col, dir } = sortState.conns;
+  const connKeyFn = (c, k) => {
+    if (k === 'src') return (c.node_name || c.client_addr || '').toLowerCase();
+    if (k === 'dst') return (c.target_addr || '').toLowerCase();
+    if (k === 'duration') return new Date(c.opened_at).getTime();
+    return c[k] ?? 0;
+  };
+  // Default: open first, then by opened_at desc.
+  let sorted;
+  if (col) {
+    sorted = sortArr(pool, col, dir, connKeyFn);
+  } else {
+    sorted = [...pool].sort((a, b) => {
+      if (!a.closed_at && b.closed_at) return -1;
+      if (a.closed_at && !b.closed_at) return 1;
+      return new Date(b.opened_at) - new Date(a.opened_at);
+    });
+  }
+  updateSortHeaders('conns');
+
+  tbody.innerHTML = sorted.map(c => {
+    const closed = !!c.closed_at;
+    const dot = closed
+      ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--gray-400)"></span>`
+      : `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e"></span>`;
+
+    // Enrich with bridge + rule context.
+    const bridge      = state.bridges.find(b => b.id === c.bridge_id);
+    const rule        = bridge && (state.config.bridges||[]).find(r => r.name === bridge.rule_name);
+    // dest_tailnet = where VIP lives = where the client connects FROM
+    // source_tailnet = where the backend lives = where the traffic goes TO
+    const clientTailnet  = bridge ? bridge.dest_tailnet : '';
+    const backendTailnet = rule   ? rule.source_tailnet : '';
+    const ruleName       = bridge ? bridge.rule_name  : '';
+
+    const chipSrc = t => `<span class="badge src" style="font-size:10px;margin-top:2px;display:inline-block">${esc(t)}</span>`;
+    const chipDst = t => `<span class="badge dst" style="font-size:10px;margin-top:2px;display:inline-block">${esc(t)}</span>`;
+    const chipNeutral = t => `<span class="badge neutral" style="font-size:10px;margin-top:2px;display:inline-block">${esc(t)}</span>`;
+
+    // Src: who connected (identity + node name) + their tailnet (dest tailnet = where client lives)
+    const srcCell = (c.node_name
+      ? `<span class="mono" style="font-size:11px">${esc(c.node_name)}</span>`
+        + (c.identity ? `<br><span style="font-size:10px;color:var(--gray-500)">${esc(c.identity)}</span>` : '')
+      : `<span style="color:var(--gray-400);font-size:11px">${esc(c.client_addr||'—')}</span>`)
+      + (clientTailnet ? `<br>${chipDst(clientTailnet)}` : '');
+
+    // Dst: backend hostname:port + backend tailnet (src tailnet = where services live) + rule name
+    const port        = c.target_addr ? ':' + c.target_addr.split(':').pop() : '';
+    const backendHost = bridge ? bridge.source_host + port : (c.target_addr || '—');
+    const dstCell     = `<span class="mono" style="font-size:11px">${esc(backendHost)}</span>`
+      + (backendTailnet ? `<br>${chipSrc(backendTailnet)}${ruleName ? ' ' + chipNeutral(ruleName) : ''}` : '');
+
+    const rowStyle = closed ? 'opacity:0.55' : '';
+    return `<tr style="${rowStyle}">
+      <td style="width:16px;text-align:center">${dot}</td>
+      <td>${srcCell}</td>
+      <td>${dstCell}</td>
+      <td><span class="bytes-chip">${fmtBytes(c.bytes_in||0)}</span></td>
+      <td><span class="bytes-chip">${fmtBytes(c.bytes_out||0)}</span></td>
+      <td><span style="font-size:12px;color:var(--gray-500)">${connDuration(c)}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+function renderLogs() {
+  const el = document.getElementById("log-stream");
+  setText("log-count", state.logs.length + " events");
+  if (state.logs.length === 0) {
+    el.innerHTML = `<div class="empty-state" style="padding:20px"><div class="empty-sub">No events yet</div></div>`;
+    return;
+  }
+  el.innerHTML = state.logs.slice(0, 100).map(e => {
+    const t = e.time ? new Date(e.time).toLocaleTimeString() : '?';
+    return `<div class="log-entry">
+      <span class="log-time">${t}</span>
+      <span class="log-level ${e.level||'info'}">${(e.level||'info').slice(0,4)}</span>
+      <span class="log-msg">${esc(e.message||'')}</span>
+    </div>`;
+  }).join('');
+}
+
+let secretsVisible = false;
+
+function toggleSecrets() {
+  secretsVisible = !secretsVisible;
+  document.getElementById('btn-toggle-secrets').textContent = secretsVisible ? 'Hide secrets' : 'Show secrets';
+  renderConfig();
+}
+
+function maskSecrets(cfg) {
+  const masked = JSON.parse(JSON.stringify(cfg));
+  for (const tc of Object.values(masked.tailnets || {})) {
+    if (tc.oauth && tc.oauth.client_secret) {
+      tc.oauth.client_secret = '••••••••';
+    }
+  }
+  return masked;
+}
+
+function renderConfig() {
+  const el = document.getElementById('json-viewer');
+  const data = secretsVisible ? state.config : maskSecrets(state.config);
+  el.textContent = JSON.stringify(data, null, 2);
+}
+
+function copyConfig() {
+  const text = JSON.stringify(state.config, null, 2);
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+  } else {
+    fallbackCopy(text);
+  }
+}
+
+function fallbackCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  document.execCommand('copy');
+  document.body.removeChild(ta);
+}
+
+function filterServices() {
+  serviceFilter = document.getElementById("service-search").value.toLowerCase();
+  renderBridges();
+}
+
+// ── Tailnet auto-detect ───────────────────────────────────────────────────────
+// Called onblur from credential fields. Probes the Tailscale API and fills in
+// the tailnet domain field automatically.
+let _detectDebounce = null;
+function tryDetectTailnet(form, tailnetFieldId, cidId, csecId) {
+  clearTimeout(_detectDebounce);
+  // Get values either from named form fields or explicit IDs
+  let cid, csec;
+  if (form) {
+    cid  = form.querySelector('[name=client_id]')?.value.trim();
+    csec = form.querySelector('[name=client_secret]')?.value;
+  } else {
+    cid  = document.getElementById(cidId)?.value.trim();
+    csec = document.getElementById(csecId)?.value;
+  }
+  if (!cid || !csec) return;
+
+  const targetField = document.getElementById(tailnetFieldId);
+  if (!targetField || targetField.value) return; // already filled
+
+  targetField.placeholder = 'detecting…';
+  _detectDebounce = setTimeout(async () => {
+    try {
+      const r = await fetch('/api/tailnets/detect', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ client_id: cid, client_secret: csec }),
+      });
+      if (!r.ok) { targetField.placeholder = 'could not detect — enter manually'; return; }
+      const data = await r.json();
+      if (data.tailnet) {
+        targetField.value = data.tailnet;
+        targetField.placeholder = data.tailnet;
+      } else {
+        targetField.placeholder = 'enter tailnet domain';
+      }
+    } catch(_) {
+      targetField.placeholder = 'enter tailnet domain';
+    }
+  }, 400);
+}
+
+// ── CRUD helpers ──────────────────────────────────────────────────────────────
+async function apiPost(path, body) {
+  const r = await fetch(path, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json().then(j => { state.config = j; }).catch(()=>{});
+}
+
+async function apiPut(path, body) {
+  const r = await fetch(path, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json().then(j => { state.config = j; }).catch(()=>{});
+}
+
+async function apiDelete(path) {
+  const r = await fetch(path, { method: 'DELETE' });
+  if (!r.ok) throw new Error(await r.text());
+}
+
+async function refreshConfig() {
+  const r = await fetch('/api/config');
+  const j = await r.json();
+  state.config = j;
+  renderAll();
+}
+
+function parsePorts(s) {
+  return s.split(',').map(p => parseInt(p.trim(), 10)).filter(p => p > 0);
+}
+
+function parseTags(s) {
+  return s.split(',').map(t => t.trim()).filter(Boolean);
+}
+
+// Add network modal submit
+async function submitAddNetwork(e) {
+  e.preventDefault();
+  const f = e.target;
+  const errEl = document.getElementById('add-network-error');
+  errEl.classList.remove('visible');
+  const btn = document.getElementById('add-network-submit');
+  btn.disabled = true; btn.textContent = 'Adding…';
+  try {
+    const name = f.name.value.trim();
+    const cid  = f.client_id.value.trim();
+    const csec = f.client_secret.value;
+    if (!name) throw new Error('Network name is required');
+    if (!cid)  throw new Error('Client ID is required');
+    if (!csec) throw new Error('Client secret is required');
+    if ((state.config.tailnets || {})[name]) throw new Error(`A network named "${name}" already exists`);
+    await apiPost('/api/tailnets', {
+      name,
+      tailnet: f.tailnet.value.trim(),
+      oauth: { client_id: cid, client_secret: csec },
+      tags: parseTags(f.tags.value),
+    });
+    closeModal('modal-add-network');
+    f.reset();
+    await refreshConfig();
+    checkFirstRun();
+  } catch(err) {
+    errEl.textContent = err.message; errEl.classList.add('visible');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Add network';
+  }
+}
+
+// Add / edit bridge rule modal submit
+async function submitAddBridge(e) {
+  e.preventDefault();
+  const errEl = document.getElementById('add-bridge-error');
+  errEl.classList.remove('visible');
+  try {
+    const editName = document.getElementById('bridge-edit-name').value;
+    const name  = document.getElementById('bridge-name-input').value.trim();
+    const src   = document.getElementById('bridge-source-select').value;
+    const dsts  = getSelectedDests('bridge');
+    const ports = parsePorts(document.getElementById('bridge-ports-input').value);
+    if (!name) throw new Error('Rule name is required');
+    if (!src || dsts.length === 0) throw new Error('Source and at least one destination network are required');
+    if (dsts.includes(src)) throw new Error('Source and destination networks must be different');
+    if (ports.length === 0) throw new Error('Enter at least one valid port number');
+
+    const sel = getPickerSelection('bridge');
+    if (!sel.source_tag && (!sel.source_devices || sel.source_devices.length === 0) && (!sel.source_services || sel.source_services.length === 0))
+      throw new Error('Select a source tag, at least one machine, or at least one service');
+
+    const payload = { name, source_tailnet: src, dest_tailnets: dsts, ports, ...sel };
+
+    if (editName) {
+      await apiPut(`/api/bridge-rules/${encodeURIComponent(editName)}`, payload);
+    } else {
+      await apiPost('/api/bridge-rules', payload);
+    }
+    closeModal('modal-add-bridge');
+    await refreshConfig();
+  } catch(err) {
+    errEl.textContent = err.message; errEl.classList.add('visible');
+  }
+}
+
+async function deleteNetwork(name) {
+  if (!confirm(`Remove network "${name}"? Bridge rules using it will stop.`)) return;
+  try {
+    await apiDelete(`/api/tailnets/${encodeURIComponent(name)}`);
+    await refreshConfig();
+    checkFirstRun();
+  } catch(err) { alert('Error: ' + err.message); }
+}
+
+async function deleteBridgeRule(name) {
+  if (!confirm(`Delete bridge rule "${name}"?`)) return;
+  try {
+    await apiDelete(`/api/bridge-rules/${encodeURIComponent(name)}`);
+    await refreshConfig();
+  } catch(err) { alert('Error: ' + err.message); }
+}
+
+// ── Setup Wizard ──────────────────────────────────────────────────────────────
+const wizardStepMeta = [
+  { eyebrow: 'Step 1 of 3', title: 'Add your source network', subtitle: 'Connect the tailnet where your services live.' },
+  { eyebrow: 'Step 2 of 3', title: 'Add your destination network', subtitle: 'Connect the tailnet where clients will reach services.' },
+  { eyebrow: 'Step 3 of 3', title: 'Create a bridge rule', subtitle: 'Define which tagged devices to expose and on which ports.' },
+];
+
+function updateWizardHeader(step) {
+  const m = wizardStepMeta[step];
+  document.getElementById('wizard-eyebrow').textContent = m.eyebrow;
+  document.getElementById('wizard-title').textContent = m.title;
+  document.getElementById('wizard-subtitle').textContent = m.subtitle;
+  for (let i = 0; i < 3; i++) {
+    const d = document.getElementById('wdot-' + i);
+    d.className = 'wizard-step-dot' + (i === step ? ' active' : (i < step ? ' done' : ''));
+  }
+}
+
+function wizardBack(step) {
+  document.getElementById('wstep-' + step).hidden = true;
+  document.getElementById('wstep-' + (step - 1)).hidden = false;
+  updateWizardHeader(step - 1);
+}
+
+async function wizardNext(e, step) {
+  e.preventDefault();
+  const errEl = document.getElementById('w' + step + '-error');
+  errEl.classList.remove('visible');
+
+  if (step === 0) {
+    try {
+      const name = document.getElementById('w0-name').value.trim();
+      const cid  = document.getElementById('w0-cid').value.trim();
+      const csec = document.getElementById('w0-csec').value;
+      if (!name) throw new Error('Network name is required');
+      if (!cid)  throw new Error('Client ID is required');
+      if (!csec) throw new Error('Client secret is required');
+      if ((state.config.tailnets || {})[name]) throw new Error(`A network named "${name}" already exists`);
+      await apiPost('/api/tailnets', {
+        name,
+        tailnet: document.getElementById('w0-tailnet').value.trim(),
+        oauth: { client_id: cid, client_secret: csec },
+        tags: parseTags(document.getElementById('w0-tags').value),
+      });
+      await refreshConfig();
+      document.getElementById('wstep-0').hidden = true;
+      document.getElementById('wstep-1').hidden = false;
+      updateWizardHeader(1);
+    } catch(err) { errEl.textContent = err.message; errEl.classList.add('visible'); }
+
+  } else if (step === 1) {
+    try {
+      const name = document.getElementById('w1-name').value.trim();
+      const cid  = document.getElementById('w1-cid').value.trim();
+      const csec = document.getElementById('w1-csec').value;
+      if (!name) throw new Error('Network name is required');
+      if (!cid)  throw new Error('Client ID is required');
+      if (!csec) throw new Error('Client secret is required');
+      if ((state.config.tailnets || {})[name]) throw new Error(`A network named "${name}" already exists`);
+      await apiPost('/api/tailnets', {
+        name,
+        tailnet: document.getElementById('w1-tailnet').value.trim(),
+        oauth: { client_id: cid, client_secret: csec },
+        tags: parseTags(document.getElementById('w1-tags').value),
+      });
+      await refreshConfig();
+      // Populate bridge rule selects
+      const names = Object.keys(state.config.tailnets || {});
+      document.getElementById('w2-src').innerHTML = names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+      destPickerSel.w2 = new Set();
+      renderDestPicker('w2');
+      document.getElementById('wstep-1').hidden = true;
+      document.getElementById('wstep-2').hidden = false;
+      updateWizardHeader(2);
+      loadSourcePicker('w2'); // pre-load tags for the first option
+    } catch(err) { errEl.textContent = err.message; errEl.classList.add('visible'); }
+
+  } else if (step === 2) {
+    try {
+      const name = document.getElementById('w2-name').value.trim();
+      const src  = document.getElementById('w2-src').value;
+      const dsts = getSelectedDests('w2');
+      const ports = parsePorts(document.getElementById('w2-ports').value);
+      if (!name) throw new Error('Rule name is required');
+      if (dsts.length === 0) throw new Error('Select at least one destination network');
+      if (dsts.includes(src)) throw new Error('Source and destination networks must be different');
+      if (ports.length === 0) throw new Error('Enter at least one valid port number');
+      const sel = getPickerSelection('w2');
+      if (!sel.source_tag && (!sel.source_devices || sel.source_devices.length === 0) && (!sel.source_services || sel.source_services.length === 0))
+        throw new Error('Select a source tag, at least one machine, or at least one service');
+      await apiPost('/api/bridge-rules', { name, source_tailnet: src, dest_tailnets: dsts, ports, ...sel });
+      await refreshConfig();
+      document.getElementById('wizard-overlay').hidden = true;
+      renderAll();
+    } catch(err) { errEl.textContent = err.message; errEl.classList.add('visible'); }
+  }
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+function setText(id, val) { const el = document.getElementById(id); if (el) el.textContent = val; }
+function statusBadge(status, errMsg) {
+  if (status === "active")  return `<span class="badge active"><span class="dot"></span>Active</span>`;
+  if (status === "pending") return `<span class="badge pending"><span class="dot"></span>Pending</span>`;
+  if (status === "error")   return `<span class="badge error" title="${esc(errMsg||'')}"><span class="dot"></span>Error</span>`;
+  return `<span class="badge neutral"><span class="dot"></span>${esc(status||'unknown')}</span>`;
+}
+function fmtBytes(b) {
+  if (!b || b === 0) return "0 B";
+  const units = ["B","KB","MB","GB","TB"];
+  let i = 0;
+  while (b >= 1024 && i < units.length - 1) { b /= 1024; i++; }
+  return b.toFixed(i === 0 ? 0 : 1) + " " + units[i];
+}
+function timeSince(iso) {
+  const sec = Math.floor((Date.now() - new Date(iso)) / 1000);
+  if (sec < 60)   return sec + "s ago";
+  if (sec < 3600) return Math.floor(sec/60) + "m ago";
+  if (sec < 86400) return Math.floor(sec/3600) + "h ago";
+  return Math.floor(sec/86400) + "d ago";
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+connect();
+// Fallback sync when SSE is disconnected; SSE keeps state current when connected.
+setInterval(() => {
+  if (sseConnected) return;
+  fetch("/api/status").then(r => r.json()).then(s => { state.status = s; updateStats(); }).catch(()=>{});
+  fetch("/api/connections").then(r => r.json()).then(cs => {
+    if (cs) { state.connections = cs; renderConns(); updateStats(); }
+  }).catch(()=>{});
+}, 15000);
+</script>
+</body>
+</html>

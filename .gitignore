@@ -1,0 +1,15 @@
+# Binaries
+/tailnetlink
+*.exe
+
+# Config files with credentials (use config.example.yaml as template)
+tailnetlink.json
+*.local.yaml
+*.local.json
+
+# Build artifacts
+dist/
+
+# Local deploy script and brainstorm sessions
+deploy.sh
+.superpowers/
