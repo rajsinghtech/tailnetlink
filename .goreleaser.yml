@@ -1,0 +1,57 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: tailnetlink
+    main: ./cmd/tailnetlink
+    binary: tailnetlink
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - "-s -w"
+      - "-X main.Version={{.Version}}"
+
+archives:
+  - id: tailnetlink
+    name_template: "{{ .Binary }}-{{ .Tag }}-{{ .Os }}-{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+release:
+  header: |
+    ## Installation
+
+    ### Docker
+    ```bash
+    docker pull ghcr.io/rajsinghtech/tailnetlink:{{ .Tag }}
+    ```
+
+    ```bash
+    docker run -d \
+      --name tailnetlink \
+      -p 8080:8080 \
+      -v $(pwd)/tailnetlink.json:/tailnetlink.json \
+      ghcr.io/rajsinghtech/tailnetlink:{{ .Tag }}
+    ```
+
+    ### Binary Download
+    Download the appropriate binary for your platform from the assets below.
+
+    ## What's New
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
