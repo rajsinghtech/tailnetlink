@@ -29,7 +29,8 @@ import (
 //	  → bidirectional copy
 type Forwarder struct {
 	listenSrv   *tsnet.Server // destination tailnet — registered as VIP service host
-	dialSrv     *tsnet.Server // source tailnet — dials actual backend
+	dialSrv     *tsnet.Server // nil for local-mode forwarders
+	localAddr   string        // when non-empty, dials via net.DialContext instead of dialSrv
 	vip         *VIPService
 	bridgeID    string // store key: ruleName/fqdn
 	timeout     time.Duration
@@ -119,14 +120,22 @@ func (f *Forwarder) accept(ctx context.Context, ln net.Listener, port int) {
 func (f *Forwarder) handle(ctx context.Context, client net.Conn, port int) {
 	defer client.Close()
 
-	target := net.JoinHostPort(f.vip.SourceIP.String(), strconv.Itoa(port))
-
 	dialCtx, cancel := context.WithTimeout(ctx, f.timeout)
 	defer cancel()
 
-	// Dial through the source tailnet to reach the actual backend service.
-	upstream, err := f.dialSrv.Dial(dialCtx, "tcp", target)
-	if err != nil {
+	var target string
+	var upstream net.Conn
+	var dialErr error
+
+	if f.localAddr != "" {
+		target = f.localAddr
+		upstream, dialErr = (&net.Dialer{}).DialContext(dialCtx, "tcp", f.localAddr)
+	} else {
+		target = net.JoinHostPort(f.vip.SourceIP.String(), strconv.Itoa(port))
+		upstream, dialErr = f.dialSrv.Dial(dialCtx, "tcp", target)
+	}
+
+	if err := dialErr; err != nil {
 		f.logger.Warn("forwarder: dial failed", "target", target, "err", err)
 		if ctx.Err() == nil {
 			f.store.Log("warn", fmt.Sprintf("dial failed: %s → %s: %v", f.vip.ServiceName, target, err), nil)
