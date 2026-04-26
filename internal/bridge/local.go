@@ -208,9 +208,8 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 
 	var wg sync.WaitGroup
 	for _, lb := range bridges {
-		lb := lb
 		wg.Add(1)
-		go func() {
+		go func(lb localBridgeInfo) {
 			defer wg.Done()
 			m.mu.Lock()
 			if fwd, ok := m.forwarders[lb.bridgeID]; ok {
@@ -227,7 +226,7 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 				m.logger.Warn("local rule: VIP delete failed", "bridge", lb.bridgeID, "err", err)
 			}
 			m.store.DeleteBridge(lb.bridgeID)
-		}()
+		}(lb)
 	}
 	wg.Wait()
 	m.store.Log("info", fmt.Sprintf("[%s] local rule stopped", rule.Name), nil)
