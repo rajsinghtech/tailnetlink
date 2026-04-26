@@ -108,9 +108,9 @@ type localBridgeInfo struct {
 // runLocalRule handles bridge rules with local_sources. It creates a VIP service and
 // Forwarder for each local_source in each dest tailnet, then blocks until ctx is cancelled.
 func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dialTimeout time.Duration) {
-	m.mu.Lock()
 	dests := make([]destCtx, 0, len(rule.DestTailnets))
 	for _, destName := range rule.DestTailnets {
+		m.mu.Lock()
 		destSrv := m.servers[destName]
 		destClient := m.apiClients[destName]
 		destTags := m.cfg.Tailnets[destName].Tags
@@ -121,9 +121,7 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 			return
 		}
 		dests = append(dests, destCtx{name: destName, srv: destSrv, client: destClient, tags: destTags})
-		m.mu.Lock()
 	}
-	m.mu.Unlock()
 
 	m.logger.Info("local rule started", "rule", rule.Name, "sources", len(rule.LocalSources))
 	m.store.Log("info", fmt.Sprintf("[%s] local rule started: %d sources", rule.Name, len(rule.LocalSources)), nil)
@@ -140,10 +138,12 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 		exposePort, err := localSourceExposePort(src)
 		if err != nil {
 			m.logger.Error("local rule: invalid expose port", "rule", rule.Name, "addr", src.Addr, "err", err)
+			m.store.Log("error", fmt.Sprintf("[%s] skipping %s: %v", rule.Name, src.Addr, err), nil)
 			continue
 		}
 
 		shortName := localSourceShortName(src.ShortName, dnsName)
+		svcName := ServiceName("local", dnsName, shortName)
 		syntheticDev := Device{Name: src.Addr, FQDN: dnsName}
 		createdAt := time.Now()
 
@@ -153,7 +153,7 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 
 			m.store.UpsertBridge(state.BridgeEntry{
 				ID: bridgeID, RuleName: rule.Name, DestTailnet: dest.name,
-				ServiceName: ServiceName("local", dnsName, shortName),
+				ServiceName: svcName,
 				SourceHost:  src.Addr, SourceIP: src.Addr,
 				Ports: []int{exposePort}, Status: state.BridgeStatusPending, CreatedAt: createdAt,
 			})
@@ -163,7 +163,7 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 				m.logger.Error("local rule: VIP ensure failed", "rule", rule.Name, "dest", dest.name, "addr", src.Addr, "err", err)
 				m.store.UpsertBridge(state.BridgeEntry{
 					ID: bridgeID, RuleName: rule.Name, DestTailnet: dest.name,
-					ServiceName: ServiceName("local", dnsName, shortName),
+					ServiceName: svcName,
 					SourceHost: src.Addr, SourceIP: src.Addr,
 					Ports: []int{exposePort}, Status: state.BridgeStatusError, Error: err.Error(), CreatedAt: createdAt,
 				})
