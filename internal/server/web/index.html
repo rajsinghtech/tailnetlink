@@ -1114,6 +1114,101 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') {
   document.querySelectorAll('.modal-overlay:not([hidden])').forEach(m => m.hidden = true);
 }});
 
+// ── Local endpoint builder ────────────────────────────────────────────────────
+let _epSeq = 0;
+
+function setBridgeSrcType(type) {
+  const isLocal = type === 'local';
+  document.getElementById('bridge-src-type-ts').classList.toggle('active', !isLocal);
+  document.getElementById('bridge-src-type-local').classList.toggle('active', isLocal);
+  document.getElementById('bridge-ts-fields').hidden = isLocal;
+  document.getElementById('bridge-local-fields').hidden = !isLocal;
+  if (isLocal) renderDestPicker('bridge-local');
+}
+
+function addLocalEpRow(listId, initial) {
+  const id = 'ep' + (++_epSeq);
+  const row = document.createElement('div');
+  row.className = 'local-ep-row';
+  row.dataset.epid = id;
+  row.innerHTML = `
+    <div class="local-ep-fields">
+      <div class="local-ep-row-line">
+        <span class="local-ep-lbl">Address</span>
+        <input class="form-input mono" style="flex:1;min-width:160px" placeholder="localhost:8080 or hostname:port"
+          data-field="addr" value="${esc(initial && initial.addr || '')}" oninput="onEpChange('${id}')">
+        <span class="local-ep-lbl" style="min-width:unset">VIP port</span>
+        <input class="form-input mono" style="width:72px" placeholder="auto"
+          data-field="expose_port" value="${initial && initial.expose_port > 0 ? initial.expose_port : ''}"
+          oninput="onEpChange('${id}')">
+      </div>
+      <div class="local-ep-row-line">
+        <span class="local-ep-lbl">DNS name</span>
+        <input class="form-input mono" style="flex:1;min-width:160px" placeholder="auto from FQDN or required for localhost"
+          data-field="dns_name" value="${esc(initial && initial.dns_name || '')}" oninput="onEpChange('${id}')">
+        <span class="local-ep-lbl" style="min-width:unset">Short</span>
+        <input class="form-input mono" style="width:84px" placeholder="optional"
+          data-field="short_name" value="${esc(initial && initial.short_name || '')}" oninput="onEpChange('${id}')">
+      </div>
+      <div class="local-ep-preview" id="${id}-prev"></div>
+      <div class="local-ep-err" id="${id}-err"></div>
+    </div>
+    <button type="button" class="btn-icon danger" style="align-self:start;margin-top:2px" title="Remove"
+      onclick="document.querySelector('[data-epid=${id}]').remove()">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>
+    </button>`;
+  document.getElementById(listId).appendChild(row);
+  if (initial && initial.addr) onEpChange(id);
+}
+
+function onEpChange(id) {
+  const row = document.querySelector(`[data-epid="${id}"]`);
+  if (!row) return;
+  const addr = row.querySelector('[data-field=addr]').value.trim();
+  const dnsName = row.querySelector('[data-field=dns_name]').value.trim();
+  const shortName = row.querySelector('[data-field=short_name]').value.trim();
+  const prev = document.getElementById(id + '-prev');
+  const errEl = document.getElementById(id + '-err');
+  errEl.textContent = ''; errEl.classList.remove('visible');
+  prev.textContent = '';
+  if (!addr) return;
+
+  const lastColon = addr.lastIndexOf(':');
+  const host = lastColon > 0 ? addr.slice(0, lastColon) : addr;
+  const isLocal = host === 'localhost' || host === '127.0.0.1' || host === '::1' || /^[\d.]+$/.test(host) || /^[0-9a-fA-F:]+$/.test(host);
+
+  const dnsInput = row.querySelector('[data-field=dns_name]');
+  dnsInput.placeholder = isLocal ? 'required for localhost/IP' : (host.includes('.') ? host + ' (auto)' : 'optional');
+
+  if (isLocal && !dnsName) {
+    errEl.textContent = 'dns_name required for localhost/IP'; errEl.classList.add('visible'); return;
+  }
+
+  const effectiveDns = dnsName || (host.includes('.') ? host : '');
+  if (effectiveDns) {
+    const dot = effectiveDns.indexOf('.');
+    const label = dot > 0 ? effectiveDns.slice(0, dot) : effectiveDns;
+    prev.textContent = '→ svc:' + (shortName || ('tnl-local-' + label));
+  }
+}
+
+function getLocalSources(listId) {
+  const rows = document.querySelectorAll('#' + listId + ' [data-epid]');
+  return Array.from(rows).reduce((acc, row) => {
+    const addr = row.querySelector('[data-field=addr]').value.trim();
+    if (!addr) return acc;
+    const ep = { addr };
+    const ep_str = row.querySelector('[data-field=expose_port]').value.trim();
+    const dns = row.querySelector('[data-field=dns_name]').value.trim();
+    const sn = row.querySelector('[data-field=short_name]').value.trim();
+    if (ep_str) ep.expose_port = parseInt(ep_str, 10);
+    if (dns) ep.dns_name = dns;
+    if (sn) ep.short_name = sn;
+    acc.push(ep);
+    return acc;
+  }, []);
+}
+
 function openAddBridgeModal() {
   document.getElementById('bridge-modal-title').textContent = 'Add bridge rule';
   document.getElementById('bridge-modal-submit').textContent = 'Add bridge rule';
@@ -1122,6 +1217,8 @@ function openAddBridgeModal() {
   document.getElementById('bridge-name-input').disabled = false;
   document.getElementById('bridge-ports-input').value = '';
   document.getElementById('bridge-src-picker').innerHTML = '<div class="src-picker-loading">Select a source network first</div>';
+  document.getElementById('bridge-local-ep-list').innerHTML = '';
+  setBridgeSrcType('tailscale');
   populateBridgeSelects();
   document.getElementById('modal-add-bridge').hidden = false;
 }
@@ -1134,25 +1231,36 @@ function openEditBridgeModal(ruleName) {
   document.getElementById('bridge-edit-name').value = rule.name;
   document.getElementById('bridge-name-input').value = rule.name;
   document.getElementById('bridge-name-input').disabled = true;
-  document.getElementById('bridge-ports-input').value = (rule.ports || []).join(', ');
-  populateBridgeSelects(rule.source_tailnet, rule.dest_tailnets || []);
+
+  const isLocal = rule.local_sources && rule.local_sources.length > 0;
+
+  if (isLocal) {
+    setBridgeSrcType('local');
+    document.getElementById('bridge-local-ep-list').innerHTML = '';
+    destPickerSel['bridge-local'] = new Set(rule.dest_tailnets || []);
+    renderDestPicker('bridge-local');
+    for (const src of rule.local_sources) addLocalEpRow('bridge-local-ep-list', src);
+  } else {
+    setBridgeSrcType('tailscale');
+    document.getElementById('bridge-ports-input').value = (rule.ports || []).join(', ');
+    populateBridgeSelects(rule.source_tailnet, rule.dest_tailnets || []);
+    loadSourcePicker('bridge').then(() => {
+      const ps = pickerState['bridge'];
+      if (!ps) return;
+      if (rule.source_services && rule.source_services.length > 0) {
+        ps.tab = 'service';
+        rule.source_services.forEach(spec => ps.selServices.set(spec.name, { dns: spec.dns_name || '', short: spec.short_name || '' }));
+      } else if (rule.source_devices && rule.source_devices.length > 0) {
+        ps.tab = 'device';
+        rule.source_devices.forEach(spec => ps.selDevices.set(spec.fqdn, { dns: spec.dns_name || '', short: spec.short_name || '' }));
+      } else if (rule.source_tag) {
+        ps.tab = 'tag';
+        ps.selTag = rule.source_tag;
+      }
+      renderSourcePicker('bridge');
+    });
+  }
   document.getElementById('modal-add-bridge').hidden = false;
-  // Load picker then restore previous selection
-  loadSourcePicker('bridge').then(() => {
-    const ps = pickerState['bridge'];
-    if (!ps) return;
-    if (rule.source_services && rule.source_services.length > 0) {
-      ps.tab = 'service';
-      rule.source_services.forEach(spec => ps.selServices.set(spec.name, { dns: spec.dns_name || '', short: spec.short_name || '' }));
-    } else if (rule.source_devices && rule.source_devices.length > 0) {
-      ps.tab = 'device';
-      rule.source_devices.forEach(spec => ps.selDevices.set(spec.fqdn, { dns: spec.dns_name || '', short: spec.short_name || '' }));
-    } else if (rule.source_tag) {
-      ps.tab = 'tag';
-      ps.selTag = rule.source_tag;
-    }
-    renderSourcePicker('bridge');
-  });
 }
 
 // ── Source picker (shared between modal and wizard) ───────────────────────────
@@ -1377,10 +1485,11 @@ function getPickerSelection(prefix) {
 
 
 // ── Destination chip picker ───────────────────────────────────────────────────
-const destPickerSel = { bridge: new Set(), w2: new Set() };
+const destPickerSel = { bridge: new Set(), w2: new Set(), 'bridge-local': new Set() };
 
 function renderDestPicker(prefix) {
-  const el = document.getElementById(prefix === 'bridge' ? 'bridge-dest-picker' : 'w2-dest-picker');
+  const idMap = { bridge: 'bridge-dest-picker', w2: 'w2-dest-picker', 'bridge-local': 'bridge-local-dest-picker' };
+  const el = document.getElementById(idMap[prefix] || (prefix + '-dest-picker'));
   if (!el) return;
   const names = Object.keys(state.config.tailnets || {});
   if (names.length === 0) {
@@ -2075,20 +2184,36 @@ async function submitAddBridge(e) {
   errEl.classList.remove('visible');
   try {
     const editName = document.getElementById('bridge-edit-name').value;
-    const name  = document.getElementById('bridge-name-input').value.trim();
-    const src   = document.getElementById('bridge-source-select').value;
-    const dsts  = getSelectedDests('bridge');
-    const ports = parsePorts(document.getElementById('bridge-ports-input').value);
+    const name = document.getElementById('bridge-name-input').value.trim();
     if (!name) throw new Error('Rule name is required');
-    if (!src || dsts.length === 0) throw new Error('Source and at least one destination network are required');
-    if (dsts.includes(src)) throw new Error('Source and destination networks must be different');
-    if (ports.length === 0) throw new Error('Enter at least one valid port number');
 
-    const sel = getPickerSelection('bridge');
-    if (!sel.source_tag && (!sel.source_devices || sel.source_devices.length === 0) && (!sel.source_services || sel.source_services.length === 0))
-      throw new Error('Select a source tag, at least one machine, or at least one service');
+    const isLocal = document.getElementById('bridge-src-type-local').classList.contains('active');
+    let payload;
 
-    const payload = { name, source_tailnet: src, dest_tailnets: dsts, ports, ...sel };
+    if (isLocal) {
+      const dsts = getSelectedDests('bridge-local');
+      if (dsts.length === 0) throw new Error('Select at least one destination network');
+      const local_sources = getLocalSources('bridge-local-ep-list');
+      if (local_sources.length === 0) throw new Error('Add at least one local endpoint');
+      for (const src of local_sources) {
+        const lastColon = src.addr.lastIndexOf(':');
+        const host = lastColon > 0 ? src.addr.slice(0, lastColon) : src.addr;
+        if ((host === 'localhost' || host === '127.0.0.1') && !src.dns_name)
+          throw new Error(`Endpoint "${src.addr}" requires a dns_name`);
+      }
+      payload = { name, dest_tailnets: dsts, local_sources };
+    } else {
+      const src = document.getElementById('bridge-source-select').value;
+      const dsts = getSelectedDests('bridge');
+      const ports = parsePorts(document.getElementById('bridge-ports-input').value);
+      if (!src || dsts.length === 0) throw new Error('Source and at least one destination network are required');
+      if (dsts.includes(src)) throw new Error('Source and destination networks must be different');
+      if (ports.length === 0) throw new Error('Enter at least one valid port number');
+      const sel = getPickerSelection('bridge');
+      if (!sel.source_tag && (!sel.source_devices || sel.source_devices.length === 0) && (!sel.source_services || sel.source_services.length === 0))
+        throw new Error('Select a source tag, at least one machine, or at least one service');
+      payload = { name, source_tailnet: src, dest_tailnets: dsts, ports, ...sel };
+    }
 
     if (editName) {
       await apiPut(`/api/bridge-rules/${encodeURIComponent(editName)}`, payload);
