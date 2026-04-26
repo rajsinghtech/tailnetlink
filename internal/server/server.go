@@ -395,6 +395,11 @@ func (s *Server) handleBridgeRuleByName(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if err := s.cfgStore.Update(func(cfg *config.Config) error {
+			for _, dt := range rule.DestTailnets {
+				if _, ok := cfg.Tailnets[dt]; !ok {
+					return fmt.Errorf("dest_tailnet %q not found", dt)
+				}
+			}
 			for i, b := range cfg.Bridges {
 				if b.Name == name {
 					if err := checkShortNameConflicts(cfg, rule, name); err != nil {
@@ -671,7 +676,7 @@ func validateLocalSources(sources []config.LocalSourceSpec) error {
 		if err != nil || p <= 0 || p > 65535 {
 			return fmt.Errorf("local_sources[%d].addr %q has invalid port", i, src.Addr)
 		}
-		if src.ExposePort < 0 || src.ExposePort > 65535 {
+		if src.ExposePort > 65535 {
 			return fmt.Errorf("local_sources[%d].expose_port %d is out of range", i, src.ExposePort)
 		}
 		if isLocalHostServer(host) && src.DNSName == "" {
@@ -682,6 +687,7 @@ func validateLocalSources(sources []config.LocalSourceSpec) error {
 }
 
 // isLocalHostServer mirrors bridge.isLocalHost for use in the server package.
+// Keep in sync with bridge.isLocalHost if either is updated.
 func isLocalHostServer(host string) bool {
 	h := strings.ToLower(host)
 	if h == "localhost" || h == "127.0.0.1" || h == "::1" || h == "0.0.0.0" {
