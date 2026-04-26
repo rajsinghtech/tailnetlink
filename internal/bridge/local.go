@@ -53,15 +53,18 @@ func localSourceShortName(shortName, dnsName string) string {
 // localSourceExposePort returns the VIP-side listen port. Falls back to addr's port
 // when spec.ExposePort is zero.
 func localSourceExposePort(spec config.LocalSourceSpec) (int, error) {
-	if spec.ExposePort > 0 {
+	if spec.ExposePort > 0 && spec.ExposePort <= 65535 {
 		return spec.ExposePort, nil
+	}
+	if spec.ExposePort != 0 {
+		return 0, fmt.Errorf("expose_port %d out of range", spec.ExposePort)
 	}
 	_, portStr, err := net.SplitHostPort(spec.Addr)
 	if err != nil {
 		return 0, fmt.Errorf("invalid addr %q: %w", spec.Addr, err)
 	}
 	p, err := strconv.Atoi(portStr)
-	if err != nil || p <= 0 {
+	if err != nil || p <= 0 || p > 65535 {
 		return 0, fmt.Errorf("invalid port in addr %q", spec.Addr)
 	}
 	return p, nil
