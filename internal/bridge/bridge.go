@@ -248,6 +248,11 @@ type destCtx struct {
 }
 
 func (m *Manager) runRule(ctx context.Context, rule config.BridgeRule, pollInterval, dialTimeout time.Duration) {
+	if len(rule.LocalSources) > 0 {
+		m.runLocalRule(ctx, rule, dialTimeout)
+		return
+	}
+
 	m.mu.Lock()
 	srcSrv := m.servers[rule.SourceTailnet]
 	srcClient := m.apiClients[rule.SourceTailnet]
