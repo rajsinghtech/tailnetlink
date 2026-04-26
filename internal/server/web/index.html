@@ -1725,22 +1725,27 @@ function renderTopology() {
     const totalConns = live.reduce((s, b) => s + (b.conn_count || 0), 0);
     const totalBytes = live.reduce((s, b) => s + (b.bytes_in || 0) + (b.bytes_out || 0), 0);
 
-    const srcLabel  = (cfgNets[rule.source_tailnet] || {}).tailnet || rule.source_tailnet || '—';
+    const isLocalRule = rule.local_sources && rule.local_sources.length > 0;
+    const srcLabel = isLocalRule ? 'local' : ((cfgNets[rule.source_tailnet] || {}).tailnet || rule.source_tailnet || '—');
     const dstLabels = (rule.dest_tailnets || []).map(dt => (cfgNets[dt] || {}).tailnet || dt);
-    const ports     = (rule.ports || []).map(p => `:${p}`).join(' ');
+    const ports = isLocalRule
+      ? (rule.local_sources || []).map(s => ':' + (s.expose_port || s.addr.split(':').pop())).join(' ')
+      : (rule.ports || []).map(p => `:${p}`).join(' ');
     const multiDest = dstLabels.length > 1;
 
     const srcNames = (arr, fn) => {
       const names = arr.slice(0, 4).map(fn).join(', ');
       return arr.length > 4 ? names + ` +${arr.length - 4}` : names;
     };
-    const filterHtml = rule.source_tag
-      ? `<span class="tag-chip" style="font-size:11px">${esc(rule.source_tag)}</span>`
-      : rule.source_devices && rule.source_devices.length > 0
-        ? `<span class="mono" style="font-size:12px;color:var(--gray-700)">${esc(srcNames(rule.source_devices, d => d.short_name || d.fqdn.split('.')[0]))}</span>`
-        : rule.source_services && rule.source_services.length > 0
-          ? `<span class="mono" style="font-size:12px;color:var(--gray-700)">${esc(srcNames(rule.source_services, s => s.short_name || s.name))}</span>`
-          : '<span style="font-size:12px;color:var(--gray-500)">—</span>';
+    const filterHtml = isLocalRule
+      ? `<span class="badge neutral" style="font-size:11px">local machine</span>`
+      : rule.source_tag
+        ? `<span class="tag-chip" style="font-size:11px">${esc(rule.source_tag)}</span>`
+        : rule.source_devices && rule.source_devices.length > 0
+          ? `<span class="mono" style="font-size:12px;color:var(--gray-700)">${esc(srcNames(rule.source_devices, d => d.short_name || d.fqdn.split('.')[0]))}</span>`
+          : rule.source_services && rule.source_services.length > 0
+            ? `<span class="mono" style="font-size:12px;color:var(--gray-700)">${esc(srcNames(rule.source_services, s => s.short_name || s.name))}</span>`
+            : '<span style="font-size:12px;color:var(--gray-500)">—</span>';
 
     // Group live entries by dest tailnet
     const byDest = {};
@@ -1780,7 +1785,7 @@ function renderTopology() {
       <div class="brc-meta">
         <div class="brc-meta-row">
           <span class="brc-meta-arrow">↑</span>
-          <span class="brc-meta-net" title="${esc(srcLabel)}">${esc(srcLabel)}</span>
+          <span class="brc-meta-net" title="${esc(srcLabel)}">${isLocalRule ? '<span class=\\"badge neutral\\" style=\\"font-size:10px;padding:1px 6px\\">local</span>' : esc(srcLabel)}</span>
         </div>
         <div class="brc-meta-row">
           <span class="brc-meta-arrow">↓</span>
@@ -1832,10 +1837,12 @@ function renderBridges() {
     const badge = statusBadge(b.status, b.error);
     const traffic = fmtBytes((b.bytes_in||0) + (b.bytes_out||0));
     const rule = (state.config.bridges || []).find(r => r.name === b.rule_name);
-    const srcTailnet = rule ? rule.source_tailnet : '?';
+    const isLocalRule = rule && rule.local_sources && rule.local_sources.length > 0;
+    const srcLabel = isLocalRule ? 'local' : (rule ? rule.source_tailnet : '?');
+    const srcBadgeCls = isLocalRule ? 'neutral' : 'src';
     const dstTailnet = b.dest_tailnet || '?';
     const route = `<span style="white-space:nowrap;font-size:12px">
-      <span class="badge src" style="font-size:10px">${esc(srcTailnet)}</span>
+      <span class="badge ${srcBadgeCls}" style="font-size:10px">${esc(srcLabel)}</span>
       <span style="color:var(--gray-400);margin:0 3px">→</span>
       <span class="badge dst" style="font-size:10px">${esc(dstTailnet)}</span>
     </span>`;
@@ -1870,7 +1877,10 @@ function renderRules() {
     return;
   }
   tbody.innerHTML = rules.map(r => {
-    const ports = (r.ports||[]).map(p=>`<span class="port-chip">${p}</span>`).join('');
+    const isLocalR = r.local_sources && r.local_sources.length > 0;
+    const ports = isLocalR
+      ? (r.local_sources||[]).map(s=>`<span class="port-chip">${s.expose_port || s.addr.split(':').pop()}</span>`).join('')
+      : (r.ports||[]).map(p=>`<span class="port-chip">${p}</span>`).join('');
     const ruleNames = (arr, fn) => {
       const ns = arr.slice(0, 3).map(fn).join(', ');
       return arr.length > 3 ? ns + ` +${arr.length - 3}` : ns;
@@ -1882,9 +1892,9 @@ function renderRules() {
         : (r.source_tag || '—');
     return `<tr>
       <td>${esc(r.name)}</td>
-      <td><span class="badge src" style="font-size:11px">↑ ${esc(r.source_tailnet)}</span></td>
+      <td>${isLocalR ? '<span class="badge neutral" style="font-size:11px">↑ local</span>' : `<span class="badge src" style="font-size:11px">↑ ${esc(r.source_tailnet)}</span>`}</td>
       <td>${(r.dest_tailnets||[]).map(dt=>`<span class="badge dst" style="font-size:11px">↓ ${esc(dt)}</span>`).join(' ')}</td>
-      <td><span class="mono" style="font-size:12px">${esc(srcLabel)}</span></td>
+      <td><span class="mono" style="font-size:12px" title="${esc(isLocalR ? (r.local_sources||[]).slice(0,2).map(s=>s.addr).join(', ') : srcLabel)}">${esc(isLocalR ? ((r.local_sources||[]).slice(0,2).map(s=>s.addr).join(', ') + (r.local_sources.length > 2 ? ` +${r.local_sources.length-2}` : '')) : srcLabel)}</span></td>
       <td><div class="port-chips">${ports}</div></td>
       <td style="display:flex;gap:6px">
         <button class="btn-icon" title="Edit rule" onclick="openEditBridgeModal('${esc(r.name)}')">
@@ -1970,7 +1980,9 @@ function renderConns() {
     // dest_tailnet = where VIP lives = where the client connects FROM
     // source_tailnet = where the backend lives = where the traffic goes TO
     const clientTailnet  = bridge ? bridge.dest_tailnet : '';
-    const backendTailnet = rule   ? rule.source_tailnet : '';
+    const backendTailnet = rule
+      ? (rule.local_sources && rule.local_sources.length > 0 ? 'local' : rule.source_tailnet)
+      : '';
     const ruleName       = bridge ? bridge.rule_name  : '';
 
     const chipSrc = t => `<span class="badge src" style="font-size:10px;margin-top:2px;display:inline-block">${esc(t)}</span>`;
