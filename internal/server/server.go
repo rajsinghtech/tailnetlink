@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 
@@ -314,12 +317,8 @@ func (s *Server) handleBridgeRules(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if rule.Name == "" || rule.SourceTailnet == "" || len(rule.DestTailnets) == 0 || len(rule.Ports) == 0 {
-		http.Error(w, "name, source_tailnet, dest_tailnets, and ports are required", http.StatusBadRequest)
-		return
-	}
-	if rule.SourceTag == "" && len(rule.SourceDevices) == 0 && len(rule.SourceServices) == 0 {
-		http.Error(w, "either source_tag, source_devices, or source_services must be specified", http.StatusBadRequest)
+	if err := validateBridgeRule(rule); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -329,8 +328,10 @@ func (s *Server) handleBridgeRules(w http.ResponseWriter, r *http.Request) {
 				return fmt.Errorf("bridge rule %q already exists", rule.Name)
 			}
 		}
-		if _, ok := cfg.Tailnets[rule.SourceTailnet]; !ok {
-			return fmt.Errorf("source_tailnet %q not found", rule.SourceTailnet)
+		if len(rule.LocalSources) == 0 {
+			if _, ok := cfg.Tailnets[rule.SourceTailnet]; !ok {
+				return fmt.Errorf("source_tailnet %q not found", rule.SourceTailnet)
+			}
 		}
 		for _, dt := range rule.DestTailnets {
 			if _, ok := cfg.Tailnets[dt]; !ok {
@@ -389,6 +390,10 @@ func (s *Server) handleBridgeRuleByName(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		rule.Name = name
+		if err := validateBridgeRule(rule); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		if err := s.cfgStore.Update(func(cfg *config.Config) error {
 			for i, b := range cfg.Bridges {
 				if b.Name == name {
@@ -566,6 +571,14 @@ func checkShortNameConflicts(cfg *config.Config, incoming config.BridgeRule, ski
 					used[dest][spec.ShortName] = true
 				}
 			}
+			for _, spec := range b.LocalSources {
+				if spec.ShortName != "" {
+					if used[dest] == nil {
+						used[dest] = map[string]bool{}
+					}
+					used[dest][spec.ShortName] = true
+				}
+			}
 		}
 	}
 
@@ -602,6 +615,78 @@ func checkShortNameConflicts(cfg *config.Config, incoming config.BridgeRule, ski
 			}
 			selfSeen[dest][spec.ShortName] = true
 		}
+		for _, spec := range incoming.LocalSources {
+			if spec.ShortName == "" {
+				continue
+			}
+			if used[dest][spec.ShortName] {
+				return fmt.Errorf("short_name %q already used in dest tailnet %q", spec.ShortName, dest)
+			}
+			if selfSeen[dest] == nil {
+				selfSeen[dest] = map[string]bool{}
+			}
+			if selfSeen[dest][spec.ShortName] {
+				return fmt.Errorf("short_name %q appears more than once for dest tailnet %q", spec.ShortName, dest)
+			}
+			selfSeen[dest][spec.ShortName] = true
+		}
 	}
 	return nil
+}
+
+// validateBridgeRule validates a bridge rule for both tailnet and local-source rules.
+func validateBridgeRule(rule config.BridgeRule) error {
+	if rule.Name == "" {
+		return fmt.Errorf("name is required")
+	}
+	if len(rule.DestTailnets) == 0 {
+		return fmt.Errorf("dest_tailnets is required")
+	}
+	if len(rule.LocalSources) > 0 {
+		if rule.SourceTailnet != "" || rule.SourceTag != "" || len(rule.SourceDevices) > 0 || len(rule.SourceServices) > 0 || len(rule.Ports) > 0 {
+			return fmt.Errorf("local rules must not set source_tailnet, source_tag, source_devices, source_services, or ports")
+		}
+		return validateLocalSources(rule.LocalSources)
+	}
+	if rule.SourceTailnet == "" {
+		return fmt.Errorf("source_tailnet is required for non-local rules")
+	}
+	if len(rule.Ports) == 0 {
+		return fmt.Errorf("ports is required for non-local rules")
+	}
+	if rule.SourceTag == "" && len(rule.SourceDevices) == 0 && len(rule.SourceServices) == 0 {
+		return fmt.Errorf("either source_tag, source_devices, or source_services must be specified")
+	}
+	return nil
+}
+
+// validateLocalSources checks each LocalSourceSpec in isolation.
+func validateLocalSources(sources []config.LocalSourceSpec) error {
+	for i, src := range sources {
+		host, portStr, err := net.SplitHostPort(src.Addr)
+		if err != nil {
+			return fmt.Errorf("local_sources[%d].addr %q is invalid: %w", i, src.Addr, err)
+		}
+		p, err := strconv.Atoi(portStr)
+		if err != nil || p <= 0 || p > 65535 {
+			return fmt.Errorf("local_sources[%d].addr %q has invalid port", i, src.Addr)
+		}
+		if src.ExposePort < 0 || src.ExposePort > 65535 {
+			return fmt.Errorf("local_sources[%d].expose_port %d is out of range", i, src.ExposePort)
+		}
+		if isLocalHostServer(host) && src.DNSName == "" {
+			return fmt.Errorf("local_sources[%d].addr %q requires dns_name (cannot derive from localhost/IP)", i, src.Addr)
+		}
+	}
+	return nil
+}
+
+// isLocalHostServer mirrors bridge.isLocalHost for use in the server package.
+func isLocalHostServer(host string) bool {
+	h := strings.ToLower(host)
+	if h == "localhost" || h == "127.0.0.1" || h == "::1" || h == "0.0.0.0" {
+		return true
+	}
+	_, err := netip.ParseAddr(h)
+	return err == nil
 }
