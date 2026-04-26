@@ -63,14 +63,26 @@ type ServiceSpec struct {
 	ShortName string `json:"short_name,omitempty"` // bare VIP service name → svc:shortName
 }
 
+// LocalSourceSpec identifies a service on the local machine (or host-reachable network)
+// to proxy into a destination tailnet. Addr is "host:port" dialed directly via net.DialContext.
+// ExposePort is the VIP-side listen port (defaults to addr's port if zero). DNSName is required
+// when host is localhost or a bare IP; auto-derived from addr hostname otherwise.
+type LocalSourceSpec struct {
+	Addr       string `json:"addr"`
+	ExposePort int    `json:"expose_port,omitempty"`
+	DNSName    string `json:"dns_name,omitempty"`
+	ShortName  string `json:"short_name,omitempty"`
+}
+
 type BridgeRule struct {
-	Name           string        `json:"name"`
-	SourceTailnet  string        `json:"source_tailnet"`
-	DestTailnets   []string      `json:"dest_tailnets"`
-	SourceTag      string        `json:"source_tag,omitempty"`
-	SourceDevices  []DeviceSpec  `json:"source_devices,omitempty"`
-	SourceServices []ServiceSpec `json:"source_services,omitempty"`
-	Ports          []int         `json:"ports"`
+	Name           string            `json:"name"`
+	SourceTailnet  string            `json:"source_tailnet,omitempty"`
+	DestTailnets   []string          `json:"dest_tailnets"`
+	SourceTag      string            `json:"source_tag,omitempty"`
+	SourceDevices  []DeviceSpec      `json:"source_devices,omitempty"`
+	SourceServices []ServiceSpec     `json:"source_services,omitempty"`
+	LocalSources   []LocalSourceSpec `json:"local_sources,omitempty"`
+	Ports          []int             `json:"ports,omitempty"`
 }
 
 func defaults() *Config {
