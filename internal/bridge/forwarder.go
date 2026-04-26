@@ -52,6 +52,9 @@ func NewForwarder(
 	store *state.Store,
 	logger *slog.Logger,
 ) *Forwarder {
+	if dialSrv == nil {
+		panic("NewForwarder: dialSrv must not be nil; use newLocalForwarder for local-mode")
+	}
 	return &Forwarder{
 		listenSrv: listenSrv,
 		dialSrv:   dialSrv,
