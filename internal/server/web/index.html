@@ -453,6 +453,35 @@
     .device-dns-input.short { width: 90px; }
     .device-dns-input:focus { border-color: var(--blue-200); box-shadow: 0 0 0 2px var(--blue-0); }
 
+    /* ─── Source type toggle ─────────────────────────────────────────────── */
+    .src-type-toggle { display: flex; border: 1px solid var(--gray-200); border-radius: 8px; overflow: hidden; }
+    .src-type-btn {
+      flex: 1; padding: 7px 12px; font-size: 13px; font-weight: 500; color: var(--gray-500);
+      border: none; background: white; cursor: pointer; transition: background .12s, color .12s;
+    }
+    .src-type-btn.active { background: var(--blue-0); color: var(--blue-600); }
+    .src-type-btn:first-child { border-right: 1px solid var(--gray-200); }
+
+    /* ─── Local endpoint rows ────────────────────────────────────────────── */
+    .local-ep-list { display: flex; flex-direction: column; gap: 8px; }
+    .local-ep-row {
+      background: var(--gray-50); border: 1px solid var(--gray-200); border-radius: 8px;
+      padding: 10px 12px; display: flex; gap: 8px; align-items: start;
+    }
+    .local-ep-fields { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+    .local-ep-row-line { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    .local-ep-lbl { font-size: 11px; color: var(--gray-500); white-space: nowrap; flex-shrink: 0; min-width: 58px; }
+    .local-ep-preview { font-size: 11px; color: var(--blue-500); font-family: "SFMono-Regular", Consolas, monospace; }
+    .local-ep-err { font-size: 11px; color: var(--red-600); display: none; }
+    .local-ep-err.visible { display: block; }
+    .local-ep-add {
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+      width: 100%; padding: 8px 12px; border-radius: 6px; border: 1px dashed var(--gray-300);
+      font-size: 12px; font-weight: 500; color: var(--gray-500); background: white; cursor: pointer;
+      transition: border-color .15s, background .15s, color .15s;
+    }
+    .local-ep-add:hover { border-color: var(--blue-200); background: var(--blue-0); color: var(--blue-600); }
+
     /* ─── Setup wizard ────────────────────────────────────────────────────── */
     .wizard-overlay {
       position: fixed; inset: 0; background: rgb(0 0 0 / .5);
@@ -828,16 +857,27 @@
     </div>
     <form onsubmit="submitAddBridge(event)">
       <input type="hidden" id="bridge-edit-name">
-      <div class="modal-body">
-        <div class="form-group">
-          <label class="form-label">Rule name</label>
-          <input class="form-input" id="bridge-name-input" placeholder="api-servers" required autocomplete="off">
-          <div class="form-hint">A unique identifier for this bridge rule.</div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Source type</label>
+        <div class="src-type-toggle">
+          <button type="button" class="src-type-btn active" id="bridge-src-type-ts"
+            onclick="setBridgeSrcType('tailscale')">Tailscale network</button>
+          <button type="button" class="src-type-btn" id="bridge-src-type-local"
+            onclick="setBridgeSrcType('local')">Local machine</button>
         </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Rule name</label>
+        <input class="form-input" id="bridge-name-input" placeholder="api-servers" required autocomplete="off">
+        <div class="form-hint">A unique identifier for this bridge rule.</div>
+      </div>
+      <!-- Tailscale-mode fields -->
+      <div id="bridge-ts-fields">
         <div class="form-row">
           <div class="form-group">
             <label class="form-label">Source network</label>
-            <select class="form-select" required id="bridge-source-select" onchange="loadSourcePicker('bridge')">
+            <select class="form-select" id="bridge-source-select" onchange="loadSourcePicker('bridge')">
               <option value="">Select…</option>
             </select>
           </div>
@@ -855,11 +895,29 @@
         </div>
         <div class="form-group">
           <label class="form-label">Ports (comma-separated)</label>
-          <input class="form-input mono" id="bridge-ports-input" placeholder="8080, 8443" required autocomplete="off">
+          <input class="form-input mono" id="bridge-ports-input" placeholder="8080, 8443" autocomplete="off">
           <div class="form-hint">TCP ports to forward from source devices.</div>
         </div>
-        <div class="wizard-error" id="add-bridge-error"></div>
       </div>
+      <!-- Local machine fields -->
+      <div id="bridge-local-fields" hidden>
+        <div class="form-group">
+          <label class="form-label">Destination network(s)</label>
+          <div class="dest-picker" id="bridge-local-dest-picker"><span class="dest-chip-empty">No networks configured</span></div>
+          <div class="form-hint">Click to toggle. Select one or more destinations.</div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Local endpoints</label>
+          <div class="local-ep-list" id="bridge-local-ep-list"></div>
+          <button type="button" class="local-ep-add" onclick="addLocalEpRow('bridge-local-ep-list')">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Add endpoint
+          </button>
+          <div class="form-hint">addr is host:port to dial. VIP port defaults to addr port.</div>
+        </div>
+      </div>
+      <div class="wizard-error" id="add-bridge-error"></div>
+    </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" onclick="closeModal('modal-add-bridge')">Cancel</button>
         <button type="submit" class="btn btn-primary" id="bridge-modal-submit">Add bridge rule</button>
