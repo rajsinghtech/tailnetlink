@@ -1,20 +1,24 @@
-.PHONY: build run dev clean deps lint
+.PHONY: build run dev clean deps lint docker-build docker-run version
 
 BINARY := tailnetlink
-DATA ?= data.json
+DATA ?= tailnetlink.json
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 deps:
 	go mod tidy
 	go mod download
 
 build: deps
-	CGO_ENABLED=0 go build -ldflags "-s -w" -o $(BINARY) ./cmd/tailnetlink
+	CGO_ENABLED=0 go build -ldflags "-s -w -X main.Version=$(VERSION)" -o $(BINARY) ./cmd/tailnetlink
+
+version: build
+	./$(BINARY) -version
 
 run: build
-	./$(BINARY) -data $(DATA) -listen :8888
+	./$(BINARY) -data $(DATA)
 
 dev:
-	go run ./cmd/tailnetlink -data $(DATA) -listen :8888 -log-level debug
+	go run -ldflags "-X main.Version=$(VERSION)" ./cmd/tailnetlink -data $(DATA) -log-level debug
 
 lint:
 	go vet ./...
@@ -22,13 +26,12 @@ lint:
 clean:
 	rm -f $(BINARY)
 
-# Docker
 docker-build:
-	docker build -t tailnetlink:latest .
+	docker build --build-arg VERSION=$(VERSION) -t tailnetlink:local .
 
 docker-run:
 	docker run --rm \
-		-p 8080:8080 \
-		-v $(PWD)/data.json:/data.json \
-		-v tailnetlink-state:/tailnetlink-state \
-		tailnetlink:latest
+		-p 8888:8888 -p 9090:9090 \
+		-v $(PWD)/tailnetlink.json:/data/tailnetlink.json:ro \
+		-v tailnetlink-state:/data/tailnetlink-state \
+		tailnetlink:local

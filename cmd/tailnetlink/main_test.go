@@ -442,3 +442,16 @@ func TestRunRejectsV1Config(t *testing.T) {
 		t.Errorf("output:\n%s", out.String())
 	}
 }
+
+func TestVersionFlag(t *testing.T) {
+	old := Version
+	t.Cleanup(func() { Version = old })
+	Version = "test-ver"
+	var out bytes.Buffer
+	if c := run([]string{"-version"}, &out, nil); c != 0 {
+		t.Fatalf("exit %d", c)
+	}
+	if got := strings.TrimSpace(out.String()); got != "test-ver" {
+		t.Fatalf("version = %q", got)
+	}
+}

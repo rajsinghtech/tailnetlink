@@ -27,6 +27,9 @@ archives:
       - LICENSE
       - README.md
 
+sboms:
+  - artifacts: archive
+
 release:
   header: |
     ## Installation
@@ -39,13 +42,14 @@ release:
     ```bash
     docker run -d \
       --name tailnetlink \
-      -p 8080:8080 \
-      -v $(pwd)/tailnetlink.json:/tailnetlink.json \
+      -p 8888:8888 -p 9090:9090 \
+      -v $(pwd)/tailnetlink.json:/data/tailnetlink.json \
+      -v tailnetlink-state:/data/tailnetlink-state \
       ghcr.io/rajsinghtech/tailnetlink:{{ .Tag }}
     ```
 
-    ### Binary Download
-    Download the appropriate binary for your platform from the assets below.
+    ### Binary
+    Download the binary for your platform from the assets below.
 
     ## What's New
 

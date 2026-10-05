@@ -31,6 +31,9 @@ func main() {
 // catch it.
 var forceExit = os.Exit
 
+// Version is set by goreleaser via -ldflags "-X main.Version=...".
+var Version = "dev"
+
 // run is main without the process-global parts. It returns the exit code.
 // The first value on sig starts a clean shutdown; a second one exits at once.
 func run(args []string, stdout io.Writer, sig <-chan os.Signal) int {
@@ -40,18 +43,23 @@ func run(args []string, stdout io.Writer, sig <-chan os.Signal) int {
 	fs := flag.NewFlagSet("tailnetlink", flag.ContinueOnError)
 	fs.SetOutput(stdout)
 	var (
-		dataFile        = fs.String("data", "tailnetlink.json", "path to config/state JSON file")
+		dataFile        = fs.String("data", "tailnetlink.json", "path to config JSON file")
 		listenAddr      = fs.String("listen", "", "web UI listen address (default 127.0.0.1:8888)")
 		metricsListen   = fs.String("metrics-listen", "", "address for /healthz, /readyz and /metrics (default 127.0.0.1:9090); \"off\" turns it off")
 		uiFlag          = fs.Bool("ui", true, "serve the read-only web UI locally and publish it in every tailnet; -ui=false turns both off whatever the config says")
 		logLevel        = fs.String("log-level", "info", "log level: debug, info, warn, error")
 		shutdownTimeout = fs.Duration("shutdown-timeout", 20*time.Second, "how long to wait for a clean shutdown before giving up")
+		showVersion     = fs.Bool("version", false, "print the version and exit")
 	)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return 2
+	}
+	if *showVersion {
+		fmt.Fprintln(stdout, Version)
+		return 0
 	}
 
 	level := slog.LevelInfo
