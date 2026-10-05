@@ -13,3 +13,7 @@ dist/
 # Local deploy script and brainstorm sessions
 deploy.sh
 .superpowers/
+
+# Coverage output
+coverage.out
+coverage.out.raw
