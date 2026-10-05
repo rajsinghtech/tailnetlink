@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Coverage ratchet.
 #
-# Runs the test suite with coverage, drops test-only packages from the
+# Runs the test suite with coverage, drops test-only packages and the CI
+# tooling under test/ (it has its own tests but is not product code) from the
 # profile, and fails if total statement coverage is below the floor in
 # .coverage-baseline. When coverage goes up by a point or more it asks you to
 # raise the floor in the same PR, so the number only ever moves up.
@@ -15,7 +16,7 @@ baseline_file=.coverage-baseline
 profile=${COVERPROFILE:-coverage.out}
 
 go test -race -covermode=atomic -coverprofile="$profile.raw" ./...
-grep -v -E '/internal/(testutil|e2e)/' "$profile.raw" > "$profile"
+grep -v -E '/internal/(testutil|e2e)/|/tailnetlink/test/' "$profile.raw" > "$profile"
 rm -f "$profile.raw"
 
 total=$(go tool cover -func="$profile" | awk '/^total:/ {sub("%", "", $3); print $3}')
