@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/rajsinghtech/tailnetlink/internal/config"
 	"golang.org/x/oauth2"
@@ -14,13 +15,17 @@ import (
 
 // NewClient returns an admin API client for tc. The OAuth client secret is
 // read from its file or environment variable each time a new token is
-// needed, never held in the config.
-func NewClient(tc config.TailnetConfig) *tsclient.Client {
+// needed, never held in the config. rt, when not nil, carries every request,
+// token requests included; tailnetlink uses it to count API errors.
+func NewClient(tc config.TailnetConfig, rt http.RoundTripper) *tsclient.Client {
 	tailnet := tc.Tailnet
 	if tailnet == "" {
 		tailnet = "-"
 	}
-	c := &tsclient.Client{Tailnet: tailnet, Auth: &oauth{creds: tc.OAuth}}
+	c := &tsclient.Client{Tailnet: tailnet, Auth: &oauth{creds: tc.OAuth, rt: rt}}
+	if rt != nil {
+		c.HTTP = &http.Client{Transport: rt, Timeout: time.Minute}
+	}
 	if tc.APIBaseURL != "" {
 		if u, err := url.Parse(tc.APIBaseURL); err == nil {
 			c.BaseURL = u
@@ -33,10 +38,11 @@ func NewClient(tc config.TailnetConfig) *tsclient.Client {
 // secret at token time.
 type oauth struct {
 	creds config.OAuthCreds
+	rt    http.RoundTripper
 }
 
 func (o *oauth) HTTPClient(orig *http.Client, baseURL string) *http.Client {
-	src := &tokenSource{creds: o.creds, tokenURL: baseURL + "/api/v2/oauth/token"}
+	src := &tokenSource{creds: o.creds, tokenURL: baseURL + "/api/v2/oauth/token", rt: o.rt}
 	return &http.Client{
 		Transport: &oauth2.Transport{
 			Base:   orig.Transport,
@@ -51,6 +57,7 @@ func (o *oauth) HTTPClient(orig *http.Client, baseURL string) *http.Client {
 type tokenSource struct {
 	creds    config.OAuthCreds
 	tokenURL string
+	rt       http.RoundTripper
 }
 
 func (s *tokenSource) Token() (*oauth2.Token, error) {
@@ -59,5 +66,9 @@ func (s *tokenSource) Token() (*oauth2.Token, error) {
 		return nil, err
 	}
 	cc := clientcredentials.Config{ClientID: s.creds.ClientID, ClientSecret: secret, TokenURL: s.tokenURL}
-	return cc.Token(context.Background())
+	ctx := context.Background()
+	if s.rt != nil {
+		ctx = context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Transport: s.rt, Timeout: time.Minute})
+	}
+	return cc.Token(ctx)
 }

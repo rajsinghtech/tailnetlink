@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rajsinghtech/tailnetlink/internal/metrics"
 	"github.com/rajsinghtech/tailnetlink/internal/state"
 	"tailscale.com/tsnet"
 )
@@ -37,6 +38,8 @@ type Forwarder struct {
 	store       *state.Store
 	logger      *slog.Logger
 	connCounter atomic.Int64
+	rule        string           // rule name, the metrics label
+	metrics     *metrics.Metrics // nil means no metrics
 
 	cancel    context.CancelFunc
 	listeners []net.Listener
@@ -140,6 +143,7 @@ func (f *Forwarder) handle(ctx context.Context, client net.Conn, port int) {
 
 	if err := dialErr; err != nil {
 		f.logger.Warn("forwarder: dial failed", "target", target, "err", err)
+		f.metrics.DialFailed(f.rule)
 		if ctx.Err() == nil {
 			f.store.Log("warn", fmt.Sprintf("dial failed: %s → %s: %v", f.vip.ServiceName, target, err), nil)
 		}
@@ -171,6 +175,7 @@ func (f *Forwarder) handle(ctx context.Context, client net.Conn, port int) {
 		OpenedAt:    time.Now(),
 	})
 	f.store.IncrBridgeConn(f.bridgeID, 1)
+	f.metrics.ConnOpened(f.rule)
 	f.store.Log("info", fmt.Sprintf("conn: %s ← %s", f.vip.ServiceName, connLabel(clientAddr, nodeName, identity)), nil)
 
 	var bytesIn, bytesOut atomic.Int64
@@ -204,6 +209,7 @@ func (f *Forwarder) handle(ctx context.Context, client net.Conn, port int) {
 	f.store.CloseConn(connID, in, out)
 	f.store.AddBridgeBytes(f.bridgeID, in, out)
 	f.store.IncrBridgeConn(f.bridgeID, -1)
+	f.metrics.ConnClosed(f.rule, in, out)
 	f.store.Log("info", fmt.Sprintf("conn closed: %s — %s in, %s out", f.vip.ServiceName, formatBytes(in), formatBytes(out)), nil)
 }
 

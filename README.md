@@ -159,6 +159,7 @@ The secret is read each time tailnetlink needs a new API token, so rotating the 
 |---|---|---|
 | `-data` | `tailnetlink.json` | Path to config/state JSON file |
 | `-listen` | `127.0.0.1:8888` | Web UI listen address |
+| `-metrics-listen` | `127.0.0.1:9090` | Address for `/healthz`, `/readyz` and `/metrics` (overrides `metrics_addr`); `off` turns it off |
 | `-ui` | `true` | `-ui=false` turns the web UI off: no local listener and no `svc:tailnetlink`, whatever the config says |
 | `-log-level` | `info` | Log level: `debug`, `info`, `warn`, `error` |
 | `-shutdown-timeout` | `20s` | How long to wait for a clean shutdown on SIGTERM or SIGINT. A second signal exits at once. |
@@ -184,6 +185,28 @@ docker run --rm \
 ```
 
 Node state lives in `/tailnetlink-state` (next to `/data.json`) unless `state_dir` says otherwise. Without a volume there, every container start registers new devices.
+
+## Health and metrics
+
+`/healthz`, `/readyz` and `/metrics` are served on their own listener, `127.0.0.1:9090` by default (`metrics_addr` in the config or `-metrics-listen`; `off` disables it). They are never on the UI port or the UI service, and they stay up with the UI off. In a container set the address to `:9090` so probes can reach it.
+
+- `/healthz` is 200 while the process is running.
+- `/readyz` is 200 once the config has been applied, every configured tailnet's node is up, and every tailnet rule has polled successfully within the last three poll intervals. Otherwise it is 503 with the reason.
+- `/metrics` is Prometheus text. Labels only carry rule names, tailnet keys and fixed values, never device names or client addresses.
+
+| Metric | Labels | |
+|---|---|---|
+| `tailnetlink_bridges` | `status` | Bridges by status (pending, active, error) |
+| `tailnetlink_connections_active` | `rule` | Connections being forwarded right now |
+| `tailnetlink_connections_total` | `rule` | Connections forwarded |
+| `tailnetlink_bytes_total` | `rule`, `direction` | Bytes forwarded; `in` is client to backend |
+| `tailnetlink_dial_failures_total` | `rule` | Failed backend dials |
+| `tailnetlink_api_errors_total` | `endpoint` | Failed Tailscale API calls (devices, services, keys, dns, oauth, other); 404s are not counted |
+| `tailnetlink_poll_duration_seconds` | `rule` | Discovery poll time |
+| `tailnetlink_poll_errors_total` | `rule` | Failed discovery polls |
+| `tailnetlink_ownership_conflicts_total` | `tailnet` | Wanted service names taken by something this instance doesn't own |
+
+Go runtime and process metrics are included too.
 
 ## Web UI
 

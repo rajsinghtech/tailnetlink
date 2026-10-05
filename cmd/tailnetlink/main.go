@@ -16,6 +16,7 @@ import (
 
 	"github.com/rajsinghtech/tailnetlink/internal/bridge"
 	"github.com/rajsinghtech/tailnetlink/internal/config"
+	"github.com/rajsinghtech/tailnetlink/internal/metrics"
 	"github.com/rajsinghtech/tailnetlink/internal/server"
 	"github.com/rajsinghtech/tailnetlink/internal/state"
 )
@@ -41,6 +42,7 @@ func run(args []string, stdout io.Writer, sig <-chan os.Signal) int {
 	var (
 		dataFile        = fs.String("data", "tailnetlink.json", "path to config/state JSON file")
 		listenAddr      = fs.String("listen", "", "web UI listen address (default 127.0.0.1:8888)")
+		metricsListen   = fs.String("metrics-listen", "", "address for /healthz, /readyz and /metrics (default 127.0.0.1:9090); \"off\" turns it off")
 		uiFlag          = fs.Bool("ui", true, "serve the read-only web UI locally and publish it in every tailnet; -ui=false turns both off whatever the config says")
 		logLevel        = fs.String("log-level", "info", "log level: debug, info, warn, error")
 		shutdownTimeout = fs.Duration("shutdown-timeout", 20*time.Second, "how long to wait for a clean shutdown before giving up")
@@ -74,6 +76,10 @@ func run(args []string, stdout io.Writer, sig <-chan os.Signal) int {
 	if *listenAddr != "" {
 		addr = *listenAddr
 	}
+	metricsAddr := cfgStore.Get().MetricsAddr
+	if *metricsListen != "" {
+		metricsAddr = *metricsListen
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -102,6 +108,8 @@ func run(args []string, stdout io.Writer, sig <-chan os.Signal) int {
 	}
 	mgr := bridge.New(stateStore, logger, uiHandler)
 	mgr.SetDefaultStateDir(filepath.Join(filepath.Dir(*dataFile), "tailnetlink-state"))
+	mt := metrics.New()
+	mgr.SetMetrics(mt)
 
 	// Apply initial config (no-op if empty).
 	go mgr.Reconcile(ctx, cfgStore.Get())
@@ -127,22 +135,30 @@ func run(args []string, stdout io.Writer, sig <-chan os.Signal) int {
 		}
 	}()
 
-	var srvErr chan error
+	// The UI and metrics listeners report here when they stop. Either one
+	// failing (say its port is taken) shuts the process down.
+	srvErr := make(chan error, 2)
+	running := 0
 	if uiOn {
-		srvErr = make(chan error, 1)
+		running++
 		go func() { srvErr <- srv.Run(ctx) }()
 	} else {
 		logger.Info("web UI is off")
+	}
+	if metricsAddr != "off" && metricsAddr != "" {
+		running++
+		logger.Info("metrics and health listening", "addr", metricsAddr)
+		go func() { srvErr <- metrics.Serve(ctx, metricsAddr, metrics.Handler(mt, mgr.Ready)) }()
 	}
 
 	code := 0
 	select {
 	case <-ctx.Done():
 	case err := <-srvErr:
+		running--
 		logger.Error("server failed", "err", err)
 		code = 1
 		cancel()
-		srvErr = nil
 	}
 
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), *shutdownTimeout)
@@ -151,7 +167,7 @@ func run(args []string, stdout io.Writer, sig <-chan os.Signal) int {
 		logger.Error("shutdown did not finish in time", "err", err)
 		return 1
 	}
-	if srvErr != nil {
+	for ; running > 0; running-- {
 		select {
 		case err := <-srvErr:
 			if err != nil {

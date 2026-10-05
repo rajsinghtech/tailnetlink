@@ -96,6 +96,7 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 
 			vip, err := srcRec.Ensure(ctx, "local", syntheticDev, shortName)
 			if err != nil {
+				m.conflict(dest.name, err)
 				m.logger.Error("local rule: VIP ensure failed", "rule", rule.Name, "dest", dest.name, "addr", src.Addr, "err", err)
 				m.store.UpsertBridge(state.BridgeEntry{
 					ID: bridgeID, RuleName: rule.Name, DestTailnet: dest.name,
@@ -108,6 +109,7 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 			}
 
 			fwd := newLocalForwarder(dest.srv, src.Addr, vip, bridgeID, dialTimeout, m.store, m.logger)
+			fwd.rule, fwd.metrics = rule.Name, m.metricsRef()
 			if err := startForwarder(fwd, ctx); err != nil {
 				m.logger.Error("local rule: forwarder start failed", "rule", rule.Name, "dest", dest.name, "addr", src.Addr, "err", err)
 				_ = srcRec.Delete(context.Background(), "local", syntheticDev, shortName)

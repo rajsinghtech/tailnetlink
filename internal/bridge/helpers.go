@@ -145,5 +145,5 @@ func connLabel(addr, nodeName, identity string) string {
 
 // newAPIClient constructs a Tailscale API client from a TailnetConfig.
 func newAPIClient(tc config.TailnetConfig) *tsclient.Client {
-	return tsapi.NewClient(tc)
+	return tsapi.NewClient(tc, nil)
 }

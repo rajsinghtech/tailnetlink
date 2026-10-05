@@ -38,7 +38,8 @@ type Discoverer struct {
 	services map[string]struct{} // explicit VIP service names; non-nil means service mode
 	poll     time.Duration
 	logger   *slog.Logger
-	warnFn   func(string) // called with user-facing warning messages (e.g. "no match for tag")
+	warnFn   func(string)               // called with user-facing warning messages (e.g. "no match for tag")
+	onPoll   func(time.Duration, error) // called after every poll, if set
 
 	current map[string]Device // keyed by node ID or service name
 	added   chan Device
@@ -93,14 +94,23 @@ func (d *Discoverer) Run(ctx context.Context) {
 }
 
 func (d *Discoverer) poll1(ctx context.Context) {
+	start := time.Now()
+	var err error
 	if d.services != nil {
-		d.pollServices(ctx)
-		return
+		err = d.pollServices(ctx)
+	} else {
+		err = d.pollDevices(ctx)
 	}
+	if d.onPoll != nil && ctx.Err() == nil {
+		d.onPoll(time.Since(start), err)
+	}
+}
+
+func (d *Discoverer) pollDevices(ctx context.Context) error {
 	devices, err := d.client.Devices().List(ctx)
 	if err != nil {
 		d.logger.Warn("discoverer: list devices failed", "err", err)
-		return
+		return err
 	}
 
 	found := make(map[string]Device)
@@ -188,13 +198,14 @@ func (d *Discoverer) poll1(ctx context.Context) {
 	}
 
 	d.diffAndNotify(ctx, found, "device/service")
+	return nil
 }
 
-func (d *Discoverer) pollServices(ctx context.Context) {
+func (d *Discoverer) pollServices(ctx context.Context) error {
 	svcs, err := d.client.VIPServices().List(ctx)
 	if err != nil {
 		d.logger.Warn("discoverer: list vip services failed", "err", err)
-		return
+		return err
 	}
 
 	found := make(map[string]Device)
@@ -217,6 +228,7 @@ func (d *Discoverer) pollServices(ctx context.Context) {
 
 	d.logger.Info("discoverer: poll (service mode)", "wanted", len(d.services), "online", len(found))
 	d.diffAndNotify(ctx, found, "vip service")
+	return nil
 }
 
 // diffAndNotify announces what changed between the last poll and found. It

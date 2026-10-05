@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -63,7 +64,7 @@ func runAsync(args []string, out io.Writer, sig chan os.Signal) chan int {
 func TestRunExitsCleanlyOnSignal(t *testing.T) {
 	out := &syncBuffer{}
 	sig := make(chan os.Signal, 2)
-	code := runAsync([]string{"-data", emptyConfig(t), "-listen", "127.0.0.1:0"}, out, sig)
+	code := runAsync([]string{"-data", emptyConfig(t), "-metrics-listen", "127.0.0.1:0", "-listen", "127.0.0.1:0"}, out, sig)
 	waitForOutput(t, out, "web UI available")
 
 	sig <- syscall.SIGTERM
@@ -88,7 +89,7 @@ func TestRunSecondSignalForcesExit(t *testing.T) {
 
 	out := &syncBuffer{}
 	sig := make(chan os.Signal, 2)
-	code := runAsync([]string{"-data", emptyConfig(t), "-listen", "127.0.0.1:0"}, out, sig)
+	code := runAsync([]string{"-data", emptyConfig(t), "-metrics-listen", "127.0.0.1:0", "-listen", "127.0.0.1:0"}, out, sig)
 	waitForOutput(t, out, "web UI available")
 	sig <- syscall.SIGTERM
 	sig <- syscall.SIGINT
@@ -120,7 +121,7 @@ func TestRunListenFails(t *testing.T) {
 	}
 	defer ln.Close()
 	out := &syncBuffer{}
-	code := runAsync([]string{"-data", emptyConfig(t), "-listen", ln.Addr().String()}, out, make(chan os.Signal))
+	code := runAsync([]string{"-data", emptyConfig(t), "-metrics-listen", "127.0.0.1:0", "-listen", ln.Addr().String()}, out, make(chan os.Signal))
 	select {
 	case c := <-code:
 		if c != 1 {
@@ -145,7 +146,7 @@ func TestRunLogLevels(t *testing.T) {
 		out := &syncBuffer{}
 		sig := make(chan os.Signal, 1)
 		sig <- syscall.SIGTERM
-		if c := run([]string{"-data", emptyConfig(t), "-listen", "127.0.0.1:0", "-log-level", lvl}, out, sig); c != 0 {
+		if c := run([]string{"-data", emptyConfig(t), "-metrics-listen", "127.0.0.1:0", "-listen", "127.0.0.1:0", "-log-level", lvl}, out, sig); c != 0 {
 			t.Errorf("%s: exit code %d:\n%s", lvl, c, out)
 		}
 	}
@@ -161,7 +162,7 @@ func TestBinaryExitsOnSIGTERM(t *testing.T) {
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
-	cmd := exec.Command(bin, "-data", emptyConfig(t), "-listen", "127.0.0.1:0", "-shutdown-timeout", "5s")
+	cmd := exec.Command(bin, "-data", emptyConfig(t), "-metrics-listen", "127.0.0.1:0", "-listen", "127.0.0.1:0", "-shutdown-timeout", "5s")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -299,7 +300,7 @@ func TestRunUIOff(t *testing.T) {
 			ln.Close()
 			out := &syncBuffer{}
 			sig := make(chan os.Signal, 2)
-			code := runAsync(append(args, "-listen", addr), out, sig)
+			code := runAsync(append(args, "-metrics-listen", "127.0.0.1:0", "-listen", addr), out, sig)
 			waitForOutput(t, out, "web UI is off")
 			if c, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
 				c.Close()
@@ -310,5 +311,110 @@ func TestRunUIOff(t *testing.T) {
 				t.Errorf("exit code %d:\n%s", c, out)
 			}
 		})
+	}
+}
+
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	return ln.Addr().String()
+}
+
+func get(t *testing.T, url string) (int, string) {
+	t.Helper()
+	var last error
+	for range 100 {
+		resp, err := http.Get(url)
+		if err != nil {
+			last = err
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp.StatusCode, string(body)
+	}
+	t.Fatalf("GET %s: %v", url, last)
+	return 0, ""
+}
+
+// Health and metrics live on their own listener, not on the UI's, and stay
+// up with the UI off.
+func TestRunServesHealthOnMetricsListener(t *testing.T) {
+	for _, ui := range []string{"-ui=true", "-ui=false"} {
+		t.Run(ui, func(t *testing.T) {
+			uiAddr, metricsAddr := freeAddr(t), freeAddr(t)
+			out := &syncBuffer{}
+			sig := make(chan os.Signal, 2)
+			code := runAsync([]string{"-data", emptyConfig(t), ui, "-listen", uiAddr, "-metrics-listen", metricsAddr}, out, sig)
+			waitForOutput(t, out, "metrics and health listening")
+
+			if c, _ := get(t, "http://"+metricsAddr+"/healthz"); c != 200 {
+				t.Errorf("/healthz = %d", c)
+			}
+			// An empty config is ready as soon as it has been applied.
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				c, body := get(t, "http://"+metricsAddr+"/readyz")
+				if c == 200 {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("/readyz = %d %s", c, body)
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if c, body := get(t, "http://"+metricsAddr+"/metrics"); c != 200 || !strings.Contains(body, "tailnetlink_bridges{status=\"active\"} 0") {
+				t.Errorf("/metrics = %d:\n%s", c, body)
+			}
+			if ui == "-ui=true" {
+				for _, p := range []string{"/healthz", "/readyz", "/metrics"} {
+					if c, _ := get(t, "http://"+uiAddr+p); c != 404 {
+						t.Errorf("UI listener %s = %d, want 404", p, c)
+					}
+				}
+			}
+			sig <- syscall.SIGTERM
+			if c := <-code; c != 0 {
+				t.Errorf("exit code %d:\n%s", c, out)
+			}
+		})
+	}
+}
+
+func TestRunMetricsOff(t *testing.T) {
+	out := &syncBuffer{}
+	sig := make(chan os.Signal, 2)
+	code := runAsync([]string{"-data", emptyConfig(t), "-listen", "127.0.0.1:0", "-metrics-listen", "off"}, out, sig)
+	waitForOutput(t, out, "web UI available")
+	if strings.Contains(out.String(), "metrics and health listening") {
+		t.Error("metrics listener started with -metrics-listen=off")
+	}
+	sig <- syscall.SIGTERM
+	if c := <-code; c != 0 {
+		t.Errorf("exit code %d:\n%s", c, out)
+	}
+}
+
+// A metrics address that's taken is a startup failure, like the UI's.
+func TestRunMetricsPortInUse(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	out := &syncBuffer{}
+	code := runAsync([]string{"-data", emptyConfig(t), "-ui=false", "-metrics-listen", ln.Addr().String()}, out, make(chan os.Signal))
+	select {
+	case c := <-code:
+		if c != 1 {
+			t.Errorf("exit code %d, want 1:\n%s", c, out)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not exit")
 	}
 }
