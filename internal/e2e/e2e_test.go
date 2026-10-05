@@ -35,6 +35,7 @@ import (
 type tailnet struct {
 	control *testcontrol.Server
 	url     string
+	domain  string
 }
 
 func newTailnet(t *testing.T, domain string) *tailnet {
@@ -49,7 +50,7 @@ func newTailnet(t *testing.T, domain string) *tailnet {
 	c.HTTPTestServer = httptest.NewUnstartedServer(c)
 	c.HTTPTestServer.Start()
 	t.Cleanup(c.HTTPTestServer.Close)
-	return &tailnet{control: c, url: c.HTTPTestServer.URL}
+	return &tailnet{control: c, url: c.HTTPTestServer.URL, domain: domain}
 }
 
 type node struct {

@@ -170,10 +170,11 @@ func (m *Manager) startTailnet(ctx context.Context, name string, tc config.Tailn
 	}
 
 	srv := &tsnet.Server{
-		Hostname:  "tailnetlink-" + name,
-		AuthKey:   authKey,
-		Ephemeral: true,
-		Dir:       filepath.Join(os.TempDir(), "tailnetlink-"+name),
+		Hostname:   "tailnetlink-" + name,
+		AuthKey:    authKey,
+		Ephemeral:  true,
+		Dir:        filepath.Join(os.TempDir(), "tailnetlink-"+name),
+		ControlURL: tc.ControlURL,
 		Logf: func(format string, args ...any) {
 			m.logger.Debug(fmt.Sprintf("[tsnet/%s] "+format, append([]any{name}, args...)...))
 		},

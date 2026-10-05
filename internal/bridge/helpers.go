@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"net/url"
 
 	"github.com/rajsinghtech/tailnetlink/internal/config"
 	tsclient "tailscale.com/client/tailscale/v2"
@@ -78,8 +79,14 @@ func newAPIClient(tc config.TailnetConfig) *tsclient.Client {
 	if tailnet == "" {
 		tailnet = "-"
 	}
-	return &tsclient.Client{
+	c := &tsclient.Client{
 		Tailnet: tailnet,
 		Auth:    &tsclient.OAuth{ClientID: tc.OAuth.ClientID, ClientSecret: tc.OAuth.ClientSecret},
 	}
+	if tc.APIBaseURL != "" {
+		if u, err := url.Parse(tc.APIBaseURL); err == nil {
+			c.BaseURL = u
+		}
+	}
+	return c
 }

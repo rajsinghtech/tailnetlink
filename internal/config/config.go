@@ -38,6 +38,12 @@ type TailnetConfig struct {
 	OAuth   OAuthCreds `json:"oauth"`
 	Tags    []string   `json:"tags,omitempty"`
 	Tailnet string     `json:"tailnet"`
+
+	// ControlURL and APIBaseURL point the node and the API client at
+	// something other than the hosted control plane. Empty means the
+	// default. The e2e tests use them to run against testcontrol.
+	ControlURL string `json:"control_url,omitempty"`
+	APIBaseURL string `json:"api_base_url,omitempty"`
 }
 
 func (tc TailnetConfig) HasAuth() bool {
