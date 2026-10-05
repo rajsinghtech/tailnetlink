@@ -49,11 +49,11 @@ jobs:
       - name: Build
         run: CGO_ENABLED=0 go build -ldflags "-s -w" -o tailnetlink ./cmd/tailnetlink
 
-  # Builds the image on main to catch Dockerfile breakage, but never pushes
-  # it. Images are published only by release.yml, on version tags.
+  # Builds the image on PRs and main to catch Dockerfile breakage, but never
+  # pushes it. Images are published only by release.yml, on version tags.
   docker:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
 
