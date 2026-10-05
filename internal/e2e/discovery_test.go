@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/netip"
@@ -139,19 +140,32 @@ func TestManagerDNSResolvesBridgedName(t *testing.T) {
 	q := new(dns.Msg)
 	q.SetQuestion("backend.src.ts.net.", dns.TypeA)
 	var answer string
-	waitFor(t, 30*time.Second, "A record over TCP", func() bool {
-		c, err := cl.srv.Dial(ctx, "tcp", netip.AddrPortFrom(dnsVIP, 53).String())
+	var last error
+	defer func() {
+		if t.Failed() {
+			t.Logf("last DNS error: %v", last)
+		}
+	}()
+	waitFor(t, 60*time.Second, "A record over TCP", func() bool {
+		// Each try gets its own deadline: a dial sent before the client
+		// has the DNS VIP in its netmap can hang instead of failing.
+		tctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		c, err := cl.srv.Dial(tctx, "tcp", netip.AddrPortFrom(dnsVIP, 53).String())
 		if err != nil {
+			last = err
 			return false
 		}
 		defer c.Close()
 		_ = c.SetDeadline(time.Now().Add(3 * time.Second))
 		dc := &dns.Conn{Conn: c}
 		if err := dc.WriteMsg(q); err != nil {
+			last = err
 			return false
 		}
 		r, err := dc.ReadMsg()
 		if err != nil || len(r.Answer) == 0 {
+			last = fmt.Errorf("read: %v (answer %v)", err, r)
 			return false
 		}
 		answer = r.Answer[0].(*dns.A).A.String()
