@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Coverage ratchet.
 #
-# Runs the test suite with coverage, drops test-only packages and the CI
+# Runs the test suite with coverage across ./cmd and ./internal, so the
+# in-process e2e tests count toward the packages they exercise, drops
+# test-only packages and the CI
 # tooling under test/ (it has its own tests but is not product code) from the
 # profile, and fails if total statement coverage is below the floor in
 # .coverage-baseline. When coverage goes up by a point or more it asks you to
@@ -15,7 +17,7 @@ cd "$(dirname "$0")/.."
 baseline_file=.coverage-baseline
 profile=${COVERPROFILE:-coverage.out}
 
-go test -race -covermode=atomic -coverprofile="$profile.raw" ./...
+go test -race -covermode=atomic -coverpkg=./cmd/...,./internal/... -coverprofile="$profile.raw" ./...
 grep -v -E '/internal/(testutil|e2e)/|/tailnetlink/test/' "$profile.raw" > "$profile"
 rm -f "$profile.raw"
 
