@@ -1,0 +1,20 @@
+// Policy for tailnetlink's throwaway CI tailnets. Both sides get the same one.
+{
+	"tagOwners": {
+		"tag:tailnetlink": ["autogroup:admin"],
+		"tag:e2e-backend": ["autogroup:admin"],
+		"tag:e2e-client":  ["autogroup:admin"],
+	},
+	"grants": [
+		// Source side: tailnetlink dials the backend it bridges.
+		{"src": ["tag:tailnetlink"], "dst": ["tag:e2e-backend"], "ip": ["*"]},
+		// Destination side: test clients reach services tagged tag:tailnetlink
+		// and the tailnetlink nodes that host them.
+		{"src": ["tag:e2e-client"], "dst": ["tag:tailnetlink"], "ip": ["*"]},
+	],
+	"autoApprovers": {
+		"services": {
+			"tag:tailnetlink": ["tag:tailnetlink"],
+		},
+	},
+}

@@ -1,0 +1,177 @@
+name: E2E (real tailnets)
+
+# Real-tailnet e2e. Job shape follows rajsinghtech/tailvoy (setup, test,
+# always-run cleanup) and auth follows rajsinghtech/tailgate (GitHub OIDC
+# exchanged for a Tailscale token through the shared org federated identity,
+# no stored secret).
+#
+# Never add pull_request or pull_request_target here: the org federated
+# identity trusts subjects matching repo:rajsinghtech*, so any job that can
+# mint an OIDC token in this repo can create tailnets.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time across the whole repo (the org has a 10-tailnet cap), and
+# never cancel a running one: a cancelled run is the most likely way to leak.
+concurrency:
+  group: e2e-real
+  cancel-in-progress: false
+
+env:
+  STATE_ARTIFACT: e2e-tailnets-${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  setup-tailnet:
+    name: Create tailnets
+    # Forks can't satisfy the federated identity's subject; skip rather than fail.
+    if: github.repository == 'rajsinghtech/tailnetlink'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # mint a GitHub OIDC JWT to exchange for a Tailscale token
+    outputs:
+      src_id: ${{ steps.create.outputs.src_id }}
+      src_dns_name: ${{ steps.create.outputs.src_dns_name }}
+      src_fed_client_id: ${{ steps.create.outputs.src_fed_client_id }}
+      src_fed_audience: ${{ steps.create.outputs.src_fed_audience }}
+      dst_id: ${{ steps.create.outputs.dst_id }}
+      dst_dns_name: ${{ steps.create.outputs.dst_dns_name }}
+      dst_fed_client_id: ${{ steps.create.outputs.dst_fed_client_id }}
+      dst_fed_audience: ${{ steps.create.outputs.dst_fed_audience }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      # Checks the org cap first and fails fast with a clear message. Writes
+      # each tailnet ID to the step outputs and the state file the moment it
+      # exists, then creates a federated identity inside each tailnet so later
+      # jobs (and the janitor) can delete it without any secret leaving this
+      # step. On any error or cancellation it deletes what it created.
+      - name: Create src and dst tailnets
+        id: create
+        run: |
+          go run ./test/e2e/cmd/tailnetctl create \
+            --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --state-file "$RUNNER_TEMP/tailnets.json" \
+            --fed-subject "repo:${GITHUB_REPOSITORY}:*" \
+            --fed-claim "repository_id=${GITHUB_REPOSITORY_ID}" \
+            --fed-claim "job_workflow_ref=${GITHUB_REPOSITORY}/.github/workflows/e2e-*"
+
+      # No secrets in here: tailnet IDs and federated identity client IDs only.
+      - name: Upload tailnet state
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.STATE_ARTIFACT }}
+          path: ${{ runner.temp }}/tailnets.json
+          retention-days: 7
+          if-no-files-found: ignore
+
+  e2e:
+    name: Real-tailnet e2e tests
+    needs: setup-tailnet
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # tests get child-tailnet tokens through the per-tailnet federated identity
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Run e2e tests
+        env:
+          E2E_SRC_ID: ${{ needs.setup-tailnet.outputs.src_id }}
+          E2E_SRC_DNS_NAME: ${{ needs.setup-tailnet.outputs.src_dns_name }}
+          E2E_SRC_FED_CLIENT_ID: ${{ needs.setup-tailnet.outputs.src_fed_client_id }}
+          E2E_SRC_FED_AUDIENCE: ${{ needs.setup-tailnet.outputs.src_fed_audience }}
+          E2E_DST_ID: ${{ needs.setup-tailnet.outputs.dst_id }}
+          E2E_DST_DNS_NAME: ${{ needs.setup-tailnet.outputs.dst_dns_name }}
+          E2E_DST_FED_CLIENT_ID: ${{ needs.setup-tailnet.outputs.dst_fed_client_id }}
+          E2E_DST_FED_AUDIENCE: ${{ needs.setup-tailnet.outputs.dst_fed_audience }}
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/e2e-debug"
+          # Org token minted right before the tests (it is short-lived),
+          # the same exchange tailgate does with curl.
+          TS_API_ACCESS_TOKEN=$(go run ./test/e2e/cmd/tailnetctl token)
+          echo "::add-mask::$TS_API_ACCESS_TOKEN"
+          export TS_API_ACCESS_TOKEN
+          go test -tags e2e -count=1 -timeout 25m -v ./test/e2e/... 2>&1 | tee "$RUNNER_TEMP/e2e-debug/go-test.log"
+
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/e2e-debug/
+          retention-days: 7
+          if-no-files-found: warn
+
+  cleanup-tailnet:
+    name: Delete tailnets
+    # always(): runs after failures and after the run is cancelled (GitHub
+    # re-evaluates if conditions on cancel and keeps always() jobs). Not
+    # continue-on-error: if a tailnet can't be deleted the run fails.
+    needs: [setup-tailnet, e2e]
+    if: always() && github.repository == 'rajsinghtech/tailnetlink'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # child-tailnet token through the per-tailnet federated identity
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Fetch tailnet state
+        continue-on-error: true # missing if setup died before uploading; outputs and name lookup still work
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ env.STATE_ARTIFACT }}
+          path: state/artifact
+
+      - name: Record setup outputs as state
+        env:
+          OUT: ${{ toJSON(needs.setup-tailnet.outputs) }}
+        run: |
+          mkdir -p state
+          echo "$OUT" | jq --arg run "$GITHUB_RUN_ID" --arg att "$GITHUB_RUN_ATTEMPT" '{tailnets: [
+            ["src","dst"][] as $r | select(.[$r+"_id"] // "" | length > 0) |
+            {runId: $run, attempt: $att, role: $r, id: .[$r+"_id"],
+             displayName: ("tailnetlink-ci-" + $run + "-" + $att + "-" + $r),
+             fedClientId: .[$r+"_fed_client_id"], fedAudience: .[$r+"_fed_audience"]}]}' > state/outputs.json
+          cat state/outputs.json
+
+      # Finds this run's tailnets by recorded ID and by name
+      # (tailnetlink-ci-<run>-<attempt>-*), deletes each one, confirms with a
+      # list call that it is gone, and retries with backoff. Exits non-zero if
+      # anything is left.
+      - name: Delete and verify
+        run: |
+          go run ./test/e2e/cmd/tailnetctl delete \
+            --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --state-dir state
