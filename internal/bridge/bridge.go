@@ -27,20 +27,20 @@ type Manager struct {
 	store   *state.Store
 	webAddr string // local web UI listen address (e.g. ":8888")
 
-	reconcileMu  sync.Mutex                    // serializes concurrent Reconcile calls
+	reconcileMu  sync.Mutex // serializes concurrent Reconcile calls
 	mu           sync.Mutex
-	cfg          *config.Config               // last applied config
-	servers      map[string]*tsnet.Server      // keyed by tailnet name
+	cfg          *config.Config           // last applied config
+	servers      map[string]*tsnet.Server // keyed by tailnet name
 	apiClients   map[string]*tsclient.Client
 	forwarders   map[string]*Forwarder         // keyed by bridge entry ID (rule/dest/fqdn)
 	dnsCleanups  map[string]func()             // keyed by bridge entry ID; tears down per-device DNS
 	rules        map[string]context.CancelFunc // keyed by bridge rule name
-	ruleDone     map[string]chan struct{}       // closed when the rule goroutine fully exits
+	ruleDone     map[string]chan struct{}      // closed when the rule goroutine fully exits
 	webListeners map[string]net.Listener       // keyed by tailnet name
 
-	dnsMu      sync.Mutex                       // protects sharedDNS and dnsPending
-	sharedDNS  map[string]*sharedDNSEntry       // keyed by destName+"/"+parentDomain
-	dnsPending map[string]*dnsCreation          // in-progress creations, same key space
+	dnsMu      sync.Mutex                 // protects sharedDNS and dnsPending
+	sharedDNS  map[string]*sharedDNSEntry // keyed by destName+"/"+parentDomain
+	dnsPending map[string]*dnsCreation    // in-progress creations, same key space
 }
 
 func New(store *state.Store, logger *slog.Logger, webAddr string) *Manager {
