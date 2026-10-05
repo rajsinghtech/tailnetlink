@@ -43,55 +43,6 @@ func TestLoadMissingFileGivesDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadPartialFileKeepsDefaults(t *testing.T) {
-	cfg, err := config.Load(writeFile(t, `{"dial_timeout": "3s"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.DialTimeout.Duration != 3*time.Second {
-		t.Errorf("dial_timeout = %v", cfg.DialTimeout)
-	}
-	if cfg.PollInterval.Duration != 30*time.Second || cfg.ListenAddr != "127.0.0.1:8888" {
-		t.Errorf("defaults lost: %+v", cfg)
-	}
-}
-
-func TestLoadExampleConfig(t *testing.T) {
-	cfg, err := config.Load(filepath.Join("..", "..", "config.example.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(cfg.Tailnets) != 2 || len(cfg.Bridges) != 2 {
-		t.Fatalf("tailnets=%d bridges=%d", len(cfg.Tailnets), len(cfg.Bridges))
-	}
-	src := cfg.Tailnets["source"]
-	if !src.HasAuth() || src.Tailnet != "source-org.ts.net" {
-		t.Errorf("source tailnet = %+v", src)
-	}
-	if cfg.InstanceID == "" {
-		t.Error("example has no instance_id")
-	}
-	b := cfg.Bridges[0]
-	if b.Name != "api-servers" || b.SourceTag != "tag:api-server" || len(b.Ports) != 2 {
-		t.Errorf("first bridge = %+v", b)
-	}
-}
-
-func TestLoadErrors(t *testing.T) {
-	cases := map[string]string{
-		"bad json":     `{`,
-		"bad duration": `{"poll_interval": "soon"}`,
-		"number dur":   `{"poll_interval": 30}`,
-	}
-	for name, body := range cases {
-		t.Run(name, func(t *testing.T) {
-			if _, err := config.Load(writeFile(t, body)); err == nil {
-				t.Error("want error")
-			}
-		})
-	}
-}
-
 func TestHasAuth(t *testing.T) {
 	cases := []struct {
 		oauth config.OAuthCreds
@@ -128,22 +79,21 @@ func TestDurationRoundTrip(t *testing.T) {
 // store nor any other snapshot. The bridge manager diffs old against new
 // snapshots, so shared maps or slices would hide changes from it.
 func TestStoreGetIsDeepCopy(t *testing.T) {
-	p := writeFile(t, `{"instance_id": "test", "ui": {"enabled": true},
-		"tailnets": {"a": {"tailnet": "one", "tags": ["tag:x"]}},
-		"bridges": [{"name": "r", "source_tailnet": "a", "dest_tailnets": ["a"], "source_tag": "tag:web", "ports": [1],
-			"source_devices": [{"fqdn": "d.one"}], "source_services": [{"name": "svc:s"}]}]}`)
+	p := writeFile(t, borderJSON(`"ui": {"enabled": true}, "links": [
+		{"name": "r", "devices": [{"fqdn": "d.one"}], "ports": [1]},
+		{"name": "s", "services": [{"name": "svc:s"}], "ports": [2]}]`))
 	s, err := config.NewStore(p)
 	if err != nil {
 		t.Fatal(err)
 	}
 	old := s.Get()
-	old.Tailnets["a"] = config.TailnetConfig{Tailnet: "two"}
+	old.Tailnets["test-src"] = config.TailnetConfig{Tailnet: "two"}
 	old.Bridges[0].Ports[0] = 2
 	old.Bridges[0].DestTailnets[0] = "b"
 	old.Bridges[0].SourceDevices[0].FQDN = "x"
 	*old.UI.Enabled = false
 	now := s.Get()
-	if now.Tailnets["a"].Tailnet != "one" || now.Bridges[0].Ports[0] != 1 || now.Bridges[0].DestTailnets[0] != "a" ||
+	if now.Tailnets["test-src"].Tailnet != "a.ts.net" || now.Bridges[0].Ports[0] != 1 || now.Bridges[0].DestTailnets[0] != "test-dst" ||
 		now.Bridges[0].SourceDevices[0].FQDN != "d.one" || !now.UIEnabled() {
 		t.Errorf("editing a snapshot changed the store: %+v / %+v", now.Tailnets, now.Bridges)
 	}
@@ -159,7 +109,7 @@ func TestCloneEmpty(t *testing.T) {
 // Watch reloads the file when it changes, hands each listener its own copy,
 // and ignores a file that no longer loads.
 func TestStoreWatchReloads(t *testing.T) {
-	p := writeFile(t, `{"instance_id": "test"}`)
+	p := writeFile(t, borderJSON(""))
 	s, err := config.NewStore(p)
 	if err != nil {
 		t.Fatal(err)
@@ -182,7 +132,7 @@ func TestStoreWatchReloads(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	bump(`{"instance_id": "changed", "poll_interval": "5s"}`)
+	bump(strings.Replace(borderJSON(`"poll_interval": "5s"`), `"name": "test"`, `"name": "changed"`, 1))
 	next := func() *config.Config {
 		t.Helper()
 		select {
@@ -245,37 +195,6 @@ func TestPublicJSON(t *testing.T) {
 	}
 	if c.Tailnets["a"].OAuth.ClientID != "cid-123" {
 		t.Error("PublicJSON changed the config")
-	}
-}
-
-// An inline client_secret stops the config from loading. The error names
-// the field and the tailnet, never the value.
-func TestLoadRejectsInlineSecret(t *testing.T) {
-	for name, oauth := range map[string]string{
-		"alone":     `{"client_id": "id", "client_secret": "hunter2-value"}`,
-		"with file": `{"client_id": "id", "client_secret": "hunter2-value", "client_secret_file": "/run/s"}`,
-		"empty":     `{"client_id": "id", "client_secret": ""}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			_, err := config.Load(writeFile(t, `{"instance_id": "x", "tailnets": {"work": {"tailnet": "w.example", "oauth": `+oauth+`}}}`))
-			if err == nil {
-				t.Fatal("want an error")
-			}
-			msg := err.Error()
-			if !strings.Contains(msg, "oauth.client_secret is not supported") || !strings.Contains(msg, `"work"`) || !strings.Contains(msg, "client_secret_file") {
-				t.Errorf("err = %v", err)
-			}
-			if strings.Contains(msg, "hunter2") {
-				t.Errorf("error leaks the secret: %v", err)
-			}
-		})
-	}
-}
-
-func TestLoadRejectsBothSecretSources(t *testing.T) {
-	_, err := config.Load(writeFile(t, `{"instance_id": "x", "tailnets": {"a": {"oauth": {"client_id": "id", "client_secret_file": "/f", "client_secret_env": "E"}}}}`))
-	if err == nil || !strings.Contains(err.Error(), "only one of") {
-		t.Fatalf("err = %v", err)
 	}
 }
 
@@ -346,13 +265,6 @@ func TestValidate(t *testing.T) {
 				t.Errorf("err = %v, want it to mention %q", err, c.want)
 			}
 		})
-	}
-}
-
-func TestLoadRejectsMissingInstanceID(t *testing.T) {
-	_, err := config.Load(writeFile(t, `{"tailnets": {"a": {"tailnet": "a.example"}}}`))
-	if err == nil || !strings.Contains(err.Error(), "instance_id is required") {
-		t.Fatalf("err = %v", err)
 	}
 }
 

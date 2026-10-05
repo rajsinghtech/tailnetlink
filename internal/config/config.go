@@ -55,6 +55,12 @@ type Config struct {
 	// MetricsAddr is where /healthz, /readyz and /metrics are served,
 	// separate from the UI. "off" turns the listener off.
 	MetricsAddr string `json:"metrics_addr,omitempty"`
+
+	// DNSDisabled turns off the DNS VIP and split-DNS (border dns.enabled
+	// false).
+	DNSDisabled bool `json:"dns_disabled,omitempty"`
+	// AuthKeyExpiry is how long the auth keys minted for new nodes last.
+	AuthKeyExpiry Duration `json:"auth_key_expiry"`
 }
 
 // DefaultUIServiceName is the VIP service the web UI is published as.
@@ -244,11 +250,14 @@ func defaults() *Config {
 		DialTimeout:  Duration{10 * time.Second},
 		ListenAddr:   DefaultListenAddr,
 		MetricsAddr:  DefaultMetricsAddr,
+		// The defaults below match what a border without these fields gets.
+		AuthKeyExpiry: Duration{time.Hour},
 	}
 }
 
-// Load reads the config JSON at path. If the file does not exist, it returns
-// a valid empty config — no error. That's the "first run" case.
+// Load reads the border config at path. A missing file gives an empty
+// config with defaults and nothing to bridge, so the UI can still start;
+// any other problem is an error.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -257,13 +266,9 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
-
-	cfg := defaults()
-	if err := json.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
-	}
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid config: %w", err)
+	cfg, err := Parse(data)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return cfg, nil
 }

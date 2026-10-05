@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -66,8 +67,9 @@ func newBorder(t *testing.T) *border {
 	b.dst = newTailnet(t, "dst.ts.net")
 	b.srcAPI = newCtlBridge(t, b.src)
 	b.dstAPI = newCtlBridge(t, b.dst)
-	b.srcName = "src" + b.sfx
-	b.dstName = "dst" + b.sfx
+	// The keys a compiled border uses, so b.config and b.border agree.
+	b.srcName = "e2e-" + b.sfx + "-src"
+	b.dstName = "e2e-" + b.sfx + "-dst"
 	// The bridges only hand out tokens for the right secret, and
 	// tailnetlink only ever sees the secrets through files.
 	dir := t.TempDir()
@@ -111,6 +113,43 @@ func (b *border) config(rules ...config.BridgeRule) *config.Config {
 		PollInterval: config.Duration{Duration: 200 * time.Millisecond},
 		DialTimeout:  config.Duration{Duration: 5 * time.Second},
 	}
+}
+
+func (b *border) side(tn *tailnet, api *ctlBridge, secretFile string) config.Side {
+	tc := b.tailnetConfig(tn, api, secretFile)
+	return config.Side{Tailnet: tc.Tailnet, OAuth: tc.OAuth, Tags: tc.Tags, ControlURL: tc.ControlURL, APIBaseURL: tc.APIBaseURL}
+}
+
+// border is the config-file form of b.config: the same border, written
+// the way a user would.
+func (b *border) border(links ...config.Link) *config.Border {
+	poll, dial := config.Duration{Duration: 200 * time.Millisecond}, config.Duration{Duration: 5 * time.Second}
+	return &config.Border{
+		Name:         "e2e-" + b.sfx,
+		Source:       b.side(b.src, b.srcAPI, b.secretFiles[0]),
+		Dest:         b.side(b.dst, b.dstAPI, b.secretFiles[1]),
+		Node:         config.NodeConfig{StateDir: b.stateDir},
+		PollInterval: &poll,
+		DialTimeout:  &dial,
+		Links:        links,
+	}
+}
+
+// writeBorder writes bd to path as a config file.
+func writeBorder(t *testing.T, path string, bd *config.Border) {
+	t.Helper()
+	data, err := json.MarshalIndent(bd, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// deviceLink is deviceRule as a config-file link.
+func (b *border) deviceLink(name, host, shortName string, ports ...int) config.Link {
+	return config.Link{Name: name, Devices: []config.DeviceSpec{{FQDN: host + "." + b.src.domain, ShortName: shortName}}, Ports: ports}
 }
 
 // deviceRule bridges one source device by FQDN.

@@ -3,7 +3,6 @@ package e2e
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -259,15 +258,7 @@ func TestConfigFileChangeMovesPort(t *testing.T) {
 	cl := client(t, ctx, b.dst, "client")
 
 	path := filepath.Join(t.TempDir(), "tailnetlink.json")
-	write := func(c *config.Config) {
-		t.Helper()
-		data, _ := json.Marshal(c)
-		if err := os.WriteFile(path, data, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	cfg := b.config(b.deviceRule("web", "backend", "", 8080))
-	write(cfg)
+	writeBorder(t, path, b.border(b.deviceLink("web", "backend", "", 8080)))
 	cs, err := config.NewStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -281,8 +272,7 @@ func TestConfigFileChangeMovesPort(t *testing.T) {
 	vip := waitVIP(t, b.dstAPI, svc)
 	echoVia(t, ctx, cl, netip.AddrPortFrom(vip, 8080), "before")
 
-	moved := b.config(b.deviceRule("web", "backend", "", 8081))
-	write(moved)
+	writeBorder(t, path, b.border(b.deviceLink("web", "backend", "", 8081)))
 	future := time.Now().Add(2 * time.Second)
 	_ = os.Chtimes(path, future, future)
 	waitFor(t, 30*time.Second, "service moved to tcp:8081", func() bool {

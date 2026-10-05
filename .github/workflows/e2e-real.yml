@@ -44,6 +44,10 @@ jobs:
       dst_dns_name: ${{ steps.create.outputs.dst_dns_name }}
       dst_fed_client_id: ${{ steps.create.outputs.dst_fed_client_id }}
       dst_fed_audience: ${{ steps.create.outputs.dst_fed_audience }}
+      dst2_id: ${{ steps.create.outputs.dst2_id }}
+      dst2_dns_name: ${{ steps.create.outputs.dst2_dns_name }}
+      dst2_fed_client_id: ${{ steps.create.outputs.dst2_fed_client_id }}
+      dst2_fed_audience: ${{ steps.create.outputs.dst2_fed_audience }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -59,11 +63,12 @@ jobs:
       # exists, then creates a federated identity inside each tailnet so later
       # jobs (and the janitor) can delete it without any secret leaving this
       # step. On any error or cancellation it deletes what it created.
-      - name: Create src and dst tailnets
+      - name: Create src, dst and dst2 tailnets
         id: create
         run: |
           go run ./test/e2e/cmd/tailnetctl create \
             --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --roles src,dst,dst2 \
             --state-file "$RUNNER_TEMP/tailnets.json" \
             --fed-subject "repo:${GITHUB_REPOSITORY}:*" \
             --fed-claim "repository_id=${GITHUB_REPOSITORY_ID}" \
@@ -107,6 +112,10 @@ jobs:
           E2E_DST_DNS_NAME: ${{ needs.setup-tailnet.outputs.dst_dns_name }}
           E2E_DST_FED_CLIENT_ID: ${{ needs.setup-tailnet.outputs.dst_fed_client_id }}
           E2E_DST_FED_AUDIENCE: ${{ needs.setup-tailnet.outputs.dst_fed_audience }}
+          E2E_DST2_ID: ${{ needs.setup-tailnet.outputs.dst2_id }}
+          E2E_DST2_DNS_NAME: ${{ needs.setup-tailnet.outputs.dst2_dns_name }}
+          E2E_DST2_FED_CLIENT_ID: ${{ needs.setup-tailnet.outputs.dst2_fed_client_id }}
+          E2E_DST2_FED_AUDIENCE: ${{ needs.setup-tailnet.outputs.dst2_fed_audience }}
         run: |
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/e2e-debug"
@@ -161,7 +170,7 @@ jobs:
         run: |
           mkdir -p state
           echo "$OUT" | jq --arg run "$GITHUB_RUN_ID" --arg att "$GITHUB_RUN_ATTEMPT" '{tailnets: [
-            ["src","dst"][] as $r | select(.[$r+"_id"] // "" | length > 0) |
+            ["src","dst","dst2"][] as $r | select(.[$r+"_id"] // "" | length > 0) |
             {runId: $run, attempt: $att, role: $r, id: .[$r+"_id"],
              displayName: ("tailnetlink-ci-" + $run + "-" + $att + "-" + $r),
              fedClientId: .[$r+"_fed_client_id"], fedAudience: .[$r+"_fed_audience"]}]}' > state/outputs.json

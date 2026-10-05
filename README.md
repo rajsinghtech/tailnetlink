@@ -42,115 +42,104 @@ make build && make run
 
 ## Configuration
 
-Config is a JSON file (default: `data.json`). The file is the only way to change it: tailnetlink checks it every few seconds and applies changes without a restart. It never writes the file.
+Config is a JSON file (default: `tailnetlink.json`). One file describes one **border**: one source tailnet bridged into one destination. Run one process per border. The file is the only way to change it: tailnetlink checks it every few seconds and applies changes without a restart. It never writes the file.
+
+Older multi-tailnet configs (`tailnets` / `bridges` / `instance_id`) are no longer read. There is no converter. Rewrite them as a border; see below.
 
 ```json
 {
-  "instance_id": "home-to-work",
-  "tailnets": {
-    "source": {
-      "oauth": {
-        "client_id": "...",
-        "client_secret_file": "/run/secrets/source-oauth-secret"
-      },
-      "tailnet": "source-org.ts.net",
-      "tags": ["tag:tailnetlink"]
+  "name": "home-to-work",
+  "source": {
+    "tailnet": "source-org.ts.net",
+    "oauth": {
+      "client_id": "...",
+      "client_secret_file": "/run/secrets/source-oauth-secret"
     },
-    "dest": {
-      "oauth": {
-        "client_id": "...",
-        "client_secret_env": "TAILNETLINK_DEST_OAUTH_SECRET"
-      },
-      "tailnet": "dest-org.ts.net",
-      "tags": ["tag:tailnetlink"]
-    }
+    "tags": ["tag:tailnetlink"]
   },
-  "bridges": [
+  "dest": {
+    "tailnet": "dest-org.ts.net",
+    "oauth": {
+      "client_id": "...",
+      "client_secret_env": "TAILNETLINK_DEST_OAUTH_SECRET"
+    },
+    "tags": ["tag:tailnetlink"]
+  },
+  "links": [
     {
       "name": "api-servers",
-      "source_tailnet": "source",
-      "dest_tailnets": ["dest"],
-      "source_tag": "tag:api-server",
+      "tag": "tag:api-server",
       "ports": [8080, 8443]
     }
-  ],
-  "poll_interval": "30s",
-  "dial_timeout": "10s",
-  "listen_addr": "127.0.0.1:8888"
+  ]
 }
 ```
 
 ### Ownership
 
-`instance_id` is required once any tailnet is configured. It names this tailnetlink instance: 1 to 63 lowercase letters, digits or dashes. Every VIP service tailnetlink creates carries the annotations `tailnetlink/managed=true` and `tailnetlink/owner=<instance_id>`, and tailnetlink only ever changes or deletes a service that carries its own owner annotation. That covers bridged services, the shared DNS VIP, the web UI VIP and local sources.
+`name` is required. It is the owner written to every VIP service this process creates (`tailnetlink/owner=<name>`), and part of its node hostnames (`tailnetlink-<name>-src`, `tailnetlink-<name>-dst`). 1 to 40 lowercase letters, digits or dashes. Two borders that share a tailnet need different names, and one of them should set `"ui": {"service_name": "svc:..."}` so their UI services don't collide.
 
-If a service with the name tailnetlink wants already exists and isn't ours, tailnetlink leaves it alone, logs an error and marks that bridge `error: name conflict`. The same goes for a `svc:tailnetlink` someone else made: the UI just isn't published in that tailnet. Two instances that share a tailnet need different `instance_id`s, and one of them should set `"ui": {"service_name": "svc:..."}` so their UI services don't collide.
-
-Services made by older versions of tailnetlink only carry `tailnetlink/managed=true`. They are treated as foreign and never adopted. If you ran an older version, delete those services by hand in the admin console.
+tailnetlink only ever changes or deletes a service that carries its own owner annotation. That covers bridged services, the shared DNS VIP, the web UI VIP and local sources. Services made by older versions that only carry `tailnetlink/managed=true` are treated as foreign and never adopted.
 
 ### Restarts and node state
 
-Stopping tailnetlink (SIGTERM, a restart, a deploy) does not delete anything in your tailnets. VIP services, the DNS VIP and split-DNS stay in place, so clients keep their addresses and DNS keeps resolving while tailnetlink is down for a moment. tailnetlink only deletes a service when the rule or tailnet that made it is removed from the config while it is running.
+Stopping tailnetlink (SIGTERM, a restart, a deploy) does not delete anything in your tailnets. VIP services, the DNS VIP and split-DNS stay in place. tailnetlink only deletes a service when the link or side that made it is removed from the config while it is running.
 
-Each node keeps its state in `state_dir/<tailnet name>` (mode 0700). `state_dir` defaults to a `tailnetlink-state` directory next to the config file. Keep that directory on persistent storage; if it is lost, the next start registers new nodes, and the old devices stay in the admin console until you remove them. If saved state stops working (for example the device was deleted), tailnetlink logs a warning, wipes it and registers a fresh node.
+Each node keeps its state in `node.state_dir/<name>-src` and `<name>-dst` (mode 0700). `state_dir` defaults to a `tailnetlink-state` directory next to the config file. Keep that directory on persistent storage; if it is lost, the next start registers new nodes. Borders must not share a `state_dir`. Set `"node": {"ephemeral": true}` to get a new ephemeral device every start.
 
-Set `"ephemeral": true` on a tailnet to get the old behavior for that node: no saved state, a new ephemeral device every start, removed by the control plane once it goes offline.
-
-To remove everything an instance created, stop it and run:
+To remove everything a border created, stop it and run:
 
 ```bash
-tailnetlink prune -data data.json -dry-run   # show what would go
+tailnetlink prune -data data.json -dry-run
 tailnetlink prune -data data.json
 ```
 
-`prune` deletes every VIP service owned by this `instance_id` in every configured tailnet and takes their addresses out of split-DNS. Services owned by anything else are left alone. It does not remove the tailnetlink devices themselves.
+### Link fields
 
-### Bridge rule fields
-
-| Field | Description |
-|---|---|
-| `name` | Unique identifier for this rule |
-| `source_tailnet` | Key of the tailnet where source devices live |
-| `dest_tailnets` | List of tailnet keys where VIP services are created |
-| `source_tag` | Discover devices with this ACL tag |
-| `source_devices` | Explicit device specs (takes priority over `source_tag`) |
-| `source_services` | Explicit VIP service names from the source tailnet |
-| `local_sources` | Addresses reachable from the tailnetlink host (`addr`, optional `expose_port`, `dns_name`, `short_name`) |
-| `ports` | TCP ports to forward |
-
-`source_devices` entries and `source_services` entries both support optional DNS fields:
+A link has a `name` and exactly one of `tag`, `devices`, `services` or `local`, plus `ports` (not for local).
 
 | Field | Description |
 |---|---|
-| `fqdn` / `name` | Device FQDN or VIP service name (`svc:foo`) |
-| `dns_name` | Fully-qualified hostname to advertise in split-DNS (e.g. `api-0.api.internal`) |
-| `short_name` | Bare VIP service name override (e.g. `api-0` → `svc:api-0`) |
+| `name` | Unique name for this link |
+| `tag` | Discover devices and VIP services with this ACL tag |
+| `devices` | Explicit device specs (`fqdn`, optional `dns_name`, `short_name`) |
+| `services` | Explicit VIP service names from the source (`name`, optional DNS fields) |
+| `local` | Addresses reachable from the host (`addr`, optional `expose_port`, `dns_name`, `short_name`) |
+| `ports` | TCP ports to forward (required except for `local`) |
 
-`short_name` must be a DNS label: 1 to 63 lowercase letters, digits or dashes, not starting or ending with a dash. Two entries that would end up with the same short name in the same destination tailnet are rejected when the config loads. Names tailnetlink generates itself are cut to fit and get a short hash suffix, so long hostnames never collide or overflow.
+`short_name` must be a DNS label: 1 to 63 lowercase letters, digits or dashes, not starting or ending with a dash. Two entries that would end up with the same short name are rejected when the config loads. Names tailnetlink generates itself are cut to fit and get a short hash suffix.
 
-When a rule discovers by `source_tag`, tailnetlink skips anything it made itself: VIP services annotated `tailnetlink/managed=true` and devices whose hostname starts with `tailnetlink-`. Two instances bridging the same tag in opposite directions therefore don't bounce services back and forth.
+When a link discovers by `tag`, it skips anything it made itself: VIP services annotated `tailnetlink/managed=true` and devices whose hostname starts with `tailnetlink-`.
 
-`local_sources` entries publish something reachable from the machine running tailnetlink (`addr`, e.g. `127.0.0.1:3000` or `nas.lan:445`). The DNS name defaults to the host in `addr` (a localhost or IP `addr` needs `dns_name`), the short name to the first label of the DNS name, lower-cased, and the port to the one in `addr` unless `expose_port` is set.
+### Optional blocks
+
+| Block | Defaults |
+|---|---|
+| `node.state_dir` / `node.ephemeral` | next to the config file / false |
+| `dns.enabled` | true (shared DNS VIP and split-DNS in dest) |
+| `ui.enabled` / `ui.service_name` / `ui.listen_addr` | true / `svc:tailnetlink` / `127.0.0.1:8888` |
+| `metrics.listen_addr` | `127.0.0.1:9090` (`off` disables) |
+| `poll_interval` / `dial_timeout` / `auth_key_expiry` | `30s` / `10s` / `1h` |
 
 ### Split DNS
 
-When an entry sets `dns_name` (say `api-0.api.internal`), tailnetlink runs a small authoritative DNS server for the parent zone (`api.internal`) on a shared VIP, `svc:tnl-dns-<zone>-dns`, in each destination tailnet and points split DNS for that zone at it. The server answers over TCP only: a tsnet node does not receive UDP sent to a VIP service address. Tailscale clients send split-DNS queries through their local resolver, which retries over TCP when UDP gets no answer, so names still resolve, just with a short delay on the first lookup.
+With DNS on (the default), when an entry sets `dns_name` (or a device has a real FQDN), tailnetlink runs a small authoritative DNS server for the parent zone on a shared VIP, `svc:tnl-dns-<zone>-dns`, in the destination and points split DNS for that zone at it. The server answers over TCP only: a tsnet node does not receive UDP sent to a VIP service address. Clients fall back to TCP after the UDP attempt times out.
 
 ### OAuth client secrets
 
-Client secrets never go in the config file. Each tailnet's `oauth` block names where to read its secret from, with exactly one of:
+Client secrets never go in the config file. Each side's `oauth` block names where to read its secret from, with exactly one of:
 
 | Field | Description |
 |---|---|
 | `client_secret_file` | Path to a file holding the secret (surrounding whitespace is ignored). Works with Docker and Kubernetes secrets. |
 | `client_secret_env` | Name of an environment variable holding the secret. |
 
-The secret is read each time tailnetlink needs a new API token, so rotating the file takes effect without a restart. A config with an inline `client_secret` does not load: tailnetlink exits with an error naming the field and the tailnet, before it contacts anything. To move an old config over, write each secret to a file (`chmod 600`) and replace `"client_secret": "..."` with `"client_secret_file": "/path/to/file"`.
+The secret is read each time tailnetlink needs a new API token, so rotating the file takes effect without a restart. A config with an inline `client_secret` does not load. To move an old config over, write each secret to a file (`chmod 600`) and replace `"client_secret": "..."` with `"client_secret_file": "/path/to/file"`.
 
 ### OAuth setup (once per tailnet)
 
 1. Go to `admin.tailscale.com/settings/oauth`
-2. Create a client with scopes: `devices:read`, `keys:write`, `vip-services:write`
+2. Create a client with scopes: `devices:core:read`, `auth_keys`, `services` (or `vip-services`), `dns`
 3. Add the tag you specify in `tags` to your tailnet ACL as an owner tag
 
 ## CLI flags
