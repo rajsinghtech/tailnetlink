@@ -78,7 +78,7 @@ func has(list []string, s string) bool {
 }
 
 func TestParseNameOnlyMatchesCINames(t *testing.T) {
-	good := []string{"tailnetlink-ci-123-1-src", "tailnetlink-ci-9876543210-12-dst"}
+	good := []string{"tailnetlink-ci-123-1-src", "tailnetlink-ci-9876543210-12-dst", "tailnetlink-ci-37271465987-1-dst2"}
 	bad := []string{
 		"example.com", "Raj's tailnet", "tailnetlink", "tailnetlink-ci-", "tailnetlink-ci-123-src",
 		"tailnetlink-ci-abc-1-src", "xtailnetlink-ci-123-1-src", "tailnetlink-ci-123-1-src-extra",
@@ -172,6 +172,24 @@ func TestJanitorFailsLoudlyOnOrphan(t *testing.T) {
 	}
 	if !strings.Contains(h.stderr.String(), "delete it by hand") {
 		t.Fatalf("missing orphan message: %s", h.stderr.String())
+	}
+}
+
+func TestDeleteCleansRoleWithDigits(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	h.leftover(dir, "tailnetlink-ci-55-1-src", time.Hour, true)
+	h.leftover(dir, "tailnetlink-ci-55-1-dst", time.Hour, true)
+	h.leftover(dir, "tailnetlink-ci-55-1-dst2", time.Hour, true)
+
+	if code := h.run("delete", "--run-id", "55", "--attempt", "1", "--state-dir", dir); code != 0 {
+		t.Fatalf("exit %d: %s", code, h.stderr.String())
+	}
+	got := h.fake.Tailnets()
+	for _, gone := range []string{"tailnetlink-ci-55-1-src", "tailnetlink-ci-55-1-dst", "tailnetlink-ci-55-1-dst2"} {
+		if has(got, gone) {
+			t.Fatalf("still present after delete: %s in %v", gone, got)
+		}
 	}
 }
 
