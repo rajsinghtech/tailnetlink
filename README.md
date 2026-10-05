@@ -46,6 +46,7 @@ Config is stored as JSON (default: `data.json`). The web UI at `:8888` lets you 
 
 ```json
 {
+  "instance_id": "home-to-work",
   "tailnets": {
     "source": {
       "oauth": {
@@ -78,6 +79,14 @@ Config is stored as JSON (default: `data.json`). The web UI at `:8888` lets you 
   "listen_addr": ":8888"
 }
 ```
+
+### Ownership
+
+`instance_id` is required once any tailnet is configured. It names this tailnetlink instance: 1 to 63 lowercase letters, digits or dashes. Every VIP service tailnetlink creates carries the annotations `tailnetlink/managed=true` and `tailnetlink/owner=<instance_id>`, and tailnetlink only ever changes or deletes a service that carries its own owner annotation. That covers bridged services, the shared DNS VIP, the web UI VIP and local sources.
+
+If a service with the name tailnetlink wants already exists and isn't ours, tailnetlink leaves it alone, logs an error and marks that bridge `error: name conflict`. The same goes for a `svc:tailnetlink` someone else made: the UI just isn't published in that tailnet. Two instances that share a tailnet need different `instance_id`s, and one of them should set `"ui": {"service_name": "svc:..."}` so their UI services don't collide.
+
+Services made by older versions of tailnetlink only carry `tailnetlink/managed=true`. They are treated as foreign and never adopted. If you ran an older version, delete those services by hand in the admin console.
 
 ### Bridge rule fields
 

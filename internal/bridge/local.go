@@ -149,7 +149,7 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 
 		for _, dest := range dests {
 			bridgeID := rule.Name + "/local/" + dest.name + "/" + src.Addr
-			srcRec := NewReconciler(dest.client, []int{exposePort}, dest.tags, m.logger)
+			srcRec := NewReconciler(dest.client, []int{exposePort}, dest.tags, m.ownerID(), m.logger)
 
 			m.store.UpsertBridge(state.BridgeEntry{
 				ID: bridgeID, RuleName: rule.Name, DestTailnet: dest.name,

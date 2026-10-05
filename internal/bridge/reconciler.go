@@ -26,17 +26,19 @@ type Reconciler struct {
 	client *tsclient.Client
 	ports  []int
 	tags   []string // ACL tags applied to the VIP service (must match dest tsnet node tags)
+	owner  string   // instance id written to and checked against tailnetlink/owner
 	logger *slog.Logger
 
 	mu       sync.RWMutex
 	services map[string]*VIPService // key: ServiceName
 }
 
-func NewReconciler(client *tsclient.Client, ports []int, tags []string, logger *slog.Logger) *Reconciler {
+func NewReconciler(client *tsclient.Client, ports []int, tags []string, owner string, logger *slog.Logger) *Reconciler {
 	return &Reconciler{
 		client:   client,
 		ports:    ports,
 		tags:     tags,
+		owner:    owner,
 		logger:   logger,
 		services: make(map[string]*VIPService),
 	}
@@ -60,14 +62,13 @@ func (r *Reconciler) Ensure(ctx context.Context, srcTailnet string, dev Device, 
 		portStrings = append(portStrings, "tcp:"+strconv.Itoa(p))
 	}
 
-	created, err := ensureVIPService(ctx, r.client, tsclient.VIPService{
+	created, err := ensureVIPService(ctx, r.client, r.owner, tsclient.VIPService{
 		Name:    svcName,
 		Ports:   portStrings,
 		Tags:    r.tags,
 		Comment: fmt.Sprintf("managed by tailnetlink (source: %s → %s)", srcTailnet, dev.FQDN),
 		Annotations: map[string]string{
-			"tailnetlink/managed": "true",
-			"tailnetlink/source":  srcTailnet,
+			"tailnetlink/source": srcTailnet,
 		},
 	})
 	if err != nil {
@@ -92,7 +93,9 @@ func (r *Reconciler) Ensure(ctx context.Context, srcTailnet string, dev Device, 
 	return result, nil
 }
 
-// Delete removes the VIP service for the given source device.
+// Delete removes the VIP service for the given source device. It only acts
+// on services this Reconciler ensured, and re-reads the service first so it
+// never deletes one whose owner annotation has changed since.
 func (r *Reconciler) Delete(ctx context.Context, srcTailnet string, dev Device, shortName string) error {
 	svcName := ServiceName(srcTailnet, dev.FQDN, shortName)
 
@@ -105,8 +108,8 @@ func (r *Reconciler) Delete(ctx context.Context, srcTailnet string, dev Device, 
 	delete(r.services, svcName)
 	r.mu.Unlock()
 
-	if err := r.client.VIPServices().Delete(ctx, svcName); err != nil {
-		return fmt.Errorf("delete VIP service %q: %w", svcName, err)
+	if err := deleteOwnedVIPService(ctx, r.client, r.owner, svcName); err != nil {
+		return err
 	}
 
 	r.logger.Info("VIP service deleted", "name", svcName, "source", dev.FQDN)

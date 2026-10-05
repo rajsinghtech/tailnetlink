@@ -3,10 +3,14 @@ package config
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"sync"
 	"time"
+
+	"tailscale.com/tailcfg"
 )
 
 // Duration is a time.Duration that marshals/unmarshals as a human-readable string ("30s").
@@ -27,6 +31,14 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 }
 
 type Config struct {
+	// InstanceID names this tailnetlink instance. It is written to the
+	// tailnetlink/owner annotation of every VIP service the instance creates,
+	// and the instance never changes or deletes a service without it.
+	// Required once any tailnet is configured.
+	InstanceID string `json:"instance_id,omitempty"`
+
+	UI UIConfig `json:"ui,omitzero"`
+
 	Tailnets     map[string]TailnetConfig `json:"tailnets"`
 	Bridges      []BridgeRule             `json:"bridges"`
 	PollInterval Duration                 `json:"poll_interval"`
@@ -34,10 +46,51 @@ type Config struct {
 	ListenAddr   string                   `json:"listen_addr"`
 }
 
+// DefaultUIServiceName is the VIP service the web UI is published as.
+const DefaultUIServiceName = "svc:tailnetlink"
+
+// UIConfig controls the web UI.
+type UIConfig struct {
+	// ServiceName is the VIP service the UI is published as in each tailnet.
+	// Two instances that share a tailnet need different names.
+	ServiceName string `json:"service_name,omitempty"`
+}
+
+// UIServiceName returns the UI service name, or the default.
+func (c *Config) UIServiceName() string {
+	if c.UI.ServiceName != "" {
+		return c.UI.ServiceName
+	}
+	return DefaultUIServiceName
+}
+
+var instanceIDRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// Validate checks the fields the bridge relies on for safety.
+func (c *Config) Validate() error {
+	if c.InstanceID == "" {
+		if len(c.Tailnets) > 0 {
+			return errors.New("instance_id is required: pick a short name for this tailnetlink instance, for example \"home-to-work\"")
+		}
+	} else if !instanceIDRe.MatchString(c.InstanceID) {
+		return fmt.Errorf("instance_id %q must be 1 to 63 lowercase letters, digits or dashes, starting and ending with a letter or digit", c.InstanceID)
+	}
+	if err := tailcfg.ServiceName(c.UIServiceName()).Validate(); err != nil {
+		return fmt.Errorf("ui.service_name: %w", err)
+	}
+	return nil
+}
+
 type TailnetConfig struct {
 	OAuth   OAuthCreds `json:"oauth"`
 	Tags    []string   `json:"tags,omitempty"`
 	Tailnet string     `json:"tailnet"`
+
+	// ControlURL and APIBaseURL point the node and the API client at
+	// something other than the hosted control plane. Empty means the
+	// default. The e2e tests use them to run against testcontrol.
+	ControlURL string `json:"control_url,omitempty"`
+	APIBaseURL string `json:"api_base_url,omitempty"`
 }
 
 func (tc TailnetConfig) HasAuth() bool {
@@ -109,6 +162,9 @@ func Load(path string) (*Config, error) {
 	cfg := defaults()
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 	return cfg, nil
 }
@@ -209,6 +265,10 @@ func (s *Store) Update(fn func(*Config) error) error {
 		cp.Bridges = []BridgeRule{}
 	}
 	if err := fn(&cp); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if err := cp.Validate(); err != nil {
 		s.mu.Unlock()
 		return err
 	}

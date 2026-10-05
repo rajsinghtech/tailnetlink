@@ -21,6 +21,7 @@ type DNSServer struct {
 	apiClient *tsclient.Client
 	ruleName  string
 	destTags  []string
+	owner     string
 	zone      string // FQDN with trailing dot e.g. "keiretsu.ts.net."
 	logger    *slog.Logger
 
@@ -32,12 +33,13 @@ type DNSServer struct {
 	tcpServer *dns.Server
 }
 
-func NewDNSServer(srv *tsnet.Server, apiClient *tsclient.Client, ruleName string, destTags []string, zone string, logger *slog.Logger) *DNSServer {
+func NewDNSServer(srv *tsnet.Server, apiClient *tsclient.Client, ruleName string, destTags []string, owner, zone string, logger *slog.Logger) *DNSServer {
 	d := &DNSServer{
 		srv:       srv,
 		apiClient: apiClient,
 		ruleName:  ruleName,
 		destTags:  destTags,
+		owner:     owner,
 		zone:      dns.Fqdn(zone),
 		logger:    logger,
 		records:   make(map[string]netip.Addr),
@@ -53,14 +55,13 @@ func NewDNSServer(srv *tsnet.Server, apiClient *tsclient.Client, ruleName string
 func (d *DNSServer) Start(ctx context.Context) (netip.Addr, error) {
 	d.svcName = fmt.Sprintf("svc:tnl-%s-dns", sanitize(d.ruleName))
 
-	created, err := ensureVIPService(ctx, d.apiClient, tsclient.VIPService{
+	created, err := ensureVIPService(ctx, d.apiClient, d.owner, tsclient.VIPService{
 		Name:    d.svcName,
 		Ports:   []string{"tcp:53"},
 		Tags:    d.destTags,
 		Comment: fmt.Sprintf("managed by tailnetlink (DNS, rule: %s)", d.ruleName),
 		Annotations: map[string]string{
-			"tailnetlink/managed": "true",
-			"tailnetlink/rule":    d.ruleName,
+			"tailnetlink/rule": d.ruleName,
 		},
 	})
 	if err != nil {
@@ -96,16 +97,18 @@ func (d *DNSServer) Stop() {
 	}
 }
 
-// DeleteService removes the DNS VIP service from the destination tailnet.
-func (d *DNSServer) DeleteService(ctx context.Context) {
+// DeleteService removes the DNS VIP service from the destination tailnet,
+// if this instance still owns it.
+func (d *DNSServer) DeleteService(ctx context.Context) error {
 	if d.svcName == "" {
-		return
+		return nil
 	}
-	if err := d.apiClient.VIPServices().Delete(ctx, d.svcName); err != nil {
+	if err := deleteOwnedVIPService(ctx, d.apiClient, d.owner, d.svcName); err != nil {
 		d.logger.Warn("failed to delete DNS VIP service", "service", d.svcName, "err", err)
-	} else {
-		d.logger.Info("DNS VIP service deleted", "service", d.svcName)
+		return err
 	}
+	d.logger.Info("DNS VIP service deleted", "service", d.svcName)
+	return nil
 }
 
 // AddRecord registers a short hostname → VIP mapping in the zone.

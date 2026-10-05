@@ -2,8 +2,11 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"net/netip"
+	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/rajsinghtech/tailnetlink/internal/testutil/fakeapi"
@@ -16,7 +19,7 @@ func testDevice() Device {
 
 func TestReconcilerEnsureCreatesService(t *testing.T) {
 	api := fakeapi.New(t)
-	r := NewReconciler(api.Client(), []int{80, 443}, []string{"tag:bridge"}, discardLogger())
+	r := NewReconciler(api.Client(), []int{80, 443}, []string{"tag:bridge"}, testOwner, discardLogger())
 
 	vip, err := r.Ensure(context.Background(), "src", testDevice(), "")
 	if err != nil {
@@ -39,14 +42,14 @@ func TestReconcilerEnsureCreatesService(t *testing.T) {
 	if !slices.Equal(svc.Tags, []string{"tag:bridge"}) {
 		t.Errorf("tags = %v", svc.Tags)
 	}
-	if svc.Annotations["tailnetlink/managed"] != "true" || svc.Annotations["tailnetlink/source"] != "src" {
+	if svc.Annotations["tailnetlink/managed"] != "true" || svc.Annotations["tailnetlink/owner"] != testOwner || svc.Annotations["tailnetlink/source"] != "src" {
 		t.Errorf("annotations = %v", svc.Annotations)
 	}
 }
 
 func TestReconcilerEnsureIsCached(t *testing.T) {
 	api := fakeapi.New(t)
-	r := NewReconciler(api.Client(), []int{80}, nil, discardLogger())
+	r := NewReconciler(api.Client(), []int{80}, nil, testOwner, discardLogger())
 	if _, err := r.Ensure(context.Background(), "src", testDevice(), ""); err != nil {
 		t.Fatal(err)
 	}
@@ -64,9 +67,9 @@ func TestReconcilerEnsureKeepsExistingAddrs(t *testing.T) {
 	api.PutService(tsclient.VIPService{
 		Name:        "svc:tnl-src-web-1",
 		Addrs:       []string{"100.100.9.9"},
-		Annotations: map[string]string{"tailnetlink/managed": "true"},
+		Annotations: map[string]string{"tailnetlink/managed": "true", "tailnetlink/owner": testOwner},
 	})
-	r := NewReconciler(api.Client(), []int{80}, nil, discardLogger())
+	r := NewReconciler(api.Client(), []int{80}, nil, testOwner, discardLogger())
 	vip, err := r.Ensure(context.Background(), "src", testDevice(), "")
 	if err != nil {
 		t.Fatal(err)
@@ -80,7 +83,7 @@ func TestReconcilerEnsureErrorIsNotCached(t *testing.T) {
 	api := fakeapi.New(t)
 	c := api.Client()
 	c.Tailnet = "wrong.example"
-	r := NewReconciler(c, []int{80}, nil, discardLogger())
+	r := NewReconciler(c, []int{80}, nil, testOwner, discardLogger())
 	if _, err := r.Ensure(context.Background(), "src", testDevice(), ""); err == nil {
 		t.Fatal("want error from API")
 	}
@@ -89,37 +92,120 @@ func TestReconcilerEnsureErrorIsNotCached(t *testing.T) {
 	}
 }
 
-// KNOWN-BAD: Ensure overwrites a service it did not create. Here a hand made
-// svc:api gets its ports, tags, comment and annotations replaced because a
-// rule used short_name "api". Flip in roadmap PR 4 (ownership guard): Ensure
-// should refuse and make no PUT.
-func TestKnownBad_EnsureOverwritesForeignService(t *testing.T) {
+// A hand made svc:api must survive a rule that uses short_name "api": no
+// write, and Ensure reports a name conflict.
+func TestReconcilerEnsureRefusesForeignService(t *testing.T) {
 	api := fakeapi.New(t)
-	api.PutService(tsclient.VIPService{
+	foreign := tsclient.VIPService{
 		Name:    "svc:api",
 		Addrs:   []string{"100.100.7.7"},
 		Comment: "hand made",
 		Ports:   []string{"tcp:9000"},
 		Tags:    []string{"tag:other"},
-	})
-	r := NewReconciler(api.Client(), []int{80}, []string{"tag:bridge"}, discardLogger())
+	}
+	api.PutService(foreign)
+	r := NewReconciler(api.Client(), []int{80}, []string{"tag:bridge"}, testOwner, discardLogger())
 
-	if _, err := r.Ensure(context.Background(), "src", testDevice(), "api"); err != nil {
+	_, err := r.Ensure(context.Background(), "src", testDevice(), "api")
+	if !errors.Is(err, ErrNameConflict) {
+		t.Fatalf("err = %v, want a name conflict", err)
+	}
+	if w := api.Writes(); len(w) != 0 {
+		t.Errorf("writes = %v, want none", callStrings(w))
+	}
+	if svc, _ := api.Service("svc:api"); !reflect.DeepEqual(svc, foreign) {
+		t.Errorf("foreign service changed: %+v", svc)
+	}
+	if got := r.List(); len(got) != 0 {
+		t.Errorf("conflict was cached as ours: %v", got)
+	}
+}
+
+// Services from older versions only carry tailnetlink/managed. They are
+// foreign: there is no adoption.
+func TestReconcilerEnsureTreatsManagedWithoutOwnerAsForeign(t *testing.T) {
+	api := fakeapi.New(t)
+	api.PutService(tsclient.VIPService{
+		Name:        "svc:tnl-src-web-1",
+		Addrs:       []string{"100.100.9.9"},
+		Annotations: map[string]string{"tailnetlink/managed": "true"},
+	})
+	r := NewReconciler(api.Client(), []int{80}, nil, testOwner, discardLogger())
+	_, err := r.Ensure(context.Background(), "src", testDevice(), "")
+	var ce *ConflictError
+	if !errors.As(err, &ce) || ce.Owner != "" {
+		t.Fatalf("err = %v, want a conflict with no owner", err)
+	}
+	if w := api.Writes(); len(w) != 0 {
+		t.Errorf("writes = %v, want none", callStrings(w))
+	}
+}
+
+// Another instance's service is foreign too, and the error names the owner.
+func TestReconcilerEnsureRefusesOtherInstance(t *testing.T) {
+	api := fakeapi.New(t)
+	api.PutService(tsclient.VIPService{
+		Name:        "svc:tnl-src-web-1",
+		Annotations: map[string]string{"tailnetlink/managed": "true", "tailnetlink/owner": "other"},
+	})
+	r := NewReconciler(api.Client(), []int{80}, nil, testOwner, discardLogger())
+	_, err := r.Ensure(context.Background(), "src", testDevice(), "")
+	if err == nil || !strings.Contains(err.Error(), `instance "other"`) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// A failed read is not the same as "not there": Ensure must not write.
+func TestReconcilerEnsureStopsOnReadError(t *testing.T) {
+	api := fakeapi.New(t)
+	api.Fail("GET", "/vip-services/svc:tnl-src-web-1", 500)
+	r := NewReconciler(api.Client(), []int{80}, nil, testOwner, discardLogger())
+	if _, err := r.Ensure(context.Background(), "src", testDevice(), ""); err == nil {
+		t.Fatal("want an error")
+	}
+	if w := api.Writes(); len(w) != 0 {
+		t.Errorf("writes = %v, want none", callStrings(w))
+	}
+}
+
+// Our own service is reused on restart: same VIP, one update, no delete.
+func TestReconcilerEnsureReusesOwnService(t *testing.T) {
+	api := fakeapi.New(t)
+	api.PutService(tsclient.VIPService{
+		Name:        "svc:tnl-src-web-1",
+		Addrs:       []string{"100.100.9.9"},
+		Ports:       []string{"tcp:81"},
+		Annotations: map[string]string{"tailnetlink/managed": "true", "tailnetlink/owner": testOwner},
+	})
+	r := NewReconciler(api.Client(), []int{80}, nil, testOwner, discardLogger())
+	vip, err := r.Ensure(context.Background(), "src", testDevice(), "")
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	if got := callStrings(api.Writes()); !slices.Equal(got, []string{"PUT /vip-services/svc:api"}) {
+	if vip.VIP.String() != "100.100.9.9" {
+		t.Errorf("vip = %v, want 100.100.9.9", vip.VIP)
+	}
+	if got := callStrings(api.Writes()); !slices.Equal(got, []string{"PUT /vip-services/svc:tnl-src-web-1"}) {
 		t.Errorf("writes = %v", got)
 	}
-	svc, _ := api.Service("svc:api")
-	if svc.Comment == "hand made" || !slices.Equal(svc.Ports, []string{"tcp:80"}) || svc.Annotations["tailnetlink/managed"] != "true" {
-		t.Errorf("expected the foreign service to be overwritten today, got %+v", svc)
+	if svc, _ := api.Service("svc:tnl-src-web-1"); !slices.Equal(svc.Ports, []string{"tcp:80"}) {
+		t.Errorf("ports = %v, want the new tcp:80", svc.Ports)
+	}
+}
+
+func TestEnsureNeedsOwner(t *testing.T) {
+	api := fakeapi.New(t)
+	if _, err := ensureVIPService(context.Background(), api.Client(), "", tsclient.VIPService{Name: "svc:x"}); err == nil {
+		t.Fatal("want an error without an instance id")
+	}
+	if c := api.Calls(); len(c) != 0 {
+		t.Errorf("calls = %v", callStrings(c))
 	}
 }
 
 func TestReconcilerDeleteRemovesOwnService(t *testing.T) {
 	api := fakeapi.New(t)
-	r := NewReconciler(api.Client(), []int{80}, nil, discardLogger())
+	r := NewReconciler(api.Client(), []int{80}, nil, testOwner, discardLogger())
 	if _, err := r.Ensure(context.Background(), "src", testDevice(), ""); err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +226,7 @@ func TestReconcilerDeleteRemovesOwnService(t *testing.T) {
 func TestReconcilerDeleteIgnoresUnknown(t *testing.T) {
 	api := fakeapi.New(t)
 	api.PutService(tsclient.VIPService{Name: "svc:tnl-src-web-1"})
-	r := NewReconciler(api.Client(), []int{80}, nil, discardLogger())
+	r := NewReconciler(api.Client(), []int{80}, nil, testOwner, discardLogger())
 	if err := r.Delete(context.Background(), "src", testDevice(), ""); err != nil {
 		t.Fatal(err)
 	}
@@ -149,25 +235,87 @@ func TestReconcilerDeleteIgnoresUnknown(t *testing.T) {
 	}
 }
 
-// KNOWN-BAD: Delete trusts its in-memory map and never re-reads the service,
-// so it deletes a service even after someone else changed its ownership
-// annotation. Flip in roadmap PR 4: re-read and only delete when the owner
-// annotation matches.
-func TestKnownBad_DeleteIgnoresOwnershipChange(t *testing.T) {
+// Delete re-reads the service and leaves it alone if someone else's owner
+// annotation is on it now.
+func TestReconcilerDeleteSkipsServiceWithNewOwner(t *testing.T) {
 	api := fakeapi.New(t)
-	r := NewReconciler(api.Client(), []int{80}, nil, discardLogger())
+	r := NewReconciler(api.Client(), []int{80}, nil, testOwner, discardLogger())
 	if _, err := r.Ensure(context.Background(), "src", testDevice(), ""); err != nil {
 		t.Fatal(err)
 	}
 	api.PutService(tsclient.VIPService{
 		Name:        "svc:tnl-src-web-1",
 		Addrs:       []string{"100.100.0.1"},
-		Annotations: map[string]string{"owner": "someone-else"},
+		Annotations: map[string]string{"tailnetlink/owner": "someone-else"},
 	})
+	api.ResetCalls()
+	err := r.Delete(context.Background(), "src", testDevice(), "")
+	if !errors.Is(err, ErrNameConflict) {
+		t.Fatalf("err = %v, want a name conflict", err)
+	}
+	if w := api.Writes(); len(w) != 0 {
+		t.Errorf("writes = %v, want none", callStrings(w))
+	}
+	if _, ok := api.Service("svc:tnl-src-web-1"); !ok {
+		t.Error("service was deleted")
+	}
+}
+
+// A service that is already gone is fine.
+func TestReconcilerDeleteAlreadyGone(t *testing.T) {
+	api := fakeapi.New(t)
+	r := NewReconciler(api.Client(), []int{80}, nil, testOwner, discardLogger())
+	if _, err := r.Ensure(context.Background(), "src", testDevice(), ""); err != nil {
+		t.Fatal(err)
+	}
+	api.ResetCalls()
+	api.Fail("GET", "/vip-services/svc:tnl-src-web-1", 404)
 	if err := r.Delete(context.Background(), "src", testDevice(), ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := api.Service("svc:tnl-src-web-1"); ok {
-		t.Error("expected the service to be deleted today")
+	if w := api.Writes(); len(w) != 0 {
+		t.Errorf("writes = %v, want none", callStrings(w))
+	}
+}
+
+func TestReconcilerDeleteReadError(t *testing.T) {
+	api := fakeapi.New(t)
+	r := NewReconciler(api.Client(), []int{80}, nil, testOwner, discardLogger())
+	if _, err := r.Ensure(context.Background(), "src", testDevice(), ""); err != nil {
+		t.Fatal(err)
+	}
+	api.ResetCalls()
+	api.Fail("GET", "/vip-services/svc:tnl-src-web-1", 500)
+	if err := r.Delete(context.Background(), "src", testDevice(), ""); err == nil {
+		t.Fatal("want an error")
+	}
+	if w := api.Writes(); len(w) != 0 {
+		t.Errorf("writes = %v, want none", callStrings(w))
+	}
+}
+
+func TestReconcilerDeleteError(t *testing.T) {
+	api := fakeapi.New(t)
+	r := NewReconciler(api.Client(), []int{80}, nil, testOwner, discardLogger())
+	if _, err := r.Ensure(context.Background(), "src", testDevice(), ""); err != nil {
+		t.Fatal(err)
+	}
+	api.Fail("DELETE", "/vip-services/svc:tnl-src-web-1", 500)
+	if err := r.Delete(context.Background(), "src", testDevice(), ""); err == nil {
+		t.Fatal("want an error")
+	}
+}
+
+func TestConflictErrorMessage(t *testing.T) {
+	for _, tc := range []struct {
+		err  *ConflictError
+		want string
+	}{
+		{&ConflictError{Service: "svc:a"}, "name conflict: svc:a already exists and was not created by this tailnetlink instance"},
+		{&ConflictError{Service: "svc:a", Owner: "b"}, `name conflict: svc:a is owned by tailnetlink instance "b"`},
+	} {
+		if got := tc.err.Error(); got != tc.want {
+			t.Errorf("got %q, want %q", got, tc.want)
+		}
 	}
 }

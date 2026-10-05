@@ -2,8 +2,11 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
+	"net/url"
 
 	"github.com/rajsinghtech/tailnetlink/internal/config"
 	tsclient "tailscale.com/client/tailscale/v2"
@@ -28,12 +31,61 @@ func firstIP(addrs []string) (netip.Addr, bool) {
 	return netip.Addr{}, false
 }
 
-// ensureVIPService creates or updates svc, preserving any existing VIP addresses,
-// then fetches and returns the service with its assigned addresses.
-func ensureVIPService(ctx context.Context, client *tsclient.Client, svc tsclient.VIPService) (*tsclient.VIPService, error) {
-	if existing, err := client.VIPServices().Get(ctx, svc.Name); err == nil {
-		svc.Addrs = existing.Addrs
+// Annotations tailnetlink puts on every VIP service it creates. The owner
+// annotation is what the ownership guard checks; managed is informational.
+const (
+	annotationManaged = "tailnetlink/managed"
+	annotationOwner   = "tailnetlink/owner"
+)
+
+// ErrNameConflict is returned when a VIP service with the wanted name exists
+// and is not owned by this instance.
+var ErrNameConflict = errors.New("name conflict")
+
+// ConflictError says which service is in the way and who owns it, if anyone.
+type ConflictError struct {
+	Service string
+	Owner   string // value of the owner annotation, empty when there is none
+}
+
+func (e *ConflictError) Error() string {
+	if e.Owner == "" {
+		return fmt.Sprintf("name conflict: %s already exists and was not created by this tailnetlink instance", e.Service)
 	}
+	return fmt.Sprintf("name conflict: %s is owned by tailnetlink instance %q", e.Service, e.Owner)
+}
+
+func (e *ConflictError) Is(target error) bool { return target == ErrNameConflict }
+
+// ownedBy reports whether svc carries owner's exact owner annotation.
+func ownedBy(svc *tsclient.VIPService, owner string) bool {
+	return owner != "" && svc.Annotations[annotationOwner] == owner
+}
+
+// ensureVIPService creates svc, or updates it if it already exists and is
+// owned by owner, keeping its VIP addresses. A service that exists without
+// our owner annotation is left alone and a *ConflictError is returned. So is
+// a service from older versions that only has the managed annotation.
+func ensureVIPService(ctx context.Context, client *tsclient.Client, owner string, svc tsclient.VIPService) (*tsclient.VIPService, error) {
+	if owner == "" {
+		return nil, errors.New("ensure VIP service: no instance id")
+	}
+	existing, err := client.VIPServices().Get(ctx, svc.Name)
+	switch {
+	case err == nil:
+		if !ownedBy(existing, owner) {
+			return nil, &ConflictError{Service: svc.Name, Owner: existing.Annotations[annotationOwner]}
+		}
+		svc.Addrs = existing.Addrs
+	case tsclient.IsNotFound(err):
+	default:
+		return nil, fmt.Errorf("get VIP service %q: %w", svc.Name, err)
+	}
+	annotations := make(map[string]string, len(svc.Annotations)+2)
+	maps.Copy(annotations, svc.Annotations)
+	annotations[annotationManaged] = "true"
+	annotations[annotationOwner] = owner
+	svc.Annotations = annotations
 	if err := client.VIPServices().CreateOrUpdate(ctx, svc); err != nil {
 		return nil, fmt.Errorf("create/update VIP service %q: %w", svc.Name, err)
 	}
@@ -42,6 +94,25 @@ func ensureVIPService(ctx context.Context, client *tsclient.Client, svc tsclient
 		return nil, fmt.Errorf("get VIP service %q: %w", svc.Name, err)
 	}
 	return created, nil
+}
+
+// deleteOwnedVIPService re-reads the service and deletes it only if owner
+// still owns it. A service that is already gone is not an error. A service
+// someone else now owns is left alone and a *ConflictError is returned.
+func deleteOwnedVIPService(ctx context.Context, client *tsclient.Client, owner, name string) error {
+	existing, err := client.VIPServices().Get(ctx, name)
+	switch {
+	case tsclient.IsNotFound(err):
+		return nil
+	case err != nil:
+		return fmt.Errorf("get VIP service %q: %w", name, err)
+	case !ownedBy(existing, owner):
+		return &ConflictError{Service: name, Owner: existing.Annotations[annotationOwner]}
+	}
+	if err := client.VIPServices().Delete(ctx, name); err != nil && !tsclient.IsNotFound(err) {
+		return fmt.Errorf("delete VIP service %q: %w", name, err)
+	}
+	return nil
 }
 
 // formatBytes returns a human-readable byte count.
@@ -78,8 +149,14 @@ func newAPIClient(tc config.TailnetConfig) *tsclient.Client {
 	if tailnet == "" {
 		tailnet = "-"
 	}
-	return &tsclient.Client{
+	c := &tsclient.Client{
 		Tailnet: tailnet,
 		Auth:    &tsclient.OAuth{ClientID: tc.OAuth.ClientID, ClientSecret: tc.OAuth.ClientSecret},
 	}
+	if tc.APIBaseURL != "" {
+		if u, err := url.Parse(tc.APIBaseURL); err == nil {
+			c.BaseURL = u
+		}
+	}
+	return c
 }
