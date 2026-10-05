@@ -42,7 +42,7 @@ make build && make run
 
 ## Configuration
 
-Config is stored as JSON (default: `data.json`). The web UI at `:8888` lets you add tailnets and bridge rules without editing the file directly.
+Config is stored as JSON (default: `data.json`). The web UI at `127.0.0.1:8888` lets you add tailnets and bridge rules without editing the file directly.
 
 ```json
 {
@@ -76,7 +76,7 @@ Config is stored as JSON (default: `data.json`). The web UI at `:8888` lets you 
   ],
   "poll_interval": "30s",
   "dial_timeout": "10s",
-  "listen_addr": ":8888"
+  "listen_addr": "127.0.0.1:8888"
 }
 ```
 
@@ -136,7 +136,7 @@ tailnetlink prune -data data.json
 | Flag | Default | Description |
 |---|---|---|
 | `-data` | `tailnetlink.json` | Path to config/state JSON file |
-| `-listen` | `:8888` | Web UI listen address |
+| `-listen` | `127.0.0.1:8888` | Web UI listen address |
 | `-log-level` | `info` | Log level: `debug`, `info`, `warn`, `error` |
 | `-shutdown-timeout` | `20s` | How long to wait for a clean shutdown on SIGTERM or SIGINT. A second signal exits at once. |
 
@@ -163,7 +163,9 @@ Node state lives in `/tailnetlink-state` (next to `/data.json`) unless `state_di
 
 ## Web UI
 
-Available at `http://localhost:8888` (or the configured `-listen` address). The UI also registers itself as `svc:tailnetlink` on TCP:80 in each connected tailnet, so you can reach it via the Tailscale VIP from within either network.
+Available at `http://localhost:8888` (or the configured `-listen` address). It listens on loopback only by default. The UI also registers itself as `svc:tailnetlink` on TCP:80 in each connected tailnet, so you can reach it via the Tailscale VIP from within either network.
+
+The UI never serves OAuth client secrets: `/api/config` and the event stream show `[redacted]` in their place, and saving a tailnet with `[redacted]` or an empty secret keeps the stored one. There are no CORS headers, and every API call other than GET must be sent as `Content-Type: application/json`. Until the UI becomes read-only, anyone who can reach `svc:tailnetlink` can still change the config through it, so keep ACLs on that service tight.
 
 The UI provides:
 

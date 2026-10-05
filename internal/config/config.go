@@ -148,13 +148,18 @@ type BridgeRule struct {
 	Ports          []int             `json:"ports,omitempty"`
 }
 
+// DefaultListenAddr is where the web UI listens unless the config or
+// -listen says otherwise. Loopback only: the UI is reachable from the
+// tailnets through its VIP service, not from the local network.
+const DefaultListenAddr = "127.0.0.1:8888"
+
 func defaults() *Config {
 	return &Config{
 		Tailnets:     make(map[string]TailnetConfig),
 		Bridges:      []BridgeRule{},
 		PollInterval: Duration{30 * time.Second},
 		DialTimeout:  Duration{10 * time.Second},
-		ListenAddr:   ":8888",
+		ListenAddr:   DefaultListenAddr,
 	}
 }
 
@@ -296,10 +301,28 @@ func (s *Store) Update(fn func(*Config) error) error {
 	return nil
 }
 
-// RawJSON returns the current config serialized as indented JSON.
-func (s *Store) RawJSON() []byte {
+// RedactedSecret stands in for a secret in anything served over HTTP.
+const RedactedSecret = "[redacted]"
+
+// Redacted returns a copy of c with every secret replaced by
+// RedactedSecret. The copy has its own Tailnets map.
+func (c *Config) Redacted() *Config {
+	cp := *c
+	cp.Tailnets = make(map[string]TailnetConfig, len(c.Tailnets))
+	for name, tc := range c.Tailnets {
+		if tc.OAuth.ClientSecret != "" {
+			tc.OAuth.ClientSecret = RedactedSecret
+		}
+		cp.Tailnets[name] = tc
+	}
+	return &cp
+}
+
+// RedactedJSON returns the current config as indented JSON with secrets
+// redacted. It backs GET /api/config and the SSE init event.
+func (s *Store) RedactedJSON() []byte {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	data, _ := json.MarshalIndent(s.cfg, "", "  ")
+	data, _ := json.MarshalIndent(s.cfg.Redacted(), "", "  ")
 	return data
 }
