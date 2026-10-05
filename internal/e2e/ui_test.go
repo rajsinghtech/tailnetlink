@@ -127,7 +127,8 @@ func probeUI(t *testing.T, hc *http.Client, base string, b *border) string {
 
 // No secret leaves tailnetlink over HTTP: not from the local listener, not
 // through svc:tailnetlink from either tailnet, not in the SSE stream and
-// not in the log. Flipped from TestKnownBad_SecretsOverHTTP.
+// not in the log. Flipped from TestKnownBad_SecretsOverHTTP. The secrets
+// only reach tailnetlink through files.
 func TestNoSecretsOverHTTP(t *testing.T) {
 	ctx := e2eSetup(t)
 	b := newBorder(t)
@@ -154,8 +155,8 @@ func TestNoSecretsOverHTTP(t *testing.T) {
 		if l := leaked(body, b.secrets()); len(l) != 0 {
 			t.Errorf("%s: leaked %v", where, l)
 		}
-		if where != "log" && !strings.Contains(body, config.RedactedSecret) {
-			t.Errorf("%s: no redacted config in the responses", where)
+		if where != "log" && !strings.Contains(body, "client_secret_file") {
+			t.Errorf("%s: no config in the responses", where)
 		}
 	}
 }

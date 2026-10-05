@@ -208,8 +208,13 @@ func TestPruneCommand(t *testing.T) {
 	api := fakeapi.New(t)
 	api.PutService(tsclient.VIPService{Name: "svc:mine", Addrs: []string{"100.100.0.1"}, Annotations: map[string]string{"tailnetlink/owner": "me"}})
 	api.PutService(tsclient.VIPService{Name: "svc:theirs", Annotations: map[string]string{"tailnetlink/owner": "them"}})
-	cfg := fmt.Sprintf(`{"instance_id":"me","tailnets":{"dest":{"tailnet":%q,"api_base_url":%q,"oauth":{"client_id":"id","client_secret":"s"}}}}`, api.Tailnet, api.URL())
-	p := filepath.Join(t.TempDir(), "c.json")
+	dir := t.TempDir()
+	secret := filepath.Join(dir, "secret")
+	if err := os.WriteFile(secret, []byte("s"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := fmt.Sprintf(`{"instance_id":"me","tailnets":{"dest":{"tailnet":%q,"api_base_url":%q,"oauth":{"client_id":"id","client_secret_file":%q}}}}`, api.Tailnet, api.URL(), secret)
+	p := filepath.Join(dir, "c.json")
 	if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -255,5 +260,20 @@ func TestPruneCommandErrors(t *testing.T) {
 	_ = os.WriteFile(noID, []byte("{}"), 0o600)
 	if c := run([]string{"prune", "-data", noID}, io.Discard, nil); c != 1 {
 		t.Errorf("no instance_id exit %d", c)
+	}
+}
+
+func TestRunRejectsInlineSecret(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "c.json")
+	cfg := `{"instance_id":"me","tailnets":{"work":{"tailnet":"w.example","oauth":{"client_id":"id","client_secret":"inline-value"}}}}`
+	if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if c := run([]string{"-data", p}, &out, nil); c != 1 {
+		t.Fatalf("exit %d, want 1:\n%s", c, out.String())
+	}
+	if !strings.Contains(out.String(), "oauth.client_secret is not supported") || strings.Contains(out.String(), "inline-value") {
+		t.Errorf("output:\n%s", out.String())
 	}
 }

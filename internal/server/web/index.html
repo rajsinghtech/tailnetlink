@@ -823,8 +823,8 @@
             <input class="form-input mono" name="client_id" required autocomplete="off" spellcheck="false" onblur="tryDetectTailnet(this.closest('form'), 'modal-tailnet-field')">
           </div>
           <div class="form-group">
-            <label class="form-label">Client secret</label>
-            <input class="form-input mono" name="client_secret" type="password" required autocomplete="off" onblur="tryDetectTailnet(this.closest('form'), 'modal-tailnet-field')">
+            <label class="form-label">Client secret file</label>
+            <input class="form-input mono" name="client_secret_file" placeholder="/run/secrets/oauth-secret" required autocomplete="off" spellcheck="false" onblur="tryDetectTailnet(this.closest('form'), 'modal-tailnet-field')">
           </div>
         </div>
         <div class="form-group">
@@ -954,8 +954,8 @@
               <input class="form-input mono" id="w0-cid" required autocomplete="off" spellcheck="false" onblur="tryDetectTailnet(null, 'w0-tailnet', 'w0-cid', 'w0-csec')">
             </div>
             <div class="form-group">
-              <label class="form-label">OAuth client secret</label>
-              <input class="form-input mono" id="w0-csec" type="password" required autocomplete="off" onblur="tryDetectTailnet(null, 'w0-tailnet', 'w0-cid', 'w0-csec')">
+              <label class="form-label">OAuth client secret file</label>
+              <input class="form-input mono" id="w0-csec" placeholder="/run/secrets/oauth-secret" required autocomplete="off" spellcheck="false" onblur="tryDetectTailnet(null, 'w0-tailnet', 'w0-cid', 'w0-csec')">
             </div>
           </div>
           <div class="form-group">
@@ -989,8 +989,8 @@
               <input class="form-input mono" id="w1-cid" required autocomplete="off" spellcheck="false" onblur="tryDetectTailnet(null, 'w1-tailnet', 'w1-cid', 'w1-csec')">
             </div>
             <div class="form-group">
-              <label class="form-label">OAuth client secret</label>
-              <input class="form-input mono" id="w1-csec" type="password" required autocomplete="off" onblur="tryDetectTailnet(null, 'w1-tailnet', 'w1-cid', 'w1-csec')">
+              <label class="form-label">OAuth client secret file</label>
+              <input class="form-input mono" id="w1-csec" placeholder="/run/secrets/oauth-secret" required autocomplete="off" spellcheck="false" onblur="tryDetectTailnet(null, 'w1-tailnet', 'w1-cid', 'w1-csec')">
             </div>
           </div>
           <div class="form-group">
@@ -2072,10 +2072,10 @@ function tryDetectTailnet(form, tailnetFieldId, cidId, csecId) {
   let cid, csec;
   if (form) {
     cid  = form.querySelector('[name=client_id]')?.value.trim();
-    csec = form.querySelector('[name=client_secret]')?.value;
+    csec = form.querySelector('[name=client_secret_file]')?.value.trim();
   } else {
     cid  = document.getElementById(cidId)?.value.trim();
-    csec = document.getElementById(csecId)?.value;
+    csec = document.getElementById(csecId)?.value.trim();
   }
   if (!cid || !csec) return;
 
@@ -2088,7 +2088,7 @@ function tryDetectTailnet(form, tailnetFieldId, cidId, csecId) {
       const r = await fetch('/api/tailnets/detect', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ client_id: cid, client_secret: csec }),
+        body: JSON.stringify({ client_id: cid, client_secret_file: csec }),
       });
       if (!r.ok) { targetField.placeholder = 'could not detect — enter manually'; return; }
       const data = await r.json();
@@ -2148,15 +2148,15 @@ async function submitAddNetwork(e) {
   try {
     const name = f.name.value.trim();
     const cid  = f.client_id.value.trim();
-    const csec = f.client_secret.value;
+    const csec = f.client_secret_file.value.trim();
     if (!name) throw new Error('Network name is required');
     if (!cid)  throw new Error('Client ID is required');
-    if (!csec) throw new Error('Client secret is required');
+    if (!csec) throw new Error('Client secret file is required');
     if ((state.config.tailnets || {})[name]) throw new Error(`A network named "${name}" already exists`);
     await apiPost('/api/tailnets', {
       name,
       tailnet: f.tailnet.value.trim(),
-      oauth: { client_id: cid, client_secret: csec },
+      oauth: { client_id: cid, client_secret_file: csec },
       tags: parseTags(f.tags.value),
     });
     closeModal('modal-add-network');
@@ -2270,15 +2270,15 @@ async function wizardNext(e, step) {
     try {
       const name = document.getElementById('w0-name').value.trim();
       const cid  = document.getElementById('w0-cid').value.trim();
-      const csec = document.getElementById('w0-csec').value;
+      const csec = document.getElementById('w0-csec').value.trim();
       if (!name) throw new Error('Network name is required');
       if (!cid)  throw new Error('Client ID is required');
-      if (!csec) throw new Error('Client secret is required');
+      if (!csec) throw new Error('Client secret file is required');
       if ((state.config.tailnets || {})[name]) throw new Error(`A network named "${name}" already exists`);
       await apiPost('/api/tailnets', {
         name,
         tailnet: document.getElementById('w0-tailnet').value.trim(),
-        oauth: { client_id: cid, client_secret: csec },
+        oauth: { client_id: cid, client_secret_file: csec },
         tags: parseTags(document.getElementById('w0-tags').value),
       });
       await refreshConfig();
@@ -2291,15 +2291,15 @@ async function wizardNext(e, step) {
     try {
       const name = document.getElementById('w1-name').value.trim();
       const cid  = document.getElementById('w1-cid').value.trim();
-      const csec = document.getElementById('w1-csec').value;
+      const csec = document.getElementById('w1-csec').value.trim();
       if (!name) throw new Error('Network name is required');
       if (!cid)  throw new Error('Client ID is required');
-      if (!csec) throw new Error('Client secret is required');
+      if (!csec) throw new Error('Client secret file is required');
       if ((state.config.tailnets || {})[name]) throw new Error(`A network named "${name}" already exists`);
       await apiPost('/api/tailnets', {
         name,
         tailnet: document.getElementById('w1-tailnet').value.trim(),
-        oauth: { client_id: cid, client_secret: csec },
+        oauth: { client_id: cid, client_secret_file: csec },
         tags: parseTags(document.getElementById('w1-tags').value),
       });
       await refreshConfig();

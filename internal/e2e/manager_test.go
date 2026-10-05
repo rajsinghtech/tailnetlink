@@ -12,6 +12,8 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -52,6 +54,7 @@ type border struct {
 	srcAPI, dstAPI   *ctlBridge
 	srcName, dstName string // tailnet names in the tailnetlink config
 	stateDir         string
+	secretFiles      []string // the secrets, one per file, mode 0600
 }
 
 func newBorder(t *testing.T) *border {
@@ -63,6 +66,18 @@ func newBorder(t *testing.T) *border {
 	b.dstAPI = newCtlBridge(t, b.dst)
 	b.srcName = "src" + b.sfx
 	b.dstName = "dst" + b.sfx
+	// The bridges only hand out tokens for the right secret, and
+	// tailnetlink only ever sees the secrets through files.
+	dir := t.TempDir()
+	for i, sec := range b.secrets() {
+		f := filepath.Join(dir, fmt.Sprintf("secret-%d", i))
+		if err := os.WriteFile(f, []byte(sec+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		b.secretFiles = append(b.secretFiles, f)
+	}
+	b.srcAPI.secret = b.secrets()[0]
+	b.dstAPI.secret = b.secrets()[1]
 	return b
 }
 
@@ -72,9 +87,9 @@ func (b *border) secrets() []string {
 	return []string{"src-secret-" + b.sfx, "dst-secret-" + b.sfx}
 }
 
-func (b *border) tailnetConfig(tn *tailnet, api *ctlBridge, secret string) config.TailnetConfig {
+func (b *border) tailnetConfig(tn *tailnet, api *ctlBridge, secretFile string) config.TailnetConfig {
 	return config.TailnetConfig{
-		OAuth:      config.OAuthCreds{ClientID: "client-" + b.sfx, ClientSecret: secret},
+		OAuth:      config.OAuthCreds{ClientID: "client-" + b.sfx, ClientSecretFile: secretFile},
 		Tags:       []string{"tag:tailnetlink"},
 		Tailnet:    tn.domain,
 		ControlURL: tn.url,
@@ -83,12 +98,11 @@ func (b *border) tailnetConfig(tn *tailnet, api *ctlBridge, secret string) confi
 }
 
 func (b *border) config(rules ...config.BridgeRule) *config.Config {
-	s := b.secrets()
 	return &config.Config{
 		InstanceID: "e2e-" + b.sfx,
 		Tailnets: map[string]config.TailnetConfig{
-			b.srcName: b.tailnetConfig(b.src, b.srcAPI, s[0]),
-			b.dstName: b.tailnetConfig(b.dst, b.dstAPI, s[1]),
+			b.srcName: b.tailnetConfig(b.src, b.srcAPI, b.secretFiles[0]),
+			b.dstName: b.tailnetConfig(b.dst, b.dstAPI, b.secretFiles[1]),
 		},
 		Bridges:      rules,
 		StateDir:     b.stateDir,

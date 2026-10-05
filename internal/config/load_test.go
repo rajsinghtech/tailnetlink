@@ -96,9 +96,10 @@ func TestHasAuth(t *testing.T) {
 		oauth config.OAuthCreds
 		want  bool
 	}{
-		{config.OAuthCreds{ClientID: "id", ClientSecret: "s"}, true},
+		{config.OAuthCreds{ClientID: "id", ClientSecretFile: "/run/s"}, true},
+		{config.OAuthCreds{ClientID: "id", ClientSecretEnv: "S"}, true},
 		{config.OAuthCreds{ClientID: "id"}, false},
-		{config.OAuthCreds{ClientSecret: "s"}, false},
+		{config.OAuthCreds{ClientSecretFile: "/run/s"}, false},
 	}
 	for _, c := range cases {
 		if got := (config.TailnetConfig{OAuth: c.oauth}).HasAuth(); got != c.want {
@@ -187,33 +188,117 @@ func TestKnownBad_SnapshotsShareState(t *testing.T) {
 	}
 }
 
-// RedactedJSON, which backs GET /api/config and the SSE init event, never
-// carries a client secret. Flipped from TestKnownBad_RawJSONIncludesSecrets.
-func TestRedactedJSONHidesSecrets(t *testing.T) {
-	s, _ := config.NewStore(filepath.Join(t.TempDir(), "config.json"))
-	_ = s.Update(func(c *config.Config) error {
-		c.InstanceID = "test"
-		c.Tailnets["a"] = config.TailnetConfig{OAuth: config.OAuthCreds{ClientID: "id", ClientSecret: "very-secret"}}
-		c.Tailnets["b"] = config.TailnetConfig{OAuth: config.OAuthCreds{ClientID: "id2"}}
-		return nil
-	})
-	out := string(s.RedactedJSON())
-	if strings.Contains(out, "very-secret") {
-		t.Errorf("secret in RedactedJSON:\n%s", out)
+// An inline client_secret stops the config from loading. The error names
+// the field and the tailnet, never the value.
+func TestLoadRejectsInlineSecret(t *testing.T) {
+	for name, oauth := range map[string]string{
+		"alone":     `{"client_id": "id", "client_secret": "hunter2-value"}`,
+		"with file": `{"client_id": "id", "client_secret": "hunter2-value", "client_secret_file": "/run/s"}`,
+		"empty":     `{"client_id": "id", "client_secret": ""}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := config.Load(writeFile(t, `{"instance_id": "x", "tailnets": {"work": {"tailnet": "w.example", "oauth": `+oauth+`}}}`))
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "oauth.client_secret is not supported") || !strings.Contains(msg, `"work"`) || !strings.Contains(msg, "client_secret_file") {
+				t.Errorf("err = %v", err)
+			}
+			if strings.Contains(msg, "hunter2") {
+				t.Errorf("error leaks the secret: %v", err)
+			}
+		})
 	}
-	var got config.Config
-	if err := json.Unmarshal([]byte(out), &got); err != nil {
+}
+
+func TestLoadRejectsBothSecretSources(t *testing.T) {
+	_, err := config.Load(writeFile(t, `{"instance_id": "x", "tailnets": {"a": {"oauth": {"client_id": "id", "client_secret_file": "/f", "client_secret_env": "E"}}}}`))
+	if err == nil || !strings.Contains(err.Error(), "only one of") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestSecret(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good")
+	_ = os.WriteFile(good, []byte("  file-secret\n"), 0o600)
+	empty := filepath.Join(dir, "empty")
+	_ = os.WriteFile(empty, []byte("\n"), 0o600)
+	t.Setenv("TNL_TEST_SECRET", "env-secret")
+	t.Setenv("TNL_TEST_EMPTY", "")
+
+	cases := []struct {
+		name    string
+		creds   config.OAuthCreds
+		want    string
+		wantErr string
+	}{
+		{"file", config.OAuthCreds{ClientSecretFile: good}, "file-secret", ""},
+		{"env", config.OAuthCreds{ClientSecretEnv: "TNL_TEST_SECRET"}, "env-secret", ""},
+		{"missing file", config.OAuthCreds{ClientSecretFile: filepath.Join(dir, "nope")}, "", "client_secret_file"},
+		{"empty file", config.OAuthCreds{ClientSecretFile: empty}, "", "is empty"},
+		{"unset env", config.OAuthCreds{ClientSecretEnv: "TNL_TEST_UNSET_XYZ"}, "", "$TNL_TEST_UNSET_XYZ is not set"},
+		{"empty env", config.OAuthCreds{ClientSecretEnv: "TNL_TEST_EMPTY"}, "", "is not set"},
+		{"neither", config.OAuthCreds{ClientID: "id"}, "", "set oauth.client_secret_file or oauth.client_secret_env"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := c.creds.Secret()
+			if c.wantErr == "" {
+				if err != nil || got != c.want {
+					t.Errorf("Secret() = %q, %v; want %q", got, err, c.want)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("err = %v, want it to mention %q", err, c.wantErr)
+			}
+		})
+	}
+}
+
+// The config never holds a secret, so neither JSON nor a save can carry
+// one.
+func TestConfigJSONHasNoSecret(t *testing.T) {
+	dir := t.TempDir()
+	secretFile := filepath.Join(dir, "secret")
+	_ = os.WriteFile(secretFile, []byte("very-secret"), 0o600)
+	p := filepath.Join(dir, "config.json")
+	s, _ := config.NewStore(p)
+	if err := s.Update(func(c *config.Config) error {
+		c.InstanceID = "test"
+		c.Tailnets["a"] = config.TailnetConfig{OAuth: config.OAuthCreds{ClientID: "id", ClientSecretFile: secretFile}}
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if got.Tailnets["a"].OAuth.ClientSecret != config.RedactedSecret || got.Tailnets["a"].OAuth.ClientID != "id" {
-		t.Errorf("a = %+v", got.Tailnets["a"].OAuth)
+	saved, _ := os.ReadFile(p)
+	for where, out := range map[string]string{"JSON": string(s.JSON()), "file": string(saved)} {
+		if strings.Contains(out, "very-secret") || strings.Contains(out, `"client_secret"`) {
+			t.Errorf("%s carries a secret:\n%s", where, out)
+		}
+		if !strings.Contains(out, secretFile) {
+			t.Errorf("%s lost client_secret_file:\n%s", where, out)
+		}
 	}
-	if got.Tailnets["b"].OAuth.ClientSecret != "" {
-		t.Errorf("an unset secret should stay empty, got %q", got.Tailnets["b"].OAuth.ClientSecret)
+}
+
+// Writes through the store validate too, so an inline secret sent to the
+// UI API is refused.
+func TestStoreUpdateRejectsInlineSecret(t *testing.T) {
+	s, _ := config.NewStore(filepath.Join(t.TempDir(), "config.json"))
+	var oauth config.OAuthCreds
+	if err := json.Unmarshal([]byte(`{"client_id":"id","client_secret":"x"}`), &oauth); err != nil {
+		t.Fatal(err)
 	}
-	// The live config keeps the real secret.
-	if s.Get().Tailnets["a"].OAuth.ClientSecret != "very-secret" {
-		t.Error("redaction changed the stored config")
+	err := s.Update(func(c *config.Config) error {
+		c.InstanceID = "test"
+		c.Tailnets["a"] = config.TailnetConfig{OAuth: oauth}
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "client_secret is not supported") {
+		t.Fatalf("err = %v", err)
 	}
 }
 
