@@ -40,8 +40,8 @@ jobs:
       - name: Staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
 
-      - name: Test
-        run: go test -race ./...
+      - name: Test with coverage ratchet
+        run: ./scripts/coverage.sh
 
       - name: Build
         run: CGO_ENABLED=0 go build -ldflags "-s -w" -o tailnetlink ./cmd/tailnetlink
