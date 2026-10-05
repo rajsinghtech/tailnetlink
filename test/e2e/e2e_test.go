@@ -283,6 +283,19 @@ type link struct {
 	echoPort  int
 	logOutput *strings.Builder
 	store     *state.Store
+	mgr       *bridge.Manager
+}
+
+// stop shuts tailnetlink down the way SIGTERM does: cancel, then Close with
+// the default 20 s limit.
+func (l *link) stop(t *testing.T) {
+	t.Helper()
+	l.cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := l.mgr.Close(ctx); err != nil {
+		t.Errorf("close: %v", err)
+	}
 }
 
 type linkOpts struct {
@@ -365,10 +378,16 @@ func startLink(t *testing.T, ctx context.Context, o linkOpts) *link {
 			t.Fatal(err)
 		}
 		srv := server.New(l.webAddr, store, cs, logger)
-		go srv.Run() //nolint:errcheck // Run never returns today (roadmap problem 3)
+		go srv.Run(mctx) //nolint:errcheck // stops with the manager
 	}
 	mgr := bridge.New(store, logger, l.webAddr)
+	l.mgr = mgr
 	go mgr.Reconcile(mctx, l.cfg)
+	t.Cleanup(func() {
+		cctx, ccancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer ccancel()
+		_ = mgr.Close(cctx)
+	})
 	t.Cleanup(func() {
 		if t.Failed() {
 			t.Logf("tailnetlink log:\n%s", l.logOutput.String())
@@ -530,7 +549,7 @@ func TestRealLeavesForeignServiceAlone(t *testing.T) {
 	if msg := l.bridgeError(t); !strings.HasPrefix(msg, "name conflict") {
 		t.Errorf("bridge error = %q, want a name conflict", msg)
 	}
-	l.cancel()
+	l.stop(t)
 	time.Sleep(10 * time.Second)
 	after := l.service(ctx, "svc:"+short)
 	if after == nil || !sameService(before, after) {
@@ -556,7 +575,7 @@ func TestRealInstancesDoNotTouchEachOther(t *testing.T) {
 	}
 	before := a.service(ctx, a.svc)
 
-	b.cancel()
+	b.stop(t)
 	waitFor(t, 2*time.Minute, b.svc+" removed when its instance stops", func() bool {
 		return b.service(ctx, b.svc) == nil
 	})
@@ -574,7 +593,7 @@ func TestKnownBad_RealShutdownDeletesServices(t *testing.T) {
 	l := startLink(t, ctx, linkOpts{})
 	l.waitService(t, ctx, l.svc)
 
-	l.cancel() // what SIGTERM does today
+	l.stop(t)
 	waitFor(t, 2*time.Minute, "service to be deleted after shutdown", func() bool {
 		return l.service(ctx, l.svc) == nil
 	})

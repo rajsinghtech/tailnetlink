@@ -30,7 +30,7 @@ func TestKnownBad_ManagerShutdownDeletesServices(t *testing.T) {
 	svc := b.serviceName("backend", "")
 	waitVIP(t, b.dstAPI, svc)
 
-	r.cancel()
+	r.stop(t)
 	waitFor(t, 30*time.Second, "service deleted on shutdown", func() bool {
 		_, ok := b.dstAPI.Service(svc)
 		return !ok
@@ -63,7 +63,7 @@ func startUI(t *testing.T, r *running, cfg *config.Config, webAddr string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go server.New(webAddr, r.store, cs, r.logger).Run() //nolint:errcheck // Run never returns today
+	go server.New(webAddr, r.store, cs, r.logger).Run(r.ctx) //nolint:errcheck // stops with the manager
 }
 
 // KNOWN-BAD: the web UI hands out the OAuth client secrets, locally and to

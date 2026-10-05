@@ -16,7 +16,7 @@ cd "$(dirname "$0")/.."
 baseline_file=.coverage-baseline
 profile=${COVERPROFILE:-coverage.out}
 
-go test -race -covermode=atomic -coverpkg=./cmd/...,./internal/... -coverprofile="$profile.raw" ./...
+go test -count=1 -race -covermode=atomic -coverpkg=./cmd/...,./internal/... -coverprofile="$profile.raw" ./...
 grep -v -E '/internal/(testutil|e2e)/|/tailnetlink/test/' "$profile.raw" > "$profile"
 rm -f "$profile.raw"
 

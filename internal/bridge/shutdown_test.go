@@ -22,7 +22,9 @@ func stubForwarders(t *testing.T) {
 	t.Helper()
 	orig := startForwarder
 	startForwarder = func(*Forwarder, context.Context) error { return nil }
-	t.Cleanup(func() { startForwarder = orig })
+	origClose := closeServer
+	closeServer = func(*tsnet.Server) error { return nil }
+	t.Cleanup(func() { startForwarder, closeServer = orig, origClose })
 }
 
 type testManager struct {

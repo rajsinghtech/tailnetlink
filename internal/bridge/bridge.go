@@ -30,6 +30,7 @@ type Manager struct {
 
 	reconcileMu  sync.Mutex // serializes concurrent Reconcile calls
 	mu           sync.Mutex
+	closed       bool                     // set by Close; Reconcile does nothing after
 	cfg          *config.Config           // last applied config
 	owner        string                   // instance id, written to tailnetlink/owner
 	uiService    string                   // VIP service name for the web UI
@@ -49,6 +50,10 @@ type Manager struct {
 // startForwarder starts a forwarder. It is a variable only so tests can stub
 // it out, since the real Start needs a running tsnet node.
 var startForwarder = (*Forwarder).Start
+
+// closeServer closes a tsnet node. A variable so tests can use nodes that
+// were never started.
+var closeServer = (*tsnet.Server).Close
 
 func New(store *state.Store, logger *slog.Logger, webAddr string) *Manager {
 	return &Manager{
@@ -75,6 +80,10 @@ func (m *Manager) Reconcile(ctx context.Context, newCfg *config.Config) {
 	defer m.reconcileMu.Unlock()
 
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return
+	}
 	old := m.cfg
 	// A new instance id or UI service name changes what every running piece
 	// owns or publishes, so everything restarts.
@@ -180,6 +189,66 @@ func (m *Manager) Reconcile(ctx context.Context, newCfg *config.Config) {
 	m.mu.Unlock()
 }
 
+// Close stops every rule, closes every listener and tsnet node, and makes
+// later Reconcile calls do nothing. It waits for that to finish or for ctx
+// to be done, whichever comes first, and returns ctx's error in the second
+// case. The work carries on in the background after a timeout; the caller
+// is expected to exit.
+func (m *Manager) Close(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Wait for an in-flight Reconcile so nothing starts after this.
+		m.reconcileMu.Lock()
+		defer m.reconcileMu.Unlock()
+
+		m.mu.Lock()
+		m.closed = true
+		rules := make([]string, 0, len(m.rules))
+		for name := range m.rules {
+			rules = append(rules, name)
+		}
+		tailnets := make([]string, 0, len(m.servers))
+		for name := range m.servers {
+			tailnets = append(tailnets, name)
+		}
+		m.mu.Unlock()
+
+		var wg sync.WaitGroup
+		for _, name := range rules {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				m.stopRule(name)
+			}()
+		}
+		wg.Wait()
+
+		m.dnsMu.Lock()
+		for key, entry := range m.sharedDNS {
+			entry.server.Stop()
+			delete(m.sharedDNS, key)
+		}
+		m.dnsMu.Unlock()
+
+		for _, name := range tailnets {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				m.stopTailnet(name)
+			}()
+		}
+		wg.Wait()
+		m.logger.Info("bridge manager closed")
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("close: %w", ctx.Err())
+	}
+}
+
 func (m *Manager) startTailnet(ctx context.Context, name string, tc config.TailnetConfig) error {
 	apiClient := newAPIClient(tc)
 
@@ -233,7 +302,7 @@ func (m *Manager) stopTailnet(name string) {
 	m.mu.Unlock()
 
 	if ok {
-		_ = srv.Close()
+		_ = closeServer(srv)
 		m.store.DeleteTailnet(name)
 		m.store.Log("info", fmt.Sprintf("disconnected from tailnet %q", name), nil)
 	}
