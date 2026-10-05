@@ -327,13 +327,19 @@ func startLink(t *testing.T, ctx context.Context, o linkOpts) *link {
 	l.client = join(t, ctx, dst, "e2e-client-"+l.sfx, "tag:e2e-client")
 	acceptRoutes(t, ctx, l.client)
 
+	// tailnetlink gets the secrets only through 0600 files.
 	creds := map[string]config.OAuthCreds{}
+	secretDir := t.TempDir()
 	for _, s := range []*side{src, dst} {
 		id, secret, err := api.CreateOAuthClient(ctx, s.tok, s.id, "tailnetlink e2e "+l.sfx, appScopes, []string{linkTag})
 		if err != nil {
 			t.Fatalf("oauth client for tailnetlink in %s: %v", s.role, err)
 		}
-		creds[s.role] = config.OAuthCreds{ClientID: id, ClientSecret: secret}
+		f := filepath.Join(secretDir, s.role+"-secret")
+		if err := os.WriteFile(f, []byte(secret), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		creds[s.role] = config.OAuthCreds{ClientID: id, ClientSecretFile: f}
 		l.secrets = append(l.secrets, secret)
 	}
 	l.cfg = &config.Config{
@@ -740,8 +746,8 @@ func TestRealNoSecretsOverHTTP(t *testing.T) {
 				}
 			}
 		}
-		if !strings.Contains(all.String(), config.RedactedSecret) {
-			t.Errorf("%s: no redacted config served", where)
+		if !strings.Contains(all.String(), "client_secret_file") {
+			t.Errorf("%s: no config served", where)
 		}
 	}
 }

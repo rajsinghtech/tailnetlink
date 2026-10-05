@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"maps"
 	"net/netip"
-	"net/url"
 
 	"github.com/rajsinghtech/tailnetlink/internal/config"
+	"github.com/rajsinghtech/tailnetlink/internal/tsapi"
 	tsclient "tailscale.com/client/tailscale/v2"
 )
 
@@ -145,18 +145,5 @@ func connLabel(addr, nodeName, identity string) string {
 
 // newAPIClient constructs a Tailscale API client from a TailnetConfig.
 func newAPIClient(tc config.TailnetConfig) *tsclient.Client {
-	tailnet := tc.Tailnet
-	if tailnet == "" {
-		tailnet = "-"
-	}
-	c := &tsclient.Client{
-		Tailnet: tailnet,
-		Auth:    &tsclient.OAuth{ClientID: tc.OAuth.ClientID, ClientSecret: tc.OAuth.ClientSecret},
-	}
-	if tc.APIBaseURL != "" {
-		if u, err := url.Parse(tc.APIBaseURL); err == nil {
-			c.BaseURL = u
-		}
-	}
-	return c
+	return tsapi.NewClient(tc)
 }

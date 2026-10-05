@@ -22,10 +22,11 @@ func pruneFixture(t *testing.T) (*fakeapi.Server, *config.Config) {
 	api.SetSplitDNS("src.example", []string{"100.100.0.53", "100.99.0.1"})
 	api.SetSplitDNS("only.example", []string{"100.100.0.53"})
 	api.SetSplitDNS("other.example", []string{"100.99.0.2"})
+	t.Setenv("TNL_PRUNE_TEST_SECRET", "secret")
 	cfg := &config.Config{
 		InstanceID: testOwner,
 		Tailnets: map[string]config.TailnetConfig{
-			"dest": {Tailnet: api.Tailnet, APIBaseURL: api.URL(), OAuth: config.OAuthCreds{ClientID: "id", ClientSecret: "secret"}},
+			"dest": {Tailnet: api.Tailnet, APIBaseURL: api.URL(), OAuth: config.OAuthCreds{ClientID: "id", ClientSecretEnv: "TNL_PRUNE_TEST_SECRET"}},
 		},
 	}
 	return api, cfg

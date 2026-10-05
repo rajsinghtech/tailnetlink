@@ -12,13 +12,13 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/rajsinghtech/tailnetlink/internal/config"
 	"github.com/rajsinghtech/tailnetlink/internal/state"
+	"github.com/rajsinghtech/tailnetlink/internal/tsapi"
 	tsclient "tailscale.com/client/tailscale/v2"
 )
 
@@ -136,7 +136,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(s.cfgStore.RedactedJSON())
+	w.Write(s.cfgStore.JSON())
 }
 
 // ── Tailnet CRUD ──────────────────────────────────────────────────────────────
@@ -149,18 +149,17 @@ func (s *Server) handleTailnetDetect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var body struct {
-		ClientID     string `json:"client_id"`
-		ClientSecret string `json:"client_secret"`
+	var creds config.OAuthCreds
+	if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ClientID == "" || !secretGiven(body.ClientSecret) {
-		http.Error(w, "client_id and client_secret required", http.StatusBadRequest)
+	if err := checkCreds(creds); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	c := clientForTailnet(config.TailnetConfig{
-		OAuth: config.OAuthCreds{ClientID: body.ClientID, ClientSecret: body.ClientSecret},
-	})
+	c := clientForTailnet(config.TailnetConfig{OAuth: creds})
 	devices, err := c.Devices().List(r.Context())
 	if err != nil {
 		http.Error(w, "credentials rejected or insufficient scope: "+err.Error(), http.StatusBadRequest)
@@ -200,8 +199,12 @@ func (s *Server) handleTailnets(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if body.Name == "" || body.Tailnet == "" || body.OAuth.ClientID == "" || !secretGiven(body.OAuth.ClientSecret) {
-		http.Error(w, "name, tailnet, oauth.client_id, and oauth.client_secret are required", http.StatusBadRequest)
+	if body.Name == "" || body.Tailnet == "" {
+		http.Error(w, "name and tailnet are required", http.StatusBadRequest)
+		return
+	}
+	if err := checkCreds(body.OAuth); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -221,7 +224,7 @@ func (s *Server) handleTailnets(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	w.Write(s.cfgStore.RedactedJSON())
+	w.Write(s.cfgStore.JSON())
 }
 
 // GET /api/tailnets/{name}/devices — list live devices from the tailnet's API
@@ -333,16 +336,11 @@ func (s *Server) handleTailnetByName(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		if err := checkCreds(body.OAuth); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		if err := s.cfgStore.Update(func(cfg *config.Config) error {
-			// The UI only ever sees a redacted secret, so an empty or
-			// redacted one means "keep what is there".
-			if !secretGiven(body.OAuth.ClientSecret) {
-				old, ok := cfg.Tailnets[name]
-				if !ok || old.OAuth.ClientSecret == "" {
-					return fmt.Errorf("oauth.client_secret is required for a new tailnet")
-				}
-				body.OAuth.ClientSecret = old.OAuth.ClientSecret
-			}
 			cfg.Tailnets[name] = body
 			return nil
 		}); err != nil {
@@ -350,7 +348,7 @@ func (s *Server) handleTailnetByName(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(s.cfgStore.RedactedJSON())
+		w.Write(s.cfgStore.JSON())
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -403,7 +401,7 @@ func (s *Server) handleBridgeRules(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	w.Write(s.cfgStore.RedactedJSON())
+	w.Write(s.cfgStore.JSON())
 }
 
 // PUT /api/bridge-rules/{name}  DELETE /api/bridge-rules/{name}
@@ -469,7 +467,7 @@ func (s *Server) handleBridgeRuleByName(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(s.cfgStore.RedactedJSON())
+		w.Write(s.cfgStore.JSON())
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -512,7 +510,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(s.cfgStore.RedactedJSON())
+	w.Write(s.cfgStore.JSON())
 }
 
 // ── SSE ───────────────────────────────────────────────────────────────────────
@@ -540,7 +538,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 		Bridges:     s.store.GetBridges(),
 		Connections: s.store.GetConns(),
 		Logs:        s.store.GetLogs(50),
-		Config:      s.cfgStore.RedactedJSON(),
+		Config:      s.cfgStore.JSON(),
 	}
 	writeSSEEvent(w, state.EventInit, init)
 	flusher.Flush()
@@ -585,27 +583,21 @@ func (s *Server) api(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// secretGiven reports whether a client sent a real secret rather than
-// nothing or the redacted placeholder it was served.
-func secretGiven(secret string) bool {
-	return secret != "" && secret != config.RedactedSecret
+// checkCreds rejects OAuth credentials sent to the API that carry an
+// inline secret or no way to find one.
+func checkCreds(creds config.OAuthCreds) error {
+	cfg := config.Config{InstanceID: "check", Tailnets: map[string]config.TailnetConfig{"new": {OAuth: creds}}}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	if !(config.TailnetConfig{OAuth: creds}).HasAuth() {
+		return errors.New("oauth.client_id and one of oauth.client_secret_file or oauth.client_secret_env are required")
+	}
+	return nil
 }
 
 func clientForTailnet(tc config.TailnetConfig) *tsclient.Client {
-	tailnet := tc.Tailnet
-	if tailnet == "" {
-		tailnet = "-"
-	}
-	c := &tsclient.Client{
-		Tailnet: tailnet,
-		Auth:    &tsclient.OAuth{ClientID: tc.OAuth.ClientID, ClientSecret: tc.OAuth.ClientSecret},
-	}
-	if tc.APIBaseURL != "" {
-		if u, err := url.Parse(tc.APIBaseURL); err == nil {
-			c.BaseURL = u
-		}
-	}
-	return c
+	return tsapi.NewClient(tc)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

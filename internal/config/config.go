@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"regexp"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -83,6 +86,11 @@ func (c *Config) Validate() error {
 	if err := tailcfg.ServiceName(c.UIServiceName()).Validate(); err != nil {
 		return fmt.Errorf("ui.service_name: %w", err)
 	}
+	for _, name := range slices.Sorted(maps.Keys(c.Tailnets)) {
+		if err := c.Tailnets[name].OAuth.validate(); err != nil {
+			return fmt.Errorf("tailnet %q: %w", name, err)
+		}
+	}
 	return nil
 }
 
@@ -104,12 +112,70 @@ type TailnetConfig struct {
 }
 
 func (tc TailnetConfig) HasAuth() bool {
-	return tc.OAuth.ClientID != "" && tc.OAuth.ClientSecret != ""
+	return tc.OAuth.ClientID != "" && (tc.OAuth.ClientSecretFile != "" || tc.OAuth.ClientSecretEnv != "")
 }
 
+// OAuthCreds says how to authenticate to a tailnet's admin API. The secret
+// itself is never part of the config: it is read from a file or an
+// environment variable each time a token is needed, so a rotated file is
+// picked up without a restart.
 type OAuthCreds struct {
-	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"`
+	ClientID         string `json:"client_id"`
+	ClientSecretFile string `json:"client_secret_file,omitempty"`
+	ClientSecretEnv  string `json:"client_secret_env,omitempty"`
+
+	inline bool // the JSON had a client_secret field; Validate rejects it
+}
+
+// UnmarshalJSON notes an inline client_secret so Validate can reject it
+// without the value ever being kept.
+func (o *OAuthCreds) UnmarshalJSON(b []byte) error {
+	type plain OAuthCreds
+	var aux struct {
+		plain
+		ClientSecret *json.RawMessage `json:"client_secret"`
+	}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+	*o = OAuthCreds(aux.plain)
+	o.inline = aux.ClientSecret != nil
+	return nil
+}
+
+// Secret reads the client secret from client_secret_file or
+// client_secret_env.
+func (o OAuthCreds) Secret() (string, error) {
+	switch {
+	case o.ClientSecretFile != "":
+		b, err := os.ReadFile(o.ClientSecretFile)
+		if err != nil {
+			return "", fmt.Errorf("client_secret_file: %w", err)
+		}
+		s := strings.TrimSpace(string(b))
+		if s == "" {
+			return "", fmt.Errorf("client_secret_file %s is empty", o.ClientSecretFile)
+		}
+		return s, nil
+	case o.ClientSecretEnv != "":
+		s := strings.TrimSpace(os.Getenv(o.ClientSecretEnv))
+		if s == "" {
+			return "", fmt.Errorf("client_secret_env: $%s is not set", o.ClientSecretEnv)
+		}
+		return s, nil
+	default:
+		return "", errors.New("no client secret: set oauth.client_secret_file or oauth.client_secret_env")
+	}
+}
+
+func (o OAuthCreds) validate() error {
+	if o.inline {
+		return errors.New("oauth.client_secret is not supported: put the secret in a file and set oauth.client_secret_file, or in an environment variable and set oauth.client_secret_env")
+	}
+	if o.ClientSecretFile != "" && o.ClientSecretEnv != "" {
+		return errors.New("set only one of oauth.client_secret_file and oauth.client_secret_env")
+	}
+	return nil
 }
 
 // DeviceSpec identifies an explicit source device with optional DNS config.
@@ -301,28 +367,12 @@ func (s *Store) Update(fn func(*Config) error) error {
 	return nil
 }
 
-// RedactedSecret stands in for a secret in anything served over HTTP.
-const RedactedSecret = "[redacted]"
-
-// Redacted returns a copy of c with every secret replaced by
-// RedactedSecret. The copy has its own Tailnets map.
-func (c *Config) Redacted() *Config {
-	cp := *c
-	cp.Tailnets = make(map[string]TailnetConfig, len(c.Tailnets))
-	for name, tc := range c.Tailnets {
-		if tc.OAuth.ClientSecret != "" {
-			tc.OAuth.ClientSecret = RedactedSecret
-		}
-		cp.Tailnets[name] = tc
-	}
-	return &cp
-}
-
-// RedactedJSON returns the current config as indented JSON with secrets
-// redacted. It backs GET /api/config and the SSE init event.
-func (s *Store) RedactedJSON() []byte {
+// JSON returns the current config as indented JSON. It backs GET
+// /api/config and the SSE init event. The config never holds a secret, only
+// where to read it from, so this is safe to serve.
+func (s *Store) JSON() []byte {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	data, _ := json.MarshalIndent(s.cfg.Redacted(), "", "  ")
+	data, _ := json.MarshalIndent(s.cfg, "", "  ")
 	return data
 }

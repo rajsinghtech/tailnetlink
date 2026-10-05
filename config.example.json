@@ -4,7 +4,7 @@
     "source": {
       "oauth": {
         "client_id": "YOUR_SOURCE_CLIENT_ID",
-        "client_secret": "YOUR_SOURCE_CLIENT_SECRET"
+        "client_secret_file": "/run/secrets/source-oauth-secret"
       },
       "tailnet": "source-org.ts.net",
       "tags": ["tag:tailnetlink"]
@@ -12,7 +12,7 @@
     "dest": {
       "oauth": {
         "client_id": "YOUR_DEST_CLIENT_ID",
-        "client_secret": "YOUR_DEST_CLIENT_SECRET"
+        "client_secret_env": "TAILNETLINK_DEST_OAUTH_SECRET"
       },
       "tailnet": "dest-org.ts.net",
       "tags": ["tag:tailnetlink"]

@@ -28,7 +28,7 @@ No static auth keys are stored. The first start mints an auth key through the OA
 
 ```bash
 cp config.example.json data.json
-# edit data.json with your OAuth credentials
+# edit data.json: OAuth client ids, and where to read each client secret
 go run ./cmd/tailnetlink -data data.json
 # web UI: http://localhost:8888
 ```
@@ -51,7 +51,7 @@ Config is stored as JSON (default: `data.json`). The web UI at `127.0.0.1:8888` 
     "source": {
       "oauth": {
         "client_id": "...",
-        "client_secret": "..."
+        "client_secret_file": "/run/secrets/source-oauth-secret"
       },
       "tailnet": "source-org.ts.net",
       "tags": ["tag:tailnetlink"]
@@ -59,7 +59,7 @@ Config is stored as JSON (default: `data.json`). The web UI at `127.0.0.1:8888` 
     "dest": {
       "oauth": {
         "client_id": "...",
-        "client_secret": "..."
+        "client_secret_env": "TAILNETLINK_DEST_OAUTH_SECRET"
       },
       "tailnet": "dest-org.ts.net",
       "tags": ["tag:tailnetlink"]
@@ -125,6 +125,17 @@ tailnetlink prune -data data.json
 | `dns_name` | Fully-qualified hostname to advertise in split-DNS (e.g. `api-0.api.internal`) |
 | `short_name` | Bare VIP service name override (e.g. `api-0` → `svc:api-0`) |
 
+### OAuth client secrets
+
+Client secrets never go in the config file. Each tailnet's `oauth` block names where to read its secret from, with exactly one of:
+
+| Field | Description |
+|---|---|
+| `client_secret_file` | Path to a file holding the secret (surrounding whitespace is ignored). Works with Docker and Kubernetes secrets. |
+| `client_secret_env` | Name of an environment variable holding the secret. |
+
+The secret is read each time tailnetlink needs a new API token, so rotating the file takes effect without a restart. A config with an inline `client_secret` does not load: tailnetlink exits with an error naming the field and the tailnet, before it contacts anything. To move an old config over, write each secret to a file (`chmod 600`) and replace `"client_secret": "..."` with `"client_secret_file": "/path/to/file"`.
+
 ### OAuth setup (once per tailnet)
 
 1. Go to `admin.tailscale.com/settings/oauth`
@@ -155,6 +166,7 @@ Or manually:
 docker run --rm \
   -p 8080:8080 \
   -v $(pwd)/data.json:/data.json \
+  -v $(pwd)/secrets:/run/secrets:ro \
   -v tailnetlink-state:/tailnetlink-state \
   tailnetlink:latest
 ```
@@ -165,7 +177,7 @@ Node state lives in `/tailnetlink-state` (next to `/data.json`) unless `state_di
 
 Available at `http://localhost:8888` (or the configured `-listen` address). It listens on loopback only by default. The UI also registers itself as `svc:tailnetlink` on TCP:80 in each connected tailnet, so you can reach it via the Tailscale VIP from within either network.
 
-The UI never serves OAuth client secrets: `/api/config` and the event stream show `[redacted]` in their place, and saving a tailnet with `[redacted]` or an empty secret keeps the stored one. There are no CORS headers, and every API call other than GET must be sent as `Content-Type: application/json`. Until the UI becomes read-only, anyone who can reach `svc:tailnetlink` can still change the config through it, so keep ACLs on that service tight.
+The UI never sees OAuth client secrets: the config only says where to read them, and adding a tailnet through the UI takes a secret file path, not the secret. There are no CORS headers, and every API call other than GET must be sent as `Content-Type: application/json`. Until the UI becomes read-only, anyone who can reach `svc:tailnetlink` can still change the config through it, so keep ACLs on that service tight.
 
 The UI provides:
 
