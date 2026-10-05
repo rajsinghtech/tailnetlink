@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rajsinghtech/tailnetlink/internal/config"
 	"github.com/rajsinghtech/tailnetlink/internal/metrics"
 	"github.com/rajsinghtech/tailnetlink/internal/state"
 	"tailscale.com/tsnet"
@@ -38,8 +39,9 @@ type Forwarder struct {
 	store       *state.Store
 	logger      *slog.Logger
 	connCounter atomic.Int64
-	rule        string           // rule name, the metrics label
-	metrics     *metrics.Metrics // nil means no metrics
+	rule        string             // rule name, the metrics label
+	metrics     *metrics.Metrics   // nil means no metrics
+	authz       config.AuthzConfig // who may dial this link
 
 	cancel    context.CancelFunc
 	listeners []net.Listener
@@ -126,13 +128,25 @@ func (f *Forwarder) accept(ctx context.Context, ln net.Listener, port int) {
 func (f *Forwarder) handle(ctx context.Context, client net.Conn, port int) {
 	defer client.Close()
 
+	// PROXY header and WhoIs first so authz can deny before we dial.
+	client, realAddr, err := readProxyHeader(client)
+	if err != nil {
+		f.logger.Warn("forwarder: PROXY header read failed", "err", err)
+		return
+	}
+	peer, whoErr := whoIs(ctx, f.listenSrv, realAddr)
+	if err := authorize(f.authz, f.rule, peer, whoErr); err != nil {
+		f.logger.Warn("forwarder: authz denied", "peer", realAddr, "err", err)
+		f.store.Log("warn", fmt.Sprintf("authz denied: %s ← %s: %v", f.vip.ServiceName, realAddr, err), nil)
+		return
+	}
+
 	dialCtx, cancel := context.WithTimeout(ctx, f.timeout)
 	defer cancel()
 
 	var target string
 	var upstream net.Conn
 	var dialErr error
-
 	if f.localAddr != "" {
 		target = f.localAddr
 		upstream, dialErr = (&net.Dialer{}).DialContext(dialCtx, "tcp", f.localAddr)
@@ -140,7 +154,6 @@ func (f *Forwarder) handle(ctx context.Context, client net.Conn, port int) {
 		target = net.JoinHostPort(f.vip.SourceIP.String(), strconv.Itoa(port))
 		upstream, dialErr = f.dialSrv.Dial(dialCtx, "tcp", target)
 	}
-
 	if err := dialErr; err != nil {
 		f.logger.Warn("forwarder: dial failed", "target", target, "err", err)
 		f.metrics.DialFailed(f.rule)
@@ -151,28 +164,16 @@ func (f *Forwarder) handle(ctx context.Context, client net.Conn, port int) {
 	}
 	defer upstream.Close()
 
-	client, realAddr, err := readProxyHeader(client)
-	if err != nil {
-		f.logger.Warn("forwarder: PROXY header read failed", "err", err)
-		return
-	}
-
-	nodeName, identity := whoIsIdentity(ctx, f.listenSrv, realAddr)
-
+	nodeName, identity := peer.NodeName, identityFromPeer(peer)
 	clientAddr := realAddr
 	if clientAddr == "" {
 		clientAddr = client.RemoteAddr().String()
 	}
 	connID := fmt.Sprintf("%s#%d", f.vip.ServiceName, f.connCounter.Add(1))
 	f.store.OpenConn(state.ConnEntry{
-		ID:          connID,
-		BridgeID:    f.bridgeID,
-		ServiceName: f.vip.ServiceName,
-		ClientAddr:  clientAddr,
-		NodeName:    nodeName,
-		Identity:    identity,
-		TargetAddr:  target,
-		OpenedAt:    time.Now(),
+		ID: connID, BridgeID: f.bridgeID, ServiceName: f.vip.ServiceName,
+		ClientAddr: clientAddr, NodeName: nodeName, Identity: identity,
+		TargetAddr: target, OpenedAt: time.Now(),
 	})
 	f.store.IncrBridgeConn(f.bridgeID, 1)
 	f.metrics.ConnOpened(f.rule)
@@ -181,7 +182,6 @@ func (f *Forwarder) handle(ctx context.Context, client net.Conn, port int) {
 	var bytesIn, bytesOut atomic.Int64
 	var wg sync.WaitGroup
 	wg.Add(2)
-
 	go func() {
 		defer wg.Done()
 		n, _ := io.Copy(upstream, client)
@@ -202,7 +202,6 @@ func (f *Forwarder) handle(ctx context.Context, client net.Conn, port int) {
 			_ = client.Close()
 		}
 	}()
-
 	wg.Wait()
 
 	in, out := bytesIn.Load(), bytesOut.Load()
@@ -211,28 +210,6 @@ func (f *Forwarder) handle(ctx context.Context, client net.Conn, port int) {
 	f.store.IncrBridgeConn(f.bridgeID, -1)
 	f.metrics.ConnClosed(f.rule, in, out)
 	f.store.Log("info", fmt.Sprintf("conn closed: %s — %s in, %s out", f.vip.ServiceName, formatBytes(in), formatBytes(out)), nil)
-}
-
-// whoIsIdentity resolves the Tailscale node name and identity (login or tag) for addr.
-func whoIsIdentity(ctx context.Context, srv *tsnet.Server, addr string) (nodeName, identity string) {
-	if addr == "" {
-		return
-	}
-	lc, err := srv.LocalClient()
-	if err != nil {
-		return
-	}
-	who, err := lc.WhoIs(ctx, addr)
-	if err != nil || who.Node == nil {
-		return
-	}
-	nodeName = strings.SplitN(who.Node.Name, ".", 2)[0]
-	if who.UserProfile != nil && who.UserProfile.LoginName != "" {
-		identity = who.UserProfile.LoginName
-	} else if len(who.Node.Tags) > 0 {
-		identity = who.Node.Tags[0]
-	}
-	return
 }
 
 // bufferedConn wraps a net.Conn so that bytes already consumed into a

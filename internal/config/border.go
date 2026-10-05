@@ -31,6 +31,10 @@ type Border struct {
 	DialTimeout   *Duration `json:"dial_timeout,omitempty"`
 	AuthKeyExpiry *Duration `json:"auth_key_expiry,omitempty"`
 
+	// Authz is the default authorization for every link. A link may set its
+	// own authz to override this.
+	Authz AuthzConfig `json:"authz,omitzero"`
+
 	Links []Link `json:"links"`
 }
 
@@ -82,6 +86,54 @@ type Link struct {
 	Services []ServiceSpec     `json:"services,omitempty"`
 	Local    []LocalSourceSpec `json:"local,omitempty"`
 	Ports    []int             `json:"ports,omitempty"`
+	Authz    AuthzConfig       `json:"authz,omitzero"`
+}
+
+// Authz modes. Empty Mode is AuthzOff.
+const (
+	AuthzOff         = "off"
+	AuthzRequireCap  = "require_cap"
+	AuthzAllowLogins = "allow_logins"
+	AuthzAllowTags   = "allow_tags"
+)
+
+// AuthzConfig controls who may dial a link. Mode off (the default) allows
+// every peer. require_cap needs the PeerCapability CapName with this link
+// (or "*") in its links list. allow_logins and allow_tags match the peer's
+// WhoIs login or tags against the lists below.
+type AuthzConfig struct {
+	Mode        string   `json:"mode,omitempty"`
+	AllowLogins []string `json:"allow_logins,omitempty"`
+	AllowTags   []string `json:"allow_tags,omitempty"`
+}
+
+// Effective returns az if it sets a mode, otherwise the border default.
+func (az AuthzConfig) Effective(border AuthzConfig) AuthzConfig {
+	if az.Mode != "" {
+		return az
+	}
+	return border
+}
+
+func (az AuthzConfig) validate() error {
+	switch az.Mode {
+	case "", AuthzOff:
+		return nil
+	case AuthzRequireCap:
+		return nil
+	case AuthzAllowLogins:
+		if len(az.AllowLogins) == 0 {
+			return fmt.Errorf("authz.mode %q needs at least one allow_logins entry", az.Mode)
+		}
+		return nil
+	case AuthzAllowTags:
+		if len(az.AllowTags) == 0 {
+			return fmt.Errorf("authz.mode %q needs at least one allow_tags entry", az.Mode)
+		}
+		return nil
+	default:
+		return fmt.Errorf("authz.mode %q is not one of off, require_cap, allow_logins, allow_tags", az.Mode)
+	}
 }
 
 var borderNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$`)
@@ -137,6 +189,9 @@ func (b *Border) Compile() (*Config, error) {
 	if len(b.Links) == 0 {
 		return nil, errors.New("links: at least one link is required")
 	}
+	if err := b.Authz.validate(); err != nil {
+		return nil, err
+	}
 
 	cfg := defaults()
 	cfg.InstanceID = b.Name
@@ -172,7 +227,7 @@ func (b *Border) Compile() (*Config, error) {
 	cfg.Tailnets[src] = b.Source.tailnet(b.Node.Ephemeral)
 	cfg.Tailnets[dst] = b.Dest.tailnet(b.Node.Ephemeral)
 	for i, l := range b.Links {
-		rule, err := l.rule(src, dst)
+		rule, err := l.rule(src, dst, b.Authz)
 		if err != nil {
 			if l.Name == "" {
 				return nil, fmt.Errorf("links[%d]: %w", i, err)
@@ -213,9 +268,12 @@ func (s Side) tailnet(ephemeral bool) TailnetConfig {
 	}
 }
 
-func (l Link) rule(src, dst string) (BridgeRule, error) {
+func (l Link) rule(src, dst string, borderAuthz AuthzConfig) (BridgeRule, error) {
 	if l.Name == "" {
 		return BridgeRule{}, errors.New("name is required")
+	}
+	if err := l.Authz.validate(); err != nil {
+		return BridgeRule{}, err
 	}
 	selectors := 0
 	for _, set := range []bool{l.Tag != "", len(l.Devices) > 0, len(l.Services) > 0, len(l.Local) > 0} {
@@ -229,7 +287,7 @@ func (l Link) rule(src, dst string) (BridgeRule, error) {
 	case selectors > 1:
 		return BridgeRule{}, errors.New("set only one of tag, devices, services or local")
 	}
-	r := BridgeRule{Name: l.Name, DestTailnets: []string{dst}}
+	r := BridgeRule{Name: l.Name, DestTailnets: []string{dst}, Authz: l.Authz.Effective(borderAuthz)}
 	if len(l.Local) > 0 {
 		if len(l.Ports) > 0 {
 			return BridgeRule{}, errors.New("ports doesn't apply to a local link; set addr (and expose_port) on each target")

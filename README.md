@@ -111,6 +111,50 @@ A link has a `name` and exactly one of `tag`, `devices`, `services` or `local`, 
 
 When a link discovers by `tag`, it skips anything it made itself: VIP services annotated `tailnetlink/managed=true` and devices whose hostname starts with `tailnetlink-`.
 
+### Authorization
+
+By default every peer that can reach a VIP may use it (`authz.mode` is `off`). Set a border-level default, or override it on a link:
+
+```json
+"authz": { "mode": "require_cap" },
+"links": [
+  {
+    "name": "api",
+    "tag": "tag:api-server",
+    "ports": [8080],
+    "authz": { "mode": "require_cap" }
+  },
+  {
+    "name": "open",
+    "tag": "tag:status",
+    "ports": [80],
+    "authz": { "mode": "off" }
+  }
+]
+```
+
+Modes:
+
+- `off` — allow everyone (default)
+- `require_cap` — the peer needs app capability `github.com/rajsinghtech/tailnetlink` whose JSON lists this link name or `"*"` in `links`
+- `allow_logins` — peer login must be in `allow_logins`
+- `allow_tags` — peer must carry one of `allow_tags`
+
+WhoIs runs after the PROXY header and before dial. A deny closes the client; a WhoIs error fails closed for every mode except `off`.
+
+Grant example (destination policy):
+
+```json
+{
+  "src": ["tag:eng"],
+  "dst": ["tag:tailnetlink"],
+  "ip": ["*"],
+  "app": {
+    "github.com/rajsinghtech/tailnetlink": [{ "links": ["api", "*"] }]
+  }
+}
+```
+
 ### Optional blocks
 
 | Block | Defaults |

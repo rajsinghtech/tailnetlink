@@ -790,7 +790,7 @@ func (m *Manager) handleDeviceAdded(
 		}
 
 		fwd := NewForwarder(dest.srv, srcSrv, vip, bridgeID, dialTimeout, m.store, m.logger)
-		fwd.rule, fwd.metrics = rule.Name, m.metricsRef()
+		fwd.rule, fwd.metrics, fwd.authz = rule.Name, m.metricsRef(), rule.Authz
 		if err := startForwarder(fwd, ctx); err != nil {
 			m.logger.Error("forwarder: start failed", "rule", rule.Name, "dest", dest.name, "device", dev.Name, "err", err)
 			m.store.UpsertBridge(state.BridgeEntry{
