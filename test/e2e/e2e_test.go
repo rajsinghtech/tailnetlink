@@ -323,6 +323,8 @@ type linkOpts struct {
 	shortName  string // default e2e-echo-<sfx>
 	webUI      bool   // run the local UI and publish svc:tailnetlink
 	persistent bool   // keep node state across restarts; default ephemeral
+	linkName   string // bridge rule name; default "echo"
+	authz      config.AuthzConfig
 }
 
 // startLink joins a backend in src and a client in dst, gives tailnetlink a
@@ -340,6 +342,9 @@ func startBorder(t *testing.T, ctx context.Context, src, dst *side, o linkOpts) 
 	l := &link{sfx: suffix(t), src: src, dst: dst, echoPort: 7000, peers: make(chan string, 16), logOutput: &strings.Builder{}}
 	if o.shortName == "" {
 		o.shortName = "e2e-echo-" + l.sfx
+	}
+	if o.linkName == "" {
+		o.linkName = "echo"
 	}
 	l.svc = "svc:" + o.shortName
 
@@ -378,9 +383,10 @@ func startBorder(t *testing.T, ctx context.Context, src, dst *side, o linkOpts) 
 		Dest:   config.Side{OAuth: creds[dst.role], Tags: []string{linkTag}, Tailnet: dst.id},
 		Node:   config.NodeConfig{StateDir: stateDir, Ephemeral: !o.persistent},
 		Links: []config.Link{{
-			Name:    "echo",
+			Name:    o.linkName,
 			Devices: []config.DeviceSpec{{FQDN: l.backend.fqdn, ShortName: o.shortName}},
 			Ports:   []int{l.echoPort},
+			Authz:   o.authz,
 		}},
 		PollInterval: &poll,
 		DialTimeout:  &dial,
@@ -876,4 +882,49 @@ func waitServiceIn(t *testing.T, ctx context.Context, s *side, name string) neti
 		return false
 	})
 	return vip
+}
+
+// TestRealAuthz: destination policy grants the app capability for link
+// echo-ok only. require_cap allows that link and denies another name.
+func TestRealAuthz(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	src, dst := tailnets(t)
+
+	ok := startBorder(t, ctx, src, dst, linkOpts{
+		shortName: "echo-ok-" + suffix(t),
+		linkName:  "echo-ok",
+		authz:     config.AuthzConfig{Mode: config.AuthzRequireCap},
+	})
+	vip := ok.waitService(t, ctx, ok.svc)
+	echo(t, ok.dialVIP(t, ctx, vip, ok.echoPort), "cap-ok")
+	select {
+	case <-ok.peers:
+	case <-time.After(5 * time.Second):
+		t.Fatal("backend never saw the allowed connection")
+	}
+
+	deny := startBorder(t, ctx, src, dst, linkOpts{
+		shortName: "echo-no-" + suffix(t),
+		linkName:  "echo-no",
+		authz:     config.AuthzConfig{Mode: config.AuthzRequireCap},
+	})
+	dvip := deny.waitService(t, ctx, deny.svc)
+	dctx, dcancel := context.WithTimeout(ctx, 5*time.Second)
+	defer dcancel()
+	conn, err := deny.client.srv.Dial(dctx, "tcp", netip.AddrPortFrom(dvip, uint16(deny.echoPort)).String())
+	if err == nil {
+		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+		_, _ = io.WriteString(conn, "cap-no\n")
+		_, rerr := bufio.NewReader(conn).ReadString('\n')
+		conn.Close()
+		if rerr == nil {
+			t.Fatal("echo succeeded without a grant for echo-no")
+		}
+	}
+	select {
+	case p := <-deny.peers:
+		t.Fatalf("backend saw a denied connection from %s", p)
+	case <-time.After(500 * time.Millisecond):
+	}
 }

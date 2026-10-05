@@ -9,8 +9,16 @@
 		// Source side: tailnetlink dials the backend it bridges.
 		{"src": ["tag:tailnetlink"], "dst": ["tag:e2e-backend"], "ip": ["*"]},
 		// Destination side: test clients reach services tagged tag:tailnetlink
-		// and the tailnetlink nodes that host them.
-		{"src": ["tag:e2e-client"], "dst": ["tag:tailnetlink"], "ip": ["*"]},
+		// and the tailnetlink nodes that host them. App capability grants the
+		// echo-ok link for require_cap authz tests; other link names are denied.
+		{
+			"src": ["tag:e2e-client"],
+			"dst": ["tag:tailnetlink"],
+			"ip": ["*"],
+			"app": {
+				"github.com/rajsinghtech/tailnetlink": [{"links": ["echo-ok"]}],
+			},
+		},
 	],
 	"autoApprovers": {
 		"services": {

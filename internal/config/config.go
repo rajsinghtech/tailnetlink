@@ -230,6 +230,7 @@ type BridgeRule struct {
 	SourceServices []ServiceSpec     `json:"source_services,omitempty"`
 	LocalSources   []LocalSourceSpec `json:"local_sources,omitempty"`
 	Ports          []int             `json:"ports,omitempty"`
+	Authz          AuthzConfig       `json:"authz,omitzero"`
 }
 
 // DefaultListenAddr is where the web UI listens unless the config or
@@ -384,6 +385,8 @@ func (c *Config) Clone() *Config {
 			b.SourceServices = slices.Clone(b.SourceServices)
 			b.LocalSources = slices.Clone(b.LocalSources)
 			b.Ports = slices.Clone(b.Ports)
+			b.Authz.AllowLogins = slices.Clone(b.Authz.AllowLogins)
+			b.Authz.AllowTags = slices.Clone(b.Authz.AllowTags)
 			cp.Bridges[i] = b
 		}
 	}
