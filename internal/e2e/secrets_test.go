@@ -18,8 +18,7 @@ import (
 func TestInlineSecretExitsBeforeContactingControl(t *testing.T) {
 	e2eSetup(t)
 	b := newBorder(t)
-	cfg := b.config(b.deviceRule("web", "backend", "", 8080))
-	data, err := json.Marshal(cfg)
+	data, err := json.Marshal(b.border(b.deviceLink("web", "backend", "", 8080)))
 	if err != nil {
 		t.Fatal(err)
 	}

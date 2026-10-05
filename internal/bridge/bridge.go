@@ -53,6 +53,10 @@ type Manager struct {
 	ruleRemove  map[string]bool               // set by stopRule: true means delete what the rule owns
 	webServers  map[string]*http.Server       // UI server on the VIP, keyed by tailnet name
 
+	dnsOff        bool          // split-DNS is off for this border
+	dropDNS       bool          // stopping rules should also delete their DNS (dns turned off)
+	authKeyExpiry time.Duration // lifetime of auth keys for new nodes
+
 	metrics  *metrics.Metrics     // nil means no metrics
 	lastPoll map[string]time.Time // rule name -> last successful discovery poll
 	applied  bool                 // a Reconcile has finished at least once
@@ -196,6 +200,9 @@ func (m *Manager) Reconcile(ctx context.Context, newCfg *config.Config) {
 	uiOn := m.ui != nil && newCfg.UIEnabled()
 	uiToggled := !restartAll && uiOn != m.uiOn
 	m.uiOn = uiOn
+	dnsToggled := !restartAll && m.applied && newCfg.DNSDisabled != m.dnsOff
+	m.dnsOff = newCfg.DNSDisabled
+	m.authKeyExpiry = newCfg.AuthKeyExpiry.Duration
 	running := make(map[string]bool, len(m.servers))
 	for name := range m.servers {
 		running[name] = true
@@ -212,6 +219,21 @@ func (m *Manager) Reconcile(ctx context.Context, newCfg *config.Config) {
 				m.stopWebUI(name, true)
 			}
 		}
+	}
+
+	// dns.enabled changed: restart every rule so DNS records come or go.
+	// Turning it off also deletes the DNS VIP and split-DNS entries the
+	// rules made; the bridged services stay.
+	if dnsToggled {
+		m.mu.Lock()
+		m.dropDNS = newCfg.DNSDisabled
+		m.mu.Unlock()
+		for _, rule := range old.Bridges {
+			m.stopRule(rule.Name, false)
+		}
+		m.mu.Lock()
+		m.dropDNS = false
+		m.mu.Unlock()
 	}
 
 	if restartAll {
@@ -605,9 +627,10 @@ func (m *Manager) stopBridge(bridgeID string, remove bool) {
 	}
 	cleanup := m.dnsCleanups[bridgeID]
 	delete(m.dnsCleanups, bridgeID)
+	dropDNS := m.dropDNS
 	m.mu.Unlock()
 	if cleanup != nil {
-		cleanup(remove)
+		cleanup(remove || dropDNS)
 	}
 }
 
@@ -846,8 +869,14 @@ func (m *Manager) handleDeviceRemoved(
 }
 
 func (m *Manager) fetchAuthKey(ctx context.Context, client *tsclient.Client, tags []string, ephemeral bool) (string, error) {
+	m.mu.Lock()
+	expiry := m.authKeyExpiry
+	m.mu.Unlock()
+	if expiry <= 0 {
+		expiry = time.Hour
+	}
 	req := tsclient.CreateKeyRequest{
-		ExpirySeconds: 3600,
+		ExpirySeconds: int64(expiry.Seconds()),
 		Description:   "tailnetlink-tsnet-node",
 		Capabilities: tsclient.KeyCapabilities{
 			Devices: struct {
@@ -1036,6 +1065,12 @@ func (m *Manager) releaseSharedDNS(destName, parentDomain, recordLabel string, r
 // service resolves at its canonical ts.net name from the destination tailnet.
 // A custom dns_name is always attempted independently.
 func (m *Manager) startDeviceDNS(ctx context.Context, bridgeID, ruleName, srcDomain, sourceFQDN, customDNS string, vipIP netip.Addr, dest destCtx) {
+	m.mu.Lock()
+	off := m.dnsOff
+	m.mu.Unlock()
+	if off {
+		return
+	}
 	var srcParent, srcLabel string
 	var srcAcquired bool
 

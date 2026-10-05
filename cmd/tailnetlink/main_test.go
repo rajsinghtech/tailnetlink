@@ -50,6 +50,14 @@ func waitForOutput(t *testing.T, out *syncBuffer, substr string) {
 	t.Fatalf("no %q in output:\n%s", substr, out.String())
 }
 
+// borderConfig is a valid border whose API is unreachable, so tailnetlink
+// starts, fails to connect and keeps running. extra goes in as is, before
+// the links.
+func borderConfig(extra string) string {
+	side := `{"tailnet":"t.example","api_base_url":"http://127.0.0.1:1","oauth":{"client_id":"id","client_secret_env":"X"},"tags":["tag:t"]}`
+	return `{"name":"me","source":` + side + `,"dest":` + side + `,` + extra + `"links":[{"name":"l","tag":"tag:x","ports":[1]}]}`
+}
+
 func emptyConfig(t *testing.T) string {
 	return filepath.Join(t.TempDir(), "tailnetlink.json") // missing file means empty config
 }
@@ -214,7 +222,8 @@ func TestPruneCommand(t *testing.T) {
 	if err := os.WriteFile(secret, []byte("s"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := fmt.Sprintf(`{"instance_id":"me","tailnets":{"dest":{"tailnet":%q,"api_base_url":%q,"oauth":{"client_id":"id","client_secret_file":%q}}}}`, api.Tailnet, api.URL(), secret)
+	side := fmt.Sprintf(`{"tailnet":%q,"api_base_url":%q,"oauth":{"client_id":"id","client_secret_file":%q},"tags":["tag:t"]}`, api.Tailnet, api.URL(), secret)
+	cfg := `{"name":"me","source":` + side + `,"dest":` + side + `,"links":[{"name":"l","tag":"tag:x","ports":[1]}]}`
 	p := filepath.Join(dir, "c.json")
 	if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
@@ -224,7 +233,7 @@ func TestPruneCommand(t *testing.T) {
 	if c := run([]string{"prune", "-data", p, "-dry-run"}, &out, nil); c != 0 {
 		t.Fatalf("dry run exit %d:\n%s", c, out.String())
 	}
-	if !strings.Contains(out.String(), "would dest: delete service svc:mine") {
+	if !strings.Contains(out.String(), "would me-dst: delete service svc:mine") {
 		t.Errorf("dry run output:\n%s", out.String())
 	}
 	if _, ok := api.Service("svc:mine"); !ok {
@@ -257,16 +266,16 @@ func TestPruneCommandErrors(t *testing.T) {
 	if c := run([]string{"prune", "-data", bad}, io.Discard, nil); c != 1 {
 		t.Errorf("bad config exit %d", c)
 	}
-	noID := filepath.Join(t.TempDir(), "empty.json")
-	_ = os.WriteFile(noID, []byte("{}"), 0o600)
-	if c := run([]string{"prune", "-data", noID}, io.Discard, nil); c != 1 {
-		t.Errorf("no instance_id exit %d", c)
+	noName := filepath.Join(t.TempDir(), "empty.json")
+	_ = os.WriteFile(noName, []byte("{}"), 0o600)
+	if c := run([]string{"prune", "-data", noName}, io.Discard, nil); c != 1 {
+		t.Errorf("no name exit %d", c)
 	}
 }
 
 func TestRunRejectsInlineSecret(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "c.json")
-	cfg := `{"instance_id":"me","tailnets":{"work":{"tailnet":"w.example","oauth":{"client_id":"id","client_secret":"inline-value"}}}}`
+	cfg := strings.Replace(borderConfig(""), `"client_secret_env":"X"`, `"client_secret":"inline-value"`, 1)
 	if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +293,7 @@ func TestRunRejectsInlineSecret(t *testing.T) {
 func TestRunUIOff(t *testing.T) {
 	dir := t.TempDir()
 	disabled := filepath.Join(dir, "off.json")
-	if err := os.WriteFile(disabled, []byte(`{"ui": {"enabled": false}}`), 0o600); err != nil {
+	if err := os.WriteFile(disabled, []byte(borderConfig(`"ui": {"enabled": false},`)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for name, args := range map[string][]string{
@@ -416,5 +425,20 @@ func TestRunMetricsPortInUse(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("run did not exit")
+	}
+}
+
+// A v1 config doesn't start, and the error points at the README.
+func TestRunRejectsV1Config(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "c.json")
+	if err := os.WriteFile(p, []byte(`{"instance_id":"me","tailnets":{},"bridges":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if c := run([]string{"-data", p}, &out, nil); c != 1 {
+		t.Fatalf("exit %d, want 1:\n%s", c, out.String())
+	}
+	if !strings.Contains(out.String(), "v1 config") || !strings.Contains(out.String(), "README") {
+		t.Errorf("output:\n%s", out.String())
 	}
 }

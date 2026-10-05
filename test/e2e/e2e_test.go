@@ -62,7 +62,7 @@ type side struct {
 
 var (
 	pairOnce sync.Once
-	pair     [2]*side
+	pair     [3]*side // src, dst, dst2
 	pairErr  error
 	api      *tailnet.Client
 	// local holds tailnets this process created, deleted in TestMain.
@@ -91,31 +91,51 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// tailnets returns the shared src and dst tailnets, or skips the test.
-func tailnets(t *testing.T) (src, dst *side) {
+// ensureTailnets sets up the shared throwaway tailnets once, or skips.
+func ensureTailnets(t *testing.T) {
 	t.Helper()
-	org := os.Getenv("TS_API_ACCESS_TOKEN")
-	if org == "" {
+	if os.Getenv("TS_API_ACCESS_TOKEN") == "" {
 		t.Skip("TS_API_ACCESS_TOKEN not set; skipping real-tailnet e2e")
 	}
 	pairOnce.Do(func() {
-		api = tailnet.New(os.Getenv("TS_API_BASE"), tailnet.StaticToken(org))
+		api = tailnet.New(os.Getenv("TS_API_BASE"), tailnet.StaticToken(os.Getenv("TS_API_ACCESS_TOKEN")))
+		roles := []struct{ env, role string }{{"SRC", "src"}, {"DST", "dst"}, {"DST2", "dst2"}}
 		if os.Getenv("E2E_SRC_ID") != "" {
-			pair[0], pairErr = fromEnv("SRC", "src")
-			if pairErr == nil {
-				pair[1], pairErr = fromEnv("DST", "dst")
+			for i, r := range roles {
+				pair[i], pairErr = fromEnv(r.env, r.role)
+				if pairErr != nil {
+					return
+				}
 			}
 			return
 		}
-		pair[0], pairErr = createLocal("src")
-		if pairErr == nil {
-			pair[1], pairErr = createLocal("dst")
+		for i, r := range roles {
+			pair[i], pairErr = createLocal(r.role)
+			if pairErr != nil {
+				return
+			}
 		}
 	})
 	if pairErr != nil {
 		t.Fatalf("test tailnets: %v", pairErr)
 	}
+}
+
+// tailnets returns the shared src and dst tailnets, or skips the test.
+func tailnets(t *testing.T) (src, dst *side) {
+	t.Helper()
+	ensureTailnets(t)
 	return pair[0], pair[1]
+}
+
+// threeTailnets returns src, dst and dst2, or skips.
+func threeTailnets(t *testing.T) (src, dst, dst2 *side) {
+	t.Helper()
+	ensureTailnets(t)
+	if pair[2] == nil {
+		t.Fatal("dst2 was not created; the e2e-real workflow needs --roles src,dst,dst2")
+	}
+	return pair[0], pair[1], pair[2]
 }
 
 // fromEnv reads a tailnet the workflow created. The token comes from the
@@ -310,6 +330,13 @@ type linkOpts struct {
 func startLink(t *testing.T, ctx context.Context, o linkOpts) *link {
 	t.Helper()
 	src, dst := tailnets(t)
+	return startBorder(t, ctx, src, dst, o)
+}
+
+// startBorder is startLink for an explicit pair of sides. Two borders that
+// share a source use the same src side with different destinations.
+func startBorder(t *testing.T, ctx context.Context, src, dst *side, o linkOpts) *link {
+	t.Helper()
 	l := &link{sfx: suffix(t), src: src, dst: dst, echoPort: 7000, peers: make(chan string, 16), logOutput: &strings.Builder{}}
 	if o.shortName == "" {
 		o.shortName = "e2e-echo-" + l.sfx
@@ -342,24 +369,22 @@ func startLink(t *testing.T, ctx context.Context, o linkOpts) *link {
 		creds[s.role] = config.OAuthCreds{ClientID: id, ClientSecretFile: f}
 		l.secrets = append(l.secrets, secret)
 	}
-	l.cfg = &config.Config{
-		InstanceID: "e2e-" + l.sfx,
-		Tailnets: map[string]config.TailnetConfig{
-			"src-" + l.sfx: {OAuth: creds["src"], Tags: []string{linkTag}, Tailnet: src.id, Ephemeral: !o.persistent},
-			"dst-" + l.sfx: {OAuth: creds["dst"], Tags: []string{linkTag}, Tailnet: dst.id, Ephemeral: !o.persistent},
-		},
-		StateDir: t.TempDir(),
-		Bridges: []config.BridgeRule{{
-			Name:          "e2e-" + l.sfx,
-			SourceTailnet: "src-" + l.sfx,
-			DestTailnets:  []string{"dst-" + l.sfx},
-			SourceDevices: []config.DeviceSpec{{FQDN: l.backend.fqdn, ShortName: o.shortName}},
-			Ports:         []int{l.echoPort},
+	name := "e2e-" + l.sfx
+	stateDir := t.TempDir()
+	poll, dial := config.Duration{Duration: 5 * time.Second}, config.Duration{Duration: 10 * time.Second}
+	bd := &config.Border{
+		Name:   name,
+		Source: config.Side{OAuth: creds["src"], Tags: []string{linkTag}, Tailnet: src.id},
+		Dest:   config.Side{OAuth: creds["dst"], Tags: []string{linkTag}, Tailnet: dst.id},
+		Node:   config.NodeConfig{StateDir: stateDir, Ephemeral: !o.persistent},
+		Links: []config.Link{{
+			Name:    "echo",
+			Devices: []config.DeviceSpec{{FQDN: l.backend.fqdn, ShortName: o.shortName}},
+			Ports:   []int{l.echoPort},
 		}},
-		PollInterval: config.Duration{Duration: 5 * time.Second},
-		DialTimeout:  config.Duration{Duration: 10 * time.Second},
+		PollInterval: &poll,
+		DialTimeout:  &dial,
 	}
-
 	if o.webUI {
 		pl, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
@@ -367,13 +392,18 @@ func startLink(t *testing.T, ctx context.Context, o linkOpts) *link {
 		}
 		l.webAddr = pl.Addr().String()
 		pl.Close()
-		l.cfg.ListenAddr = l.webAddr
+		bd.UI.ListenAddr = l.webAddr
 		l.cfgPath = filepath.Join(t.TempDir(), "tailnetlink.json")
-		b, _ := json.Marshal(l.cfg)
-		if err := os.WriteFile(l.cfgPath, b, 0o600); err != nil {
+		data, _ := json.Marshal(bd)
+		if err := os.WriteFile(l.cfgPath, data, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
+	cfg, err := bd.Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.cfg = cfg
 
 	// Shutdown leaves services in place, so clean up with prune once the
 	// manager is gone, and drop persistent nodes by hand.
@@ -387,7 +417,7 @@ func startLink(t *testing.T, ctx context.Context, o linkOpts) *link {
 			for _, s := range []*side{src, dst} {
 				devs, _ := s.client().Devices().List(pctx)
 				for _, d := range devs {
-					if strings.HasPrefix(d.Hostname, "tailnetlink-"+s.role+"-"+l.sfx) {
+					if strings.HasPrefix(d.Hostname, "tailnetlink-e2e-"+l.sfx+"-"+s.role) {
 						_ = s.client().Devices().Delete(pctx, d.NodeID)
 					}
 				}
@@ -524,7 +554,7 @@ func TestRealTrafficAcrossBorder(t *testing.T) {
 		}
 		found := false
 		for _, d := range devs {
-			if strings.HasPrefix(d.Hostname, "tailnetlink-src-"+l.sfx) {
+			if strings.HasPrefix(d.Hostname, "tailnetlink-e2e-"+l.sfx+"-src") {
 				for _, a := range d.Addresses {
 					found = found || a == host
 				}
@@ -624,6 +654,32 @@ func TestRealInstancesDoNotTouchEachOther(t *testing.T) {
 
 // TestRealShutdownKeepsServices (problem 2, fixed by PR 6): stopping
 // tailnetlink leaves its VIP service in place, unchanged.
+// Two borders sharing one source across three real throwaway tailnets.
+// Each only owns its destination; killing one leaves the other working.
+func TestRealTwoBorders(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	src, dst, dst2 := threeTailnets(t)
+	ab := startBorder(t, ctx, src, dst, linkOpts{shortName: "echo-ab-" + suffix(t)})
+	ac := startBorder(t, ctx, src, dst2, linkOpts{shortName: "echo-ac-" + suffix(t)})
+	vipB := ab.waitService(t, ctx, ab.svc)
+	vipC := ac.waitService(t, ctx, ac.svc)
+	echo(t, ab.dialVIP(t, ctx, vipB, ab.echoPort), "to B")
+	echo(t, ac.dialVIP(t, ctx, vipC, ac.echoPort), "to C")
+
+	if got := ab.service(ctx, ab.svc).Annotations["tailnetlink/owner"]; got != ab.cfg.InstanceID {
+		t.Errorf("B owner = %q", got)
+	}
+	if got := ac.service(ctx, ac.svc).Annotations["tailnetlink/owner"]; got != ac.cfg.InstanceID {
+		t.Errorf("C owner = %q", got)
+	}
+	ab.stop(t)
+	echo(t, ac.dialVIP(t, ctx, vipC, ac.echoPort), "C after B stopped")
+	if after := ab.service(ctx, ab.svc); after == nil {
+		t.Error("stopping A-to-B deleted its service")
+	}
+}
+
 func TestRealShutdownKeepsServices(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
@@ -655,7 +711,7 @@ func TestRealRestartReusesNode(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, d := range devs {
-				if strings.HasPrefix(d.Hostname, "tailnetlink-"+s.role+"-"+l.sfx) {
+				if strings.HasPrefix(d.Hostname, "tailnetlink-e2e-"+l.sfx+"-"+s.role) {
 					ids = append(ids, d.NodeID)
 				}
 			}
@@ -717,7 +773,7 @@ func TestRealReadOnlyUI(t *testing.T) {
 	}
 	read := []string{"/", "/api/status", "/api/bridges", "/api/connections", "/api/logs"}
 	removed := []string{"/api/config", "/api/settings", "/api/tailnets", "/api/tailnets/detect",
-		"/api/tailnets/src-" + l.sfx + "/devices", "/api/bridge-rules", "/api/bridge-rules/e2e-" + l.sfx}
+		"/api/tailnets/e2e-" + l.sfx + "-src/devices", "/api/bridge-rules", "/api/bridge-rules/e2e-" + l.sfx}
 
 	for where, c := range map[string]struct {
 		hc   *http.Client

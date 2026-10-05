@@ -1,40 +1,39 @@
 {
-  "instance_id": "home-to-work",
-  "tailnets": {
-    "source": {
-      "oauth": {
-        "client_id": "YOUR_SOURCE_CLIENT_ID",
-        "client_secret_file": "/run/secrets/source-oauth-secret"
-      },
-      "tailnet": "source-org.ts.net",
-      "tags": ["tag:tailnetlink"]
+  "name": "home-to-work",
+  "source": {
+    "tailnet": "source-org.ts.net",
+    "oauth": {
+      "client_id": "YOUR_SOURCE_CLIENT_ID",
+      "client_secret_file": "/run/secrets/source-oauth-secret"
     },
-    "dest": {
-      "oauth": {
-        "client_id": "YOUR_DEST_CLIENT_ID",
-        "client_secret_env": "TAILNETLINK_DEST_OAUTH_SECRET"
-      },
-      "tailnet": "dest-org.ts.net",
-      "tags": ["tag:tailnetlink"]
-    }
+    "tags": ["tag:tailnetlink"]
   },
-  "bridges": [
+  "dest": {
+    "tailnet": "dest-org.ts.net",
+    "oauth": {
+      "client_id": "YOUR_DEST_CLIENT_ID",
+      "client_secret_env": "TAILNETLINK_DEST_OAUTH_SECRET"
+    },
+    "tags": ["tag:tailnetlink"]
+  },
+  "links": [
     {
       "name": "api-servers",
-      "source_tailnet": "source",
-      "dest_tailnets": ["dest"],
-      "source_tag": "tag:api-server",
+      "tag": "tag:api-server",
       "ports": [8080, 8443]
     },
     {
       "name": "databases",
-      "source_tailnet": "source",
-      "dest_tailnets": ["dest"],
-      "source_tag": "tag:database",
+      "devices": [
+        { "fqdn": "pg-0.source-org.ts.net", "short_name": "pg-0", "dns_name": "pg-0.db.internal" }
+      ],
       "ports": [5432]
+    },
+    {
+      "name": "grafana",
+      "local": [
+        { "addr": "127.0.0.1:3000", "expose_port": 80, "dns_name": "grafana.home.internal" }
+      ]
     }
-  ],
-  "poll_interval": "30s",
-  "dial_timeout": "10s",
-  "listen_addr": "127.0.0.1:8888"
+  ]
 }

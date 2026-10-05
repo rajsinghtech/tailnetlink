@@ -34,16 +34,14 @@ func newTestServer(t *testing.T) (string, *config.Store) {
 			t.Fatal(err)
 		}
 	}
-	cfg := config.Config{
-		InstanceID: "test",
-		Tailnets: map[string]config.TailnetConfig{
-			"a": {Tailnet: "a.example", OAuth: config.OAuthCreds{ClientID: "id-a", ClientSecretFile: files[0]}},
-			"b": {Tailnet: "b.example", OAuth: config.OAuthCreds{ClientID: "id-b", ClientSecretFile: files[1]}},
-		},
-		Bridges: []config.BridgeRule{{Name: "r", SourceTailnet: "a", DestTailnets: []string{"b"}, SourceTag: "tag:web", Ports: []int{80}}},
+	b := config.Border{
+		Name:   "test",
+		Source: config.Side{Tailnet: "a.example", Tags: []string{"tag:tnl"}, OAuth: config.OAuthCreds{ClientID: "id-a", ClientSecretFile: files[0]}},
+		Dest:   config.Side{Tailnet: "b.example", Tags: []string{"tag:tnl"}, OAuth: config.OAuthCreds{ClientID: "id-b", ClientSecretFile: files[1]}},
+		Links:  []config.Link{{Name: "r", Tag: "tag:web", Ports: []int{80}}},
 	}
 	path := filepath.Join(dir, "c.json")
-	data, _ := json.Marshal(cfg)
+	data, _ := json.Marshal(b)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
