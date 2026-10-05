@@ -43,6 +43,10 @@ type Manager struct {
 	dnsPending map[string]*dnsCreation    // in-progress creations, same key space
 }
 
+// startForwarder starts a forwarder. It is a variable only so tests can stub
+// it out, since the real Start needs a running tsnet node.
+var startForwarder = (*Forwarder).Start
+
 func New(store *state.Store, logger *slog.Logger, webAddr string) *Manager {
 	return &Manager{
 		logger:       logger,
@@ -393,7 +397,7 @@ func (m *Manager) handleDeviceAdded(
 		}
 
 		fwd := NewForwarder(dest.srv, srcSrv, vip, bridgeID, dialTimeout, m.store, m.logger)
-		if err := fwd.Start(ctx); err != nil {
+		if err := startForwarder(fwd, ctx); err != nil {
 			m.logger.Error("forwarder: start failed", "rule", rule.Name, "dest", dest.name, "device", dev.Name, "err", err)
 			m.store.UpsertBridge(state.BridgeEntry{
 				ID: bridgeID, RuleName: rule.Name, DestTailnet: dest.name, ServiceName: vip.ServiceName,

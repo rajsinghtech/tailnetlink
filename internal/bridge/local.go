@@ -172,7 +172,7 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 			}
 
 			fwd := newLocalForwarder(dest.srv, src.Addr, vip, bridgeID, dialTimeout, m.store, m.logger)
-			if err := fwd.Start(ctx); err != nil {
+			if err := startForwarder(fwd, ctx); err != nil {
 				m.logger.Error("local rule: forwarder start failed", "rule", rule.Name, "dest", dest.name, "addr", src.Addr, "err", err)
 				_ = srcRec.Delete(context.Background(), "local", syntheticDev, shortName)
 				m.store.DeleteBridge(bridgeID)
