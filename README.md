@@ -164,3 +164,7 @@ make deps      # go mod tidy + download
 make lint      # go vet
 make dev       # run with debug logging (hot-reloads config on UI changes)
 ```
+
+## License
+
+BSD 3-Clause. See [LICENSE](LICENSE).
