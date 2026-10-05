@@ -299,8 +299,9 @@ func (l *link) stop(t *testing.T) {
 }
 
 type linkOpts struct {
-	shortName string // default e2e-echo-<sfx>
-	webUI     bool   // run the local UI and publish svc:tailnetlink
+	shortName  string // default e2e-echo-<sfx>
+	webUI      bool   // run the local UI and publish svc:tailnetlink
+	persistent bool   // keep node state across restarts; default ephemeral
 }
 
 // startLink joins a backend in src and a client in dst, gives tailnetlink a
@@ -337,9 +338,10 @@ func startLink(t *testing.T, ctx context.Context, o linkOpts) *link {
 	l.cfg = &config.Config{
 		InstanceID: "e2e-" + l.sfx,
 		Tailnets: map[string]config.TailnetConfig{
-			"src-" + l.sfx: {OAuth: creds["src"], Tags: []string{linkTag}, Tailnet: src.id},
-			"dst-" + l.sfx: {OAuth: creds["dst"], Tags: []string{linkTag}, Tailnet: dst.id},
+			"src-" + l.sfx: {OAuth: creds["src"], Tags: []string{linkTag}, Tailnet: src.id, Ephemeral: !o.persistent},
+			"dst-" + l.sfx: {OAuth: creds["dst"], Tags: []string{linkTag}, Tailnet: dst.id, Ephemeral: !o.persistent},
 		},
+		StateDir: t.TempDir(),
 		Bridges: []config.BridgeRule{{
 			Name:          "e2e-" + l.sfx,
 			SourceTailnet: "src-" + l.sfx,
@@ -366,13 +368,44 @@ func startLink(t *testing.T, ctx context.Context, o linkOpts) *link {
 		}
 	}
 
+	// Shutdown leaves services in place, so clean up with prune once the
+	// manager is gone, and drop persistent nodes by hand.
+	t.Cleanup(func() {
+		pctx, pcancel := context.WithTimeout(context.Background(), time.Minute)
+		defer pcancel()
+		if _, err := bridge.Prune(pctx, l.cfg, false); err != nil {
+			t.Logf("prune: %v", err)
+		}
+		if o.persistent {
+			for _, s := range []*side{src, dst} {
+				devs, _ := s.client().Devices().List(pctx)
+				for _, d := range devs {
+					if strings.HasPrefix(d.Hostname, "tailnetlink-"+s.role+"-"+l.sfx) {
+						_ = s.client().Devices().Delete(pctx, d.NodeID)
+					}
+				}
+			}
+		}
+	})
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("tailnetlink log:\n%s", l.logOutput.String())
+		}
+	})
+	l.run(t, ctx, o.webUI)
+	return l
+}
+
+// run starts a manager (and the UI if asked) for the link's config.
+func (l *link) run(t *testing.T, ctx context.Context, webUI bool) {
+	t.Helper()
 	mctx, cancel := context.WithCancel(ctx)
 	l.cancel = cancel
 	t.Cleanup(cancel)
 	logger := slog.New(slog.NewTextHandler(l.logOutput, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	store := state.New()
 	l.store = store
-	if o.webUI {
+	if webUI {
 		cs, err := config.NewStore(l.cfgPath)
 		if err != nil {
 			t.Fatal(err)
@@ -388,12 +421,6 @@ func startLink(t *testing.T, ctx context.Context, o linkOpts) *link {
 		defer ccancel()
 		_ = mgr.Close(cctx)
 	})
-	t.Cleanup(func() {
-		if t.Failed() {
-			t.Logf("tailnetlink log:\n%s", l.logOutput.String())
-		}
-	})
-	return l
 }
 
 // service returns the VIP service name in dst, or nil if it doesn't exist.
@@ -559,7 +586,7 @@ func TestRealLeavesForeignServiceAlone(t *testing.T) {
 
 // TestRealInstancesDoNotTouchEachOther: two instances with different
 // instance ids on the same pair of tailnets each own only their own
-// services, and one shutting down leaves the other's alone.
+// services, and one removing its link leaves the other's alone.
 func TestRealInstancesDoNotTouchEachOther(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
@@ -575,29 +602,80 @@ func TestRealInstancesDoNotTouchEachOther(t *testing.T) {
 	}
 	before := a.service(ctx, a.svc)
 
-	b.stop(t)
-	waitFor(t, 2*time.Minute, b.svc+" removed when its instance stops", func() bool {
+	next := *b.cfg
+	next.Bridges = nil
+	b.mgr.Reconcile(ctx, &next)
+	waitFor(t, 2*time.Minute, b.svc+" removed with its link", func() bool {
 		return b.service(ctx, b.svc) == nil
 	})
 	if after := a.service(ctx, a.svc); after == nil || !sameService(before, after) {
-		t.Errorf("%s changed when the other instance stopped: %+v", a.svc, after)
+		t.Errorf("%s changed when the other instance removed its link: %+v", a.svc, after)
 	}
 }
 
-// TestKnownBad_RealShutdownDeletesServices pins problem 2: stopping
-// tailnetlink deletes the VIP services it created. PR 6 flips this: the
-// service must still exist after shutdown.
-func TestKnownBad_RealShutdownDeletesServices(t *testing.T) {
+// TestRealShutdownKeepsServices (problem 2, fixed by PR 6): stopping
+// tailnetlink leaves its VIP service in place, unchanged.
+func TestRealShutdownKeepsServices(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 	l := startLink(t, ctx, linkOpts{})
 	l.waitService(t, ctx, l.svc)
+	before := l.service(ctx, l.svc)
 
 	l.stop(t)
-	waitFor(t, 2*time.Minute, "service to be deleted after shutdown", func() bool {
-		return l.service(ctx, l.svc) == nil
+	time.Sleep(10 * time.Second)
+	if after := l.service(ctx, l.svc); after == nil || !sameService(before, after) {
+		t.Errorf("service changed on shutdown:\n before %+v\n after  %+v", before, after)
+	}
+}
+
+// TestRealRestartReusesNode: with persistent nodes, a restart comes back as
+// the same devices with the same VIP, and traffic flows again.
+func TestRealRestartReusesNode(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	l := startLink(t, ctx, linkOpts{persistent: true})
+	vip := l.waitService(t, ctx, l.svc)
+	echo(t, l.dialVIP(t, ctx, vip, l.echoPort), "before restart "+l.sfx)
+
+	devices := func() []string {
+		var ids []string
+		for _, s := range []*side{l.src, l.dst} {
+			devs, err := s.client().Devices().List(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, d := range devs {
+				if strings.HasPrefix(d.Hostname, "tailnetlink-"+s.role+"-"+l.sfx) {
+					ids = append(ids, d.NodeID)
+				}
+			}
+		}
+		slices.Sort(ids)
+		return ids
+	}
+	before := devices()
+	if len(before) != 2 {
+		t.Fatalf("tailnetlink devices = %v, want one per tailnet", before)
+	}
+
+	l.stop(t)
+	l.run(t, ctx, false)
+	waitFor(t, 3*time.Minute, "bridge active after restart", func() bool {
+		for _, b := range l.store.GetBridges() {
+			if b.Status == state.BridgeStatusActive {
+				return true
+			}
+		}
+		return false
 	})
-	t.Logf("known bad (fixed by PR 6): %s was deleted on shutdown", l.svc)
+	if got := l.waitService(t, ctx, l.svc); got != vip {
+		t.Errorf("VIP changed across restart: %v -> %v", vip, got)
+	}
+	echo(t, l.dialVIP(t, ctx, vip, l.echoPort), "after restart "+l.sfx)
+	if after := devices(); !slices.Equal(after, before) {
+		t.Errorf("devices changed across restart: %v -> %v", before, after)
+	}
 }
 
 // TestKnownBad_RealSecretsOverHTTP pins problem 4: the UI published as

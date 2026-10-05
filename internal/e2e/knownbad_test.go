@@ -20,23 +20,6 @@ import (
 // end. The PR that fixes the behavior flips the assertion and renames the
 // test.
 
-// KNOWN-BAD: stopping the manager deletes every service it created. Flip in
-// roadmap PR 6.
-func TestKnownBad_ManagerShutdownDeletesServices(t *testing.T) {
-	ctx := e2eSetup(t)
-	b := newBorder(t)
-	echoBackend(t, ctx, b.src, "backend", 8080)
-	r := startManager(t, b.config(b.deviceRule("web", "backend", "", 8080)), "")
-	svc := b.serviceName("backend", "")
-	waitVIP(t, b.dstAPI, svc)
-
-	r.stop(t)
-	waitFor(t, 30*time.Second, "service deleted on shutdown", func() bool {
-		_, ok := b.dstAPI.Service(svc)
-		return !ok
-	})
-}
-
 // freeAddr returns a free loopback address.
 func freeAddr(t *testing.T) string {
 	t.Helper()

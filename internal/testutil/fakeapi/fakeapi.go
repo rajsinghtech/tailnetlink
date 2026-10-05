@@ -68,6 +68,7 @@ func New(t testing.TB) *Server {
 	mux.HandleFunc("PATCH /api/v2/tailnet/{tn}/dns/split-dns", s.patchSplitDNS)
 	mux.HandleFunc("GET /api/v2/tailnet/{tn}/devices", s.listDevices)
 	mux.HandleFunc("POST /api/v2/tailnet/{tn}/keys", s.createKey)
+	mux.HandleFunc("POST /api/v2/oauth/token", s.token)
 	s.srv = httptest.NewServer(s.record(mux))
 	t.Cleanup(s.srv.Close)
 	return s
@@ -152,11 +153,12 @@ func (s *Server) Calls() []Call {
 	return append([]Call(nil), s.calls...)
 }
 
-// Writes returns every non-GET request received so far.
+// Writes returns every non-GET request received so far, leaving out OAuth
+// token requests.
 func (s *Server) Writes() []Call {
 	var out []Call
 	for _, c := range s.Calls() {
-		if c.Method != http.MethodGet {
+		if c.Method != http.MethodGet && c.Path != "/api/v2/oauth/token" {
 			out = append(out, c)
 		}
 	}
@@ -197,7 +199,7 @@ func (s *Server) record(next http.Handler) http.Handler {
 			writeErr(w, code, "injected failure")
 			return
 		}
-		if r.Header.Get("Authorization") == "" {
+		if r.Header.Get("Authorization") == "" && r.URL.Path != "/api/v2/oauth/token" {
 			writeErr(w, http.StatusUnauthorized, "missing auth")
 			return
 		}
@@ -331,6 +333,11 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"id": "kfake", "key": "tskey-auth-fake"})
+}
+
+// token is the OAuth client-credentials endpoint. Any client is accepted.
+func (s *Server) token(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"access_token": "fake-token", "token_type": "Bearer", "expires_in": 3600})
 }
 
 func sortedKeys(m map[string]tsclient.VIPService) []string {
