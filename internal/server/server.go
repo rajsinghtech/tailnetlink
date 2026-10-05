@@ -476,11 +476,11 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type initPayload struct {
-		Status      state.StatusSnapshot  `json:"status"`
-		Bridges     []*state.BridgeEntry  `json:"bridges"`
-		Connections []*state.ConnEntry    `json:"connections"`
-		Logs        []state.LogEntry      `json:"logs"`
-		Config      json.RawMessage       `json:"config"`
+		Status      state.StatusSnapshot `json:"status"`
+		Bridges     []*state.BridgeEntry `json:"bridges"`
+		Connections []*state.ConnEntry   `json:"connections"`
+		Logs        []state.LogEntry     `json:"logs"`
+		Config      json.RawMessage      `json:"config"`
 	}
 	init := initPayload{
 		Status:      s.store.GetStatus(),

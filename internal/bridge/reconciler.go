@@ -23,10 +23,10 @@ type VIPService struct {
 // Reconciler creates and deletes VIP services on the destination tailnet to
 // match the set of discovered source devices.
 type Reconciler struct {
-	client  *tsclient.Client
-	ports   []int
-	tags    []string // ACL tags applied to the VIP service (must match dest tsnet node tags)
-	logger  *slog.Logger
+	client *tsclient.Client
+	ports  []int
+	tags   []string // ACL tags applied to the VIP service (must match dest tsnet node tags)
+	logger *slog.Logger
 
 	mu       sync.RWMutex
 	services map[string]*VIPService // key: ServiceName

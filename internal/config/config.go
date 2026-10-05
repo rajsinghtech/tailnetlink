@@ -12,7 +12,7 @@ import (
 // Duration is a time.Duration that marshals/unmarshals as a human-readable string ("30s").
 type Duration struct{ time.Duration }
 
-func (d Duration) MarshalJSON() ([]byte, error)  { return json.Marshal(d.String()) }
+func (d Duration) MarshalJSON() ([]byte, error) { return json.Marshal(d.String()) }
 func (d *Duration) UnmarshalJSON(b []byte) error {
 	var s string
 	if err := json.Unmarshal(b, &s); err != nil {

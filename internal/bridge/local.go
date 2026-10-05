@@ -164,7 +164,7 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 				m.store.UpsertBridge(state.BridgeEntry{
 					ID: bridgeID, RuleName: rule.Name, DestTailnet: dest.name,
 					ServiceName: svcName,
-					SourceHost: src.Addr, SourceIP: src.Addr,
+					SourceHost:  src.Addr, SourceIP: src.Addr,
 					Ports: []int{exposePort}, Status: state.BridgeStatusError, Error: err.Error(), CreatedAt: createdAt,
 				})
 				m.store.Log("error", fmt.Sprintf("[%s] VIP failed for %s→%s: %v", rule.Name, src.Addr, dest.name, err), nil)
