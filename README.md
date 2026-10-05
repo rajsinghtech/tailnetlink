@@ -115,6 +115,7 @@ tailnetlink prune -data data.json
 | `source_tag` | Discover devices with this ACL tag |
 | `source_devices` | Explicit device specs (takes priority over `source_tag`) |
 | `source_services` | Explicit VIP service names from the source tailnet |
+| `local_sources` | Addresses reachable from the tailnetlink host (`addr`, optional `expose_port`, `dns_name`, `short_name`) |
 | `ports` | TCP ports to forward |
 
 `source_devices` entries and `source_services` entries both support optional DNS fields:
@@ -124,6 +125,16 @@ tailnetlink prune -data data.json
 | `fqdn` / `name` | Device FQDN or VIP service name (`svc:foo`) |
 | `dns_name` | Fully-qualified hostname to advertise in split-DNS (e.g. `api-0.api.internal`) |
 | `short_name` | Bare VIP service name override (e.g. `api-0` → `svc:api-0`) |
+
+`short_name` must be a DNS label: 1 to 63 lowercase letters, digits or dashes, not starting or ending with a dash. Two entries that would end up with the same short name in the same destination tailnet are rejected when the config loads. Names tailnetlink generates itself are cut to fit and get a short hash suffix, so long hostnames never collide or overflow.
+
+When a rule discovers by `source_tag`, tailnetlink skips anything it made itself: VIP services annotated `tailnetlink/managed=true` and devices whose hostname starts with `tailnetlink-`. Two instances bridging the same tag in opposite directions therefore don't bounce services back and forth.
+
+`local_sources` entries publish something reachable from the machine running tailnetlink (`addr`, e.g. `127.0.0.1:3000` or `nas.lan:445`). The DNS name defaults to the host in `addr` (a localhost or IP `addr` needs `dns_name`), the short name to the first label of the DNS name, lower-cased, and the port to the one in `addr` unless `expose_port` is set.
+
+### Split DNS
+
+When an entry sets `dns_name` (say `api-0.api.internal`), tailnetlink runs a small authoritative DNS server for the parent zone (`api.internal`) on a shared VIP, `svc:tnl-dns-<zone>-dns`, in each destination tailnet and points split DNS for that zone at it. The server answers over TCP only: a tsnet node does not receive UDP sent to a VIP service address. Tailscale clients send split-DNS queries through their local resolver, which retries over TCP when UDP gets no answer, so names still resolve, just with a short delay on the first lookup.
 
 ### OAuth client secrets
 

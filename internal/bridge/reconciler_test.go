@@ -87,7 +87,7 @@ func TestReconcilerEnsureErrorIsNotCached(t *testing.T) {
 	if _, err := r.Ensure(context.Background(), "src", testDevice(), ""); err == nil {
 		t.Fatal("want error from API")
 	}
-	if got := r.List(); len(got) != 0 {
+	if got := r.services; len(got) != 0 {
 		t.Errorf("failed Ensure was cached: %v", got)
 	}
 }
@@ -116,7 +116,7 @@ func TestReconcilerEnsureRefusesForeignService(t *testing.T) {
 	if svc, _ := api.Service("svc:api"); !reflect.DeepEqual(svc, foreign) {
 		t.Errorf("foreign service changed: %+v", svc)
 	}
-	if got := r.List(); len(got) != 0 {
+	if got := r.services; len(got) != 0 {
 		t.Errorf("conflict was cached as ours: %v", got)
 	}
 }

@@ -142,6 +142,13 @@ func (b *ctlBridge) Service(name string) (tsclient.VIPService, bool) {
 }
 
 // PutService creates or replaces a service by hand, as an admin would.
+// ServiceNames returns the names of every service, sorted.
+func (b *ctlBridge) ServiceNames() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return slices.Sorted(maps.Keys(b.services))
+}
+
 func (b *ctlBridge) PutService(svc tsclient.VIPService) tsclient.VIPService {
 	b.mu.Lock()
 	defer b.mu.Unlock()

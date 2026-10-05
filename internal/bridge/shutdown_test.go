@@ -291,8 +291,7 @@ func sharedDNSFixture(tm *testManager, refs int, annotations map[string]string, 
 	tm.dest.PutService(tsclient.VIPService{Name: "svc:tnl-dns-src-example-dns", Addrs: []string{resolvers[0]}, Annotations: annotations})
 	tm.dest.SetSplitDNS(zone, resolvers)
 	client := tm.m.apiClients["dest"]
-	ds := NewDNSServer(nil, client, "dns-src-example", nil, testOwner, zone, discardLogger())
-	ds.svcName = "svc:tnl-dns-src-example-dns"
+	ds := NewDNSServer(nil, client, nil, testOwner, zone, discardLogger())
 	tm.m.sharedDNS["dest/"+zone] = &sharedDNSEntry{
 		server: ds,
 		sdns:   NewSplitDNSConfigurator(client, zone, resolvers[0], discardLogger()),

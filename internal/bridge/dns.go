@@ -13,13 +13,19 @@ import (
 	"tailscale.com/tsnet"
 )
 
-// DNSServer is an authoritative DNS server for a bridge zone. It is exposed as
-// a Tailscale VIP service (TCP+UDP:53) so that Tailscale split-DNS can route zone
-// queries to a stable VIP IP rather than the ephemeral tsnet node IP.
+// DNSServer is an authoritative DNS server for one zone in one destination
+// tailnet, shared by every rule that publishes names in that zone. It is
+// exposed as a Tailscale VIP service on TCP:53 so split-DNS can point at a
+// stable VIP rather than the node's own address.
+//
+// It answers over TCP only. tsnet hands a service host only the TCP
+// connections for its VIPs (UDP to a VIP is dropped), so there is nothing
+// to serve UDP on. Clients don't notice: they ask 100.100.100.100 over UDP
+// or TCP as usual, and their resolver retries the split-DNS upstream over
+// TCP when UDP gets no answer.
 type DNSServer struct {
 	srv       *tsnet.Server
 	apiClient *tsclient.Client
-	ruleName  string
 	destTags  []string
 	owner     string
 	zone      string // FQDN with trailing dot e.g. "keiretsu.ts.net."
@@ -28,40 +34,47 @@ type DNSServer struct {
 	mu      sync.RWMutex
 	records map[string]netip.Addr // FQDN (trailing dot) → IP (v4 or v6)
 
-	svcName   string // populated by Start
+	svcName   string
 	mux       *dns.ServeMux
 	tcpServer *dns.Server
 }
 
-func NewDNSServer(srv *tsnet.Server, apiClient *tsclient.Client, ruleName string, destTags []string, owner, zone string, logger *slog.Logger) *DNSServer {
+// NewDNSServer returns a server for zone. Its VIP service is named after the
+// zone, svc:tnl-dns-<zone>-dns, so every rule that puts names in the zone
+// shares it.
+func NewDNSServer(srv *tsnet.Server, apiClient *tsclient.Client, destTags []string, owner, zone string, logger *slog.Logger) *DNSServer {
 	d := &DNSServer{
 		srv:       srv,
 		apiClient: apiClient,
-		ruleName:  ruleName,
 		destTags:  destTags,
 		owner:     owner,
 		zone:      dns.Fqdn(zone),
 		logger:    logger,
 		records:   make(map[string]netip.Addr),
 	}
+	d.svcName = DNSServiceName(zone)
 	d.mux = dns.NewServeMux()
 	d.mux.HandleFunc(d.zone, d.handle)
 	return d
+}
+
+// DNSServiceName is the VIP service that serves zone.
+func DNSServiceName(zone string) string {
+	return "svc:" + capLabel("tnl-dns-"+sanitize(strings.TrimSuffix(zone, "."))+"-dns", 59)
 }
 
 // Start creates a VIP service for DNS, registers this tsnet node as its TCP:53
 // host via ListenService, and returns the VIP IP to use as the split-DNS
 // resolver address.
 func (d *DNSServer) Start(ctx context.Context) (netip.Addr, error) {
-	d.svcName = fmt.Sprintf("svc:tnl-%s-dns", sanitize(d.ruleName))
-
+	zone := strings.TrimSuffix(d.zone, ".")
 	created, err := ensureVIPService(ctx, d.apiClient, d.owner, tsclient.VIPService{
 		Name:    d.svcName,
 		Ports:   []string{"tcp:53"},
 		Tags:    d.destTags,
-		Comment: fmt.Sprintf("managed by tailnetlink (DNS, rule: %s)", d.ruleName),
+		Comment: fmt.Sprintf("managed by tailnetlink (DNS for %s)", zone),
 		Annotations: map[string]string{
-			"tailnetlink/rule": d.ruleName,
+			"tailnetlink/zone": zone,
 		},
 	})
 	if err != nil {
@@ -100,9 +113,6 @@ func (d *DNSServer) Stop() {
 // DeleteService removes the DNS VIP service from the destination tailnet,
 // if this instance still owns it.
 func (d *DNSServer) DeleteService(ctx context.Context) error {
-	if d.svcName == "" {
-		return nil
-	}
 	if err := deleteOwnedVIPService(ctx, d.apiClient, d.owner, d.svcName); err != nil {
 		d.logger.Warn("failed to delete DNS VIP service", "service", d.svcName, "err", err)
 		return err

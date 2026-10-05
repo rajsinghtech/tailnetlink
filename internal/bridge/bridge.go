@@ -867,7 +867,7 @@ func (m *Manager) acquireSharedDNS(ctx context.Context, destName, parentDomain s
 
 		// Create DNS VIP and configure split-DNS outside the mutex.
 		entry, err := func() (*sharedDNSEntry, error) {
-			dnsServer := NewDNSServer(dest.srv, dest.client, "dns-"+sanitize(parentDomain), dest.tags, m.ownerID(), parentDomain, m.logger)
+			dnsServer := NewDNSServer(dest.srv, dest.client, dest.tags, m.ownerID(), parentDomain, m.logger)
 			resolverIP, err := dnsServer.Start(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("shared DNS start: %w", err)

@@ -18,7 +18,9 @@ var invalidChars = regexp.MustCompile(`[^a-zA-Z0-9-]`)
 // is tnl-{srcTailnet}-{hostname} to avoid collisions across tailnets.
 func ServiceName(srcTailnet, hostname, shortName string) string {
 	if shortName != "" {
-		return "svc:" + sanitize(shortName)
+		// Config validation keeps short names to one DNS label; cap here
+		// too so a name built any other way is still one the API accepts.
+		return "svc:" + capLabel(sanitize(shortName), maxLabel)
 	}
 
 	host := strings.TrimSuffix(hostname, ".")
@@ -28,11 +30,20 @@ func ServiceName(srcTailnet, hostname, shortName string) string {
 	}
 
 	base := "tnl-" + sanitize(srcTailnet) + "-" + sanitize(host)
-	if len(base) > 59 { // 63 - len("svc:") = 59
-		hash := fmt.Sprintf("%x", md5.Sum([]byte(base)))[:6]
-		base = base[:52] + "-" + hash
+	return "svc:" + capLabel(base, 59)
+}
+
+// maxLabel is the longest DNS label, and so the longest bare service name.
+const maxLabel = 63
+
+// capLabel shortens s to max bytes by replacing its tail with a short hash
+// of the whole, so different long names stay different.
+func capLabel(s string, max int) string {
+	if len(s) <= max {
+		return s
 	}
-	return "svc:" + base
+	hash := fmt.Sprintf("%x", md5.Sum([]byte(s)))[:6]
+	return strings.TrimRight(s[:max-7], "-") + "-" + hash
 }
 
 func sanitize(s string) string {
