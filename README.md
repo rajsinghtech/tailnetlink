@@ -201,23 +201,21 @@ The secret is read each time tailnetlink needs a new API token, so rotating the 
 
 ## Docker
 
-```bash
-make docker-build
-make docker-run       # mounts data.json from current directory and a volume for node state
-```
-
-Or manually:
+Images publish only on version tags (`v*.*.*`), never from `main`. The image runs as UID 65532, expects `/data/tailnetlink.json`, keeps node state under `/data/tailnetlink-state`, and listens for metrics on `:9090` so probes work inside the container.
 
 ```bash
-docker run --rm \
-  -p 8080:8080 \
-  -v $(pwd)/data.json:/data.json \
-  -v $(pwd)/secrets:/run/secrets:ro \
-  -v tailnetlink-state:/tailnetlink-state \
-  tailnetlink:latest
+docker pull ghcr.io/rajsinghtech/tailnetlink:vX.Y.Z
+docker run -d --name tailnetlink \
+  -p 8888:8888 -p 9090:9090 \
+  -v "$PWD/tailnetlink.json:/data/tailnetlink.json:ro" \
+  -v tailnetlink-state:/data/tailnetlink-state \
+  -v "$PWD/secrets:/run/secrets:ro" \
+  ghcr.io/rajsinghtech/tailnetlink:vX.Y.Z
+curl -sf http://127.0.0.1:9090/healthz
 ```
 
-Node state lives in `/tailnetlink-state` (next to `/data.json`) unless `state_dir` says otherwise. Without a volume there, every container start registers new devices.
+See `deploy/` for a compose example. Build locally with `make docker-build` (tag `tailnetlink:local`).
+
 
 ## Health and metrics
 

@@ -1,0 +1,29 @@
+# One border. Put the config at ./tailnetlink.json and the OAuth secrets
+# where the config points (files under ./secrets/ are mounted read-only).
+# Metrics listen on :9090 so container health checks and probes can reach them.
+services:
+  tailnetlink:
+    image: ghcr.io/rajsinghtech/tailnetlink:VERSION # replace VERSION with a release tag
+    read_only: true
+    user: "65532:65532"
+    ports:
+      - "8888:8888"
+      - "9090:9090"
+    volumes:
+      - ./tailnetlink.json:/data/tailnetlink.json:ro
+      - ./secrets:/run/secrets:ro
+      - tailnetlink-state:/data/tailnetlink-state
+    tmpfs:
+      - /tmp
+    environment:
+      TAILNETLINK_DEST_OAUTH_SECRET: ${TAILNETLINK_DEST_OAUTH_SECRET:-}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9090/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+volumes:
+  tailnetlink-state:

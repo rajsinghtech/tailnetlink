@@ -47,7 +47,16 @@ jobs:
         run: ./scripts/coverage.sh
 
       - name: Build
-        run: CGO_ENABLED=0 go build -ldflags "-s -w" -o tailnetlink ./cmd/tailnetlink
+        run: |
+          CGO_ENABLED=0 go build -ldflags "-s -w -X main.Version=ci" -o tailnetlink ./cmd/tailnetlink
+          test "$(./tailnetlink -version)" = "ci"
+
+      - name: GoReleaser check
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: check
 
   # Builds the image on PRs and main to catch Dockerfile breakage, but never
   # pushes it. Images are published only by release.yml, on version tags.
@@ -62,11 +71,50 @@ jobs:
       - uses: docker/setup-buildx-action@v4
 
       - name: Build (no push)
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: tailnetlink:ci
+          build-args: |
+            VERSION=ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Smoke the image
+        run: |
+          set -euo pipefail
+          test "$(docker run --rm tailnetlink:ci -version)" = "ci"
+          test "$(docker run --rm --entrypoint id tailnetlink:ci -u)" = "65532"
+          mkdir -p /tmp/tnl-smoke
+          cat >/tmp/tnl-smoke/tailnetlink.json <<'JSON'
+          {"name":"smoke","source":{"tailnet":"a.ts.net","oauth":{"client_id":"x","client_secret_env":"A"},"tags":["tag:tailnetlink"]},"dest":{"tailnet":"b.ts.net","oauth":{"client_id":"y","client_secret_env":"B"},"tags":["tag:tailnetlink"]},"links":[{"name":"web","tag":"tag:web","ports":[80]}],"ui":{"enabled":false},"metrics":{"listen_addr":":9090"}}
+          JSON
+          # Strip the leading spaces YAML left on the heredoc body.
+          sed -i 's/^[[:space:]]*//' /tmp/tnl-smoke/tailnetlink.json
+          cid=$(docker run -d --rm -e A=a -e B=b             -v /tmp/tnl-smoke/tailnetlink.json:/data/tailnetlink.json:ro             -p 127.0.0.1:19090:9090 tailnetlink:ci)
+          trap 'docker stop "$cid" >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:19090/healthz >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs "$cid" || true
+          exit 1
+
+      - name: Multi-arch build (no push)
         uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: false
+          build-args: |
+            VERSION=ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
