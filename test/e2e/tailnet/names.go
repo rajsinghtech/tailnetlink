@@ -15,7 +15,7 @@ import (
 // lacks it is ever deleted by the cleanup tooling.
 const Prefix = "tailnetlink-ci-"
 
-var nameRE = regexp.MustCompile(`^tailnetlink-ci-([0-9]+)-([0-9]+)-([a-z]+)$`)
+var nameRE = regexp.MustCompile(`^tailnetlink-ci-([0-9]+)-([0-9]+)-([a-z][a-z0-9]*)$`)
 
 // Name returns the display name for one tailnet of one CI run attempt,
 // for example tailnetlink-ci-123456-1-src.

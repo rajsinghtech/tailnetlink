@@ -397,8 +397,15 @@ func (a *app) deleteTargets(ctx context.Context, cl *tailnet.Client, c common, t
 
 // collect matches listed tailnets against keep and attaches state entries.
 // Recorded entries that are no longer listed are already gone and skipped.
+// State entries still present by ID are included even when ParseName rejects
+// the display name (roles like dst2 used to fail the old [a-z]+ pattern).
 func collect(all []tailnet.Tailnet, st *tailnet.State, keep func(t tailnet.Tailnet, runID, attempt string) bool) []target {
+	byID := make(map[string]tailnet.Tailnet, len(all))
+	for _, t := range all {
+		byID[t.ID] = t
+	}
 	var out []target
+	seen := make(map[string]bool)
 	for _, t := range all {
 		runID, attempt, _, ok := tailnet.ParseName(t.DisplayName)
 		if !ok || !keep(t, runID, attempt) {
@@ -409,6 +416,23 @@ func collect(all []tailnet.Tailnet, st *tailnet.State, keep func(t tailnet.Tailn
 			e.ID = t.ID
 		}
 		out = append(out, target{id: t.ID, name: t.DisplayName, entry: e, known: known})
+		seen[t.ID] = true
+	}
+	for _, e := range st.Tailnets {
+		if seen[e.ID] {
+			continue
+		}
+		t, ok := byID[e.ID]
+		if !ok || !keep(t, e.RunID, e.Attempt) {
+			continue
+		}
+		e.ID = t.ID
+		name := t.DisplayName
+		if name == "" {
+			name = e.DisplayName
+		}
+		out = append(out, target{id: t.ID, name: name, entry: e, known: true})
+		seen[t.ID] = true
 	}
 	return out
 }
