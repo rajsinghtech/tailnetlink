@@ -15,7 +15,7 @@ source tailnet                         dest tailnet
 
 ## How it works
 
-1. Authenticates to each tailnet with OAuth credentials (OAuth scopes: `devices:read`, `keys:write`, `vip-services:write`).
+1. Authenticates to each tailnet with OAuth credentials (scopes: `devices:core:read`, `auth_keys`, `services` / `vip-services`, `dns`).
 2. Spins up a [tsnet](https://pkg.go.dev/tailscale.com/tsnet) node in each tailnet.
 3. Polls the Tailscale API for devices matching the configured tag or FQDN list.
 4. Creates a Tailscale VIP service in the destination tailnet for each discovered device.
@@ -27,18 +27,13 @@ No static auth keys are stored. The first start mints an auth key through the OA
 ## Quick start
 
 ```bash
-cp config.example.json data.json
-# edit data.json: OAuth client ids, and where to read each client secret
-go run ./cmd/tailnetlink -data data.json
-# web UI: http://localhost:8888
+cp config.example.json tailnetlink.json
+# edit: OAuth client ids, and where to read each client secret
+go run ./cmd/tailnetlink -data tailnetlink.json
+# web UI: http://127.0.0.1:8888   metrics: http://127.0.0.1:9090/healthz
 ```
 
-Or with make:
-
-```bash
-make dev           # runs with debug logging
-make build && make run
-```
+Or with make: `make dev`, `make build && make run`. See [CONTRIBUTING.md](CONTRIBUTING.md) for tests and the coverage ratchet.
 
 ## Configuration
 
@@ -190,7 +185,8 @@ The secret is read each time tailnetlink needs a new API token, so rotating the 
 
 | Flag | Default | Description |
 |---|---|---|
-| `-data` | `tailnetlink.json` | Path to config/state JSON file |
+| `-data` | `tailnetlink.json` | Path to config JSON file |
+| `-version` | | Print the build version and exit |
 | `-listen` | `127.0.0.1:8888` | Web UI listen address |
 | `-metrics-listen` | `127.0.0.1:9090` | Address for `/healthz`, `/readyz` and `/metrics` (overrides `metrics_addr`); `off` turns it off |
 | `-ui` | `true` | `-ui=false` turns the web UI off: no local listener and no `svc:tailnetlink`, whatever the config says |
@@ -278,6 +274,16 @@ make deps      # go mod tidy + download
 make lint      # go vet
 make dev       # run with debug logging (reloads the config file when it changes)
 ```
+
+## Further reading
+
+- [docs/architecture.md](docs/architecture.md) — one border, VIP forward path, DNS
+- [docs/security.md](docs/security.md) — secrets, UI, ownership, authz
+- [docs/testing.md](docs/testing.md) — unit / testcontrol / real-tailnet layers
+- [CONTRIBUTING.md](CONTRIBUTING.md) — local gates, PRs, coverage ratchet
+- [deploy/](deploy/) — compose example (metrics on `:9090`)
+
+Branch protection on `main` (required CI checks) is an owner setting, not a file in this repo.
 
 ## License
 
