@@ -1,0 +1,63 @@
+name: E2E janitor
+
+# Backstop for e2e-real: deletes tailnetlink-ci-* tailnets older than about
+# two hours (a run takes under an hour). Only display names matching
+# tailnetlink-ci-<run>-<attempt>-<role> are ever touched. A tailnet it can't
+# delete fails the job, so a leak shows up as a red run.
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+    inputs:
+      older_than:
+        description: Delete CI tailnets older than this (minimum 30m)
+        default: 2h
+      dry_run:
+        description: Only print what would be deleted
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-janitor
+  cancel-in-progress: false
+
+jobs:
+  janitor:
+    if: github.repository == 'rajsinghtech/tailnetlink'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read   # download state artifacts from earlier e2e-real runs
+      id-token: write # org token and child-tailnet tokens through federated identities
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      # The federated identity client IDs needed to delete each tailnet live
+      # in the state artifacts the setup jobs uploaded.
+      - name: Download recent tailnet state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p state
+          for id in $(gh run list --repo "$GITHUB_REPOSITORY" --workflow e2e-real.yml --limit 100 --json databaseId --jq '.[].databaseId'); do
+            gh run download "$id" --repo "$GITHUB_REPOSITORY" --pattern 'e2e-tailnets-*' --dir "state/$id" 2>/dev/null || true
+          done
+          find state -name '*.json' | wc -l
+
+      - name: Delete stale CI tailnets
+        env:
+          OLDER_THAN: ${{ inputs.older_than || '2h' }}
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: |
+          go run ./test/e2e/cmd/tailnetctl janitor --older-than "$OLDER_THAN" --state-dir state $DRY_RUN
