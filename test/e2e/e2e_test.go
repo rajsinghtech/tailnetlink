@@ -21,11 +21,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -280,6 +282,7 @@ type link struct {
 	cfgPath   string
 	echoPort  int
 	logOutput *strings.Builder
+	store     *state.Store
 }
 
 type linkOpts struct {
@@ -319,6 +322,7 @@ func startLink(t *testing.T, ctx context.Context, o linkOpts) *link {
 		l.secrets = append(l.secrets, secret)
 	}
 	l.cfg = &config.Config{
+		InstanceID: "e2e-" + l.sfx,
 		Tailnets: map[string]config.TailnetConfig{
 			"src-" + l.sfx: {OAuth: creds["src"], Tags: []string{linkTag}, Tailnet: src.id},
 			"dst-" + l.sfx: {OAuth: creds["dst"], Tags: []string{linkTag}, Tailnet: dst.id},
@@ -354,6 +358,7 @@ func startLink(t *testing.T, ctx context.Context, o linkOpts) *link {
 	t.Cleanup(cancel)
 	logger := slog.New(slog.NewTextHandler(l.logOutput, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	store := state.New()
+	l.store = store
 	if o.webUI {
 		cs, err := config.NewStore(l.cfgPath)
 		if err != nil {
@@ -478,32 +483,86 @@ func TestRealTrafficAcrossBorder(t *testing.T) {
 	}
 }
 
-// TestKnownBad_RealOverwritesForeignService pins problem 1: a VIP service
-// someone else made is taken over when a rule uses the same short name.
-// PR 4 flips this: the service must be left byte-for-byte unchanged.
-func TestKnownBad_RealOverwritesForeignService(t *testing.T) {
+// bridgeError waits for the link's bridge to report an error and returns it.
+func (l *link) bridgeError(t *testing.T) string {
+	t.Helper()
+	var msg string
+	waitFor(t, 3*time.Minute, "bridge error", func() bool {
+		for _, b := range l.store.GetBridges() {
+			if b.Status == state.BridgeStatusError {
+				msg = b.Error
+				return true
+			}
+		}
+		return false
+	})
+	return msg
+}
+
+func sameService(a, b *tsclient.VIPService) bool {
+	return a.Name == b.Name && a.Comment == b.Comment && slices.Equal(a.Ports, b.Ports) &&
+		slices.Equal(a.Tags, b.Tags) && slices.Equal(a.Addrs, b.Addrs) && maps.Equal(a.Annotations, b.Annotations)
+}
+
+// TestRealLeavesForeignServiceAlone (problem 1, fixed by PR 4): a VIP
+// service someone else made is left byte-for-byte unchanged when a rule uses
+// the same short name, and the rule reports a name conflict.
+func TestRealLeavesForeignServiceAlone(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 	_, dst := tailnets(t)
 	short := "e2e-api-" + suffix(t)
-	foreign := tsclient.VIPService{
+	if err := dst.client().VIPServices().CreateOrUpdate(ctx, tsclient.VIPService{
 		Name:        "svc:" + short,
 		Comment:     "hand-made, not tailnetlink",
 		Ports:       []string{"tcp:9999"},
 		Annotations: map[string]string{"owner": "someone-else"},
-	}
-	if err := dst.client().VIPServices().CreateOrUpdate(ctx, foreign); err != nil {
+	}); err != nil {
 		t.Fatalf("create foreign service: %v", err)
 	}
-	t.Cleanup(func() { _ = dst.client().VIPServices().Delete(context.Background(), foreign.Name) })
+	t.Cleanup(func() { _ = dst.client().VIPServices().Delete(context.Background(), "svc:"+short) })
+	before, err := dst.client().VIPServices().Get(ctx, "svc:"+short)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	l := startLink(t, ctx, linkOpts{shortName: short})
-	waitFor(t, 3*time.Minute, "tailnetlink to touch the foreign service", func() bool {
-		s := l.service(ctx, foreign.Name)
-		return s != nil && s.Comment != foreign.Comment
+	if msg := l.bridgeError(t); !strings.HasPrefix(msg, "name conflict") {
+		t.Errorf("bridge error = %q, want a name conflict", msg)
+	}
+	l.cancel()
+	time.Sleep(10 * time.Second)
+	after := l.service(ctx, "svc:"+short)
+	if after == nil || !sameService(before, after) {
+		t.Errorf("foreign service changed:\n before %+v\n after  %+v", before, after)
+	}
+}
+
+// TestRealInstancesDoNotTouchEachOther: two instances with different
+// instance ids on the same pair of tailnets each own only their own
+// services, and one shutting down leaves the other's alone.
+func TestRealInstancesDoNotTouchEachOther(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	a := startLink(t, ctx, linkOpts{})
+	b := startLink(t, ctx, linkOpts{})
+	a.waitService(t, ctx, a.svc)
+	b.waitService(t, ctx, b.svc)
+	if got := a.service(ctx, a.svc).Annotations["tailnetlink/owner"]; got != a.cfg.InstanceID {
+		t.Errorf("%s owner = %q, want %q", a.svc, got, a.cfg.InstanceID)
+	}
+	if got := b.service(ctx, b.svc).Annotations["tailnetlink/owner"]; got != b.cfg.InstanceID {
+		t.Errorf("%s owner = %q, want %q", b.svc, got, b.cfg.InstanceID)
+	}
+	before := a.service(ctx, a.svc)
+
+	b.cancel()
+	waitFor(t, 2*time.Minute, b.svc+" removed when its instance stops", func() bool {
+		return b.service(ctx, b.svc) == nil
 	})
-	got := l.service(ctx, foreign.Name)
-	t.Logf("known bad (fixed by PR 4): foreign service overwritten: comment %q, ports %v, annotations %v", got.Comment, got.Ports, got.Annotations)
+	if after := a.service(ctx, a.svc); after == nil || !sameService(before, after) {
+		t.Errorf("%s changed when the other instance stopped: %+v", a.svc, after)
+	}
 }
 
 // TestKnownBad_RealShutdownDeletesServices pins problem 2: stopping

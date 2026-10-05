@@ -41,6 +41,7 @@ type Server struct {
 	srv *httptest.Server
 
 	mu       sync.Mutex
+	fail     map[Call]int
 	calls    []Call
 	devices  []tsclient.Device
 	services map[string]tsclient.VIPService
@@ -162,6 +163,17 @@ func (s *Server) Writes() []Call {
 	return out
 }
 
+// Fail makes every request matching method and path (relative, as in Call)
+// answer with the given HTTP status until the test ends.
+func (s *Server) Fail(method, path string, code int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fail == nil {
+		s.fail = map[Call]int{}
+	}
+	s.fail[Call{Method: method, Path: path}] = code
+}
+
 // ResetCalls clears the recorded calls.
 func (s *Server) ResetCalls() {
 	s.mu.Lock()
@@ -177,8 +189,14 @@ func (s *Server) record(next http.Handler) http.Handler {
 			path = path[len(prefix):]
 		}
 		s.mu.Lock()
-		s.calls = append(s.calls, Call{Method: r.Method, Path: path})
+		call := Call{Method: r.Method, Path: path}
+		s.calls = append(s.calls, call)
+		code, fail := s.fail[call]
 		s.mu.Unlock()
+		if fail {
+			writeErr(w, code, "injected failure")
+			return
+		}
 		if r.Header.Get("Authorization") == "" {
 			writeErr(w, http.StatusUnauthorized, "missing auth")
 			return

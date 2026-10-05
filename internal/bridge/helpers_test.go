@@ -13,6 +13,9 @@ import (
 // that PR should flip the assertion (and drop the KnownBad prefix) rather
 // than delete the test.
 
+// testOwner is the instance id the tests run as.
+const testOwner = "test-instance"
+
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }

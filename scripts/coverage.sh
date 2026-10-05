@@ -2,10 +2,9 @@
 # Coverage ratchet.
 #
 # Runs the test suite with coverage across ./cmd and ./internal, so the
-# in-process e2e tests count toward the packages they exercise, drops
-# test-only packages and the CI
-# tooling under test/ (it has its own tests but is not product code) from the
-# profile, and fails if total statement coverage is below the floor in
+# in-process e2e tests count toward the packages they exercise. Test-only
+# packages and the CI tooling under test/ (it has its own tests but is not
+# product code) are left out of the profile. Fails if total statement coverage is below the floor in
 # .coverage-baseline. When coverage goes up by a point or more it asks you to
 # raise the floor in the same PR, so the number only ever moves up.
 #

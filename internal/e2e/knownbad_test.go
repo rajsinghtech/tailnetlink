@@ -14,30 +14,11 @@ import (
 
 	"github.com/rajsinghtech/tailnetlink/internal/config"
 	"github.com/rajsinghtech/tailnetlink/internal/server"
-	tsclient "tailscale.com/client/tailscale/v2"
 )
 
 // Tests named TestKnownBad_* pin behavior the roadmap says is wrong, end to
 // end. The PR that fixes the behavior flips the assertion and renames the
 // test.
-
-// KNOWN-BAD: a hand-made svc:api in dst is taken over by a rule whose
-// short_name is "api". Flip in roadmap PR 4.
-func TestKnownBad_ManagerTakesOverForeignService(t *testing.T) {
-	ctx := e2eSetup(t)
-	b := newBorder(t)
-	echoBackend(t, ctx, b.src, "backend", 8080)
-	short := "api-" + b.sfx
-	b.dstAPI.PutService(tsclient.VIPService{
-		Name: "svc:" + short, Comment: "hand made", Ports: []string{"tcp:9000"}, Tags: []string{"tag:other"},
-	})
-
-	startManager(t, b.config(b.deviceRule("web", "backend", short, 8080)), "")
-	waitFor(t, 30*time.Second, "foreign service overwritten", func() bool {
-		s, _ := b.dstAPI.Service("svc:" + short)
-		return s.Comment != "hand made"
-	})
-}
 
 // KNOWN-BAD: stopping the manager deletes every service it created. Flip in
 // roadmap PR 6.

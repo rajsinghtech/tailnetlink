@@ -67,6 +67,9 @@ func TestLoadExampleConfig(t *testing.T) {
 	if !src.HasAuth() || src.Tailnet != "source-org.ts.net" {
 		t.Errorf("source tailnet = %+v", src)
 	}
+	if cfg.InstanceID == "" {
+		t.Error("example has no instance_id")
+	}
 	b := cfg.Bridges[0]
 	if b.Name != "api-servers" || b.SourceTag != "tag:api-server" || len(b.Ports) != 2 {
 		t.Errorf("first bridge = %+v", b)
@@ -126,6 +129,7 @@ func TestStoreUpdatePersists(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := s.Update(func(c *config.Config) error {
+		c.InstanceID = "test"
 		c.Tailnets["a"] = config.TailnetConfig{Tailnet: "a.example"}
 		return nil
 	}); err != nil {
@@ -167,6 +171,7 @@ func TestStoreUpdateErrorDoesNotPersist(t *testing.T) {
 func TestKnownBad_SnapshotsShareState(t *testing.T) {
 	s, _ := config.NewStore(filepath.Join(t.TempDir(), "config.json"))
 	_ = s.Update(func(c *config.Config) error {
+		c.InstanceID = "test"
 		c.Tailnets["a"] = config.TailnetConfig{Tailnet: "one"}
 		c.Bridges = append(c.Bridges, config.BridgeRule{Name: "r", Ports: []int{1}})
 		return nil
@@ -187,10 +192,73 @@ func TestKnownBad_SnapshotsShareState(t *testing.T) {
 func TestKnownBad_RawJSONIncludesSecrets(t *testing.T) {
 	s, _ := config.NewStore(filepath.Join(t.TempDir(), "config.json"))
 	_ = s.Update(func(c *config.Config) error {
+		c.InstanceID = "test"
 		c.Tailnets["a"] = config.TailnetConfig{OAuth: config.OAuthCreds{ClientID: "id", ClientSecret: "very-secret"}}
 		return nil
 	})
 	if !strings.Contains(string(s.RawJSON()), "very-secret") {
 		t.Error("expected the secret in RawJSON today")
+	}
+}
+
+func TestValidate(t *testing.T) {
+	tn := map[string]config.TailnetConfig{"a": {}}
+	cases := []struct {
+		name string
+		cfg  config.Config
+		want string // substring of the error, or "" for none
+	}{
+		{"empty config needs no id", config.Config{}, ""},
+		{"tailnets need an id", config.Config{Tailnets: tn}, "instance_id is required"},
+		{"good id", config.Config{InstanceID: "home-to-work", Tailnets: tn}, ""},
+		{"one char", config.Config{InstanceID: "a"}, ""},
+		{"upper case", config.Config{InstanceID: "Home"}, "must be 1 to 63"},
+		{"leading dash", config.Config{InstanceID: "-a"}, "must be 1 to 63"},
+		{"trailing dash", config.Config{InstanceID: "a-"}, "must be 1 to 63"},
+		{"too long", config.Config{InstanceID: strings.Repeat("a", 64)}, "must be 1 to 63"},
+		{"bad ui name", config.Config{InstanceID: "a", UI: config.UIConfig{ServiceName: "tailnetlink"}}, "ui.service_name"},
+		{"custom ui name", config.Config{InstanceID: "a", UI: config.UIConfig{ServiceName: "svc:tnl-ui-b"}}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.cfg.Validate()
+			switch {
+			case c.want == "" && err != nil:
+				t.Errorf("unexpected error: %v", err)
+			case c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)):
+				t.Errorf("err = %v, want it to mention %q", err, c.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsMissingInstanceID(t *testing.T) {
+	_, err := config.Load(writeFile(t, `{"tailnets": {"a": {"tailnet": "a.example"}}}`))
+	if err == nil || !strings.Contains(err.Error(), "instance_id is required") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestStoreUpdateValidates(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	s, _ := config.NewStore(p)
+	err := s.Update(func(c *config.Config) error {
+		c.Tailnets["a"] = config.TailnetConfig{}
+		return nil
+	})
+	if err == nil {
+		t.Fatal("want an error without instance_id")
+	}
+	if _, statErr := os.Stat(p); !os.IsNotExist(statErr) {
+		t.Errorf("file written despite error: %v", statErr)
+	}
+}
+
+func TestUIServiceName(t *testing.T) {
+	if got := (&config.Config{}).UIServiceName(); got != "svc:tailnetlink" {
+		t.Errorf("default = %q", got)
+	}
+	if got := (&config.Config{UI: config.UIConfig{ServiceName: "svc:x"}}).UIServiceName(); got != "svc:x" {
+		t.Errorf("custom = %q", got)
 	}
 }

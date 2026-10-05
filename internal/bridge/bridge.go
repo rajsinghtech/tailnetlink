@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -30,6 +31,8 @@ type Manager struct {
 	reconcileMu  sync.Mutex // serializes concurrent Reconcile calls
 	mu           sync.Mutex
 	cfg          *config.Config           // last applied config
+	owner        string                   // instance id, written to tailnetlink/owner
+	uiService    string                   // VIP service name for the web UI
 	servers      map[string]*tsnet.Server // keyed by tailnet name
 	apiClients   map[string]*tsclient.Client
 	forwarders   map[string]*Forwarder         // keyed by bridge entry ID (rule/dest/fqdn)
@@ -73,7 +76,23 @@ func (m *Manager) Reconcile(ctx context.Context, newCfg *config.Config) {
 
 	m.mu.Lock()
 	old := m.cfg
+	// A new instance id or UI service name changes what every running piece
+	// owns or publishes, so everything restarts.
+	restartAll := m.owner != newCfg.InstanceID || m.uiService != newCfg.UIServiceName()
 	m.mu.Unlock()
+
+	if restartAll {
+		for _, rule := range old.Bridges {
+			m.stopRule(rule.Name)
+		}
+		for name := range old.Tailnets {
+			m.stopTailnet(name)
+		}
+		m.mu.Lock()
+		m.owner = newCfg.InstanceID
+		m.uiService = newCfg.UIServiceName()
+		m.mu.Unlock()
+	}
 
 	// ── Tailnets ─────────────────────────────────────────────────────────────
 
@@ -283,7 +302,7 @@ func (m *Manager) runRule(ctx context.Context, rule config.BridgeRule, pollInter
 			return
 		}
 
-		rec := NewReconciler(destClient, rule.Ports, destTags, m.logger)
+		rec := NewReconciler(destClient, rule.Ports, destTags, m.ownerID(), m.logger)
 		dests = append(dests, destCtx{name: destName, srv: destSrv, client: destClient, tags: destTags, rec: rec})
 	}
 
@@ -594,7 +613,7 @@ func (m *Manager) acquireSharedDNS(ctx context.Context, destName, parentDomain s
 
 		// Create DNS VIP and configure split-DNS outside the mutex.
 		entry, err := func() (*sharedDNSEntry, error) {
-			dnsServer := NewDNSServer(dest.srv, dest.client, "dns-"+sanitize(parentDomain), dest.tags, parentDomain, m.logger)
+			dnsServer := NewDNSServer(dest.srv, dest.client, "dns-"+sanitize(parentDomain), dest.tags, m.ownerID(), parentDomain, m.logger)
 			resolverIP, err := dnsServer.Start(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("shared DNS start: %w", err)
@@ -602,7 +621,7 @@ func (m *Manager) acquireSharedDNS(ctx context.Context, destName, parentDomain s
 			sdns := NewSplitDNSConfigurator(dest.client, parentDomain, resolverIP.String(), m.logger)
 			if err := sdns.Configure(ctx); err != nil {
 				dnsServer.Stop()
-				dnsServer.DeleteService(context.Background())
+				_ = dnsServer.DeleteService(context.Background())
 				return nil, fmt.Errorf("split-DNS configure: %w", err)
 			}
 			m.logger.Info("shared DNS VIP active", "dest", destName, "zone", parentDomain, "resolver", resolverIP)
@@ -642,7 +661,12 @@ func (m *Manager) releaseSharedDNS(destName, parentDomain, recordLabel string) {
 	m.dnsMu.Unlock()
 
 	entry.server.Stop()
-	entry.server.DeleteService(context.Background())
+	if err := entry.server.DeleteService(context.Background()); errors.Is(err, ErrNameConflict) {
+		// Someone else owns the DNS VIP now, so its address is not ours to
+		// take out of split-DNS either.
+		m.logger.Warn("DNS VIP is no longer ours; leaving split-DNS alone", "dest", destName, "zone", parentDomain, "err", err)
+		return
+	}
 	if err := entry.sdns.Remove(context.Background()); err != nil {
 		m.logger.Warn("split-DNS remove failed", "dest", destName, "zone", parentDomain, "err", err)
 	}
@@ -708,20 +732,34 @@ func (m *Manager) startDeviceDNS(ctx context.Context, bridgeID, ruleName, srcDom
 	m.mu.Unlock()
 }
 
-// serveWebUI registers svc:tailnetlink as a TCP:80 VIP service in the given
-// tailnet and proxies incoming connections to the local web UI server.
-func (m *Manager) serveWebUI(ctx context.Context, tailnetName string, srv *tsnet.Server, client *tsclient.Client, tags []string) {
-	const svcName = "svc:tailnetlink"
+// ownerID returns the instance id the running config set.
+func (m *Manager) ownerID() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.owner
+}
 
-	if _, err := ensureVIPService(ctx, client, tsclient.VIPService{
+// serveWebUI registers the web UI VIP service (svc:tailnetlink unless the
+// config names another) as TCP:80 in the given tailnet and proxies incoming
+// connections to the local web UI server. The service goes through the same
+// ownership guard as every other: if a service with that name exists and is
+// not ours, the UI is not published in this tailnet.
+func (m *Manager) serveWebUI(ctx context.Context, tailnetName string, srv *tsnet.Server, client *tsclient.Client, tags []string) {
+	m.mu.Lock()
+	svcName, owner := m.uiService, m.owner
+	m.mu.Unlock()
+
+	if _, err := ensureVIPService(ctx, client, owner, tsclient.VIPService{
 		Name:    svcName,
 		Ports:   []string{"tcp:80"},
 		Tags:    tags,
 		Comment: "managed by tailnetlink (web UI)",
-		Annotations: map[string]string{
-			"tailnetlink/managed": "true",
-		},
 	}); err != nil {
+		if errors.Is(err, ErrNameConflict) {
+			m.logger.Error("web UI not published", "tailnet", tailnetName, "err", err)
+			m.store.Log("error", fmt.Sprintf("[%s] web UI not published: %v", tailnetName, err), nil)
+			return
+		}
 		m.logger.Warn("web UI VIP: create failed", "tailnet", tailnetName, "err", err)
 		m.store.Log("warn", fmt.Sprintf("[%s] web UI VIP setup failed: %v", tailnetName, err), nil)
 		return

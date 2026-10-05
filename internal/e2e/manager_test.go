@@ -86,6 +86,7 @@ func (b *border) tailnetConfig(tn *tailnet, api *ctlBridge, secret string) confi
 func (b *border) config(rules ...config.BridgeRule) *config.Config {
 	s := b.secrets()
 	return &config.Config{
+		InstanceID: "e2e-" + b.sfx,
 		Tailnets: map[string]config.TailnetConfig{
 			b.srcName: b.tailnetConfig(b.src, b.srcAPI, s[0]),
 			b.dstName: b.tailnetConfig(b.dst, b.dstAPI, s[1]),

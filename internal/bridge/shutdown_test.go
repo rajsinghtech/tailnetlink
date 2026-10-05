@@ -2,7 +2,9 @@ package bridge
 
 import (
 	"context"
+	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,6 +43,8 @@ func newTestManager(t *testing.T) *testManager {
 	dest.AssignAddrs = false
 
 	m := New(state.New(), discardLogger(), "")
+	m.owner = testOwner
+	m.uiService = config.DefaultUIServiceName
 	m.servers["src"] = &tsnet.Server{}
 	m.servers["dest"] = &tsnet.Server{}
 	m.apiClients["src"] = src.Client()
@@ -102,15 +106,15 @@ func TestKnownBad_RuleShutdownDeletesServices(t *testing.T) {
 	}
 }
 
-// KNOWN-BAD: the worst case of the two problems above together. A local rule
-// whose derived short name ("app") matches an existing hand made service
-// takes it over, then deletes it on shutdown. Flip in roadmap PR 4 (no
-// takeover) and PR 6 (no delete on shutdown).
-func TestKnownBad_LocalRuleTakesOverAndDeletesForeignService(t *testing.T) {
+// A local rule whose derived short name ("app") matches a hand made service
+// reports a conflict and never touches it, neither while running nor on
+// shutdown.
+func TestLocalRuleLeavesForeignServiceAlone(t *testing.T) {
 	tm := newTestManager(t)
-	tm.dest.PutService(tsclient.VIPService{
+	foreign := tsclient.VIPService{
 		Name: "svc:app", Addrs: []string{"100.100.5.5"}, Comment: "hand made", Ports: []string{"tcp:3000"},
-	})
+	}
+	tm.dest.PutService(foreign)
 	rule := config.BridgeRule{
 		Name: "loc", DestTailnets: []string{"dest"},
 		LocalSources: []config.LocalSourceSpec{{Addr: "localhost:8080", DNSName: "app.example.net"}},
@@ -123,22 +127,22 @@ func TestKnownBad_LocalRuleTakesOverAndDeletesForeignService(t *testing.T) {
 		close(done)
 	}()
 
-	// The takeover keeps the foreign service's address, so per-device DNS
-	// setup does run here. It stops early because the fake gives the DNS VIP
-	// no address, before anything touches the unstarted tsnet node.
-	waitFor(t, 5*time.Second, "local bridge active", func() bool {
-		return tm.bridgeActive("loc/local/dest/localhost:8080")
+	waitFor(t, 5*time.Second, "local bridge error", func() bool {
+		for _, b := range tm.m.store.GetBridges() {
+			if b.ID == "loc/local/dest/localhost:8080" && b.Status == state.BridgeStatusError {
+				return strings.HasPrefix(b.Error, "name conflict")
+			}
+		}
+		return false
 	})
-	svc, _ := tm.dest.Service("svc:app")
-	if svc.Comment == "hand made" {
-		t.Errorf("expected the foreign service to be overwritten today, got %+v", svc)
-	}
-
 	cancel()
 	<-done
 
-	if _, ok := tm.dest.Service("svc:app"); ok {
-		t.Error("expected the (formerly foreign) service to be deleted on shutdown today")
+	if w := tm.dest.Writes(); len(w) != 0 {
+		t.Errorf("writes = %v, want none", callStrings(w))
+	}
+	if svc, _ := tm.dest.Service("svc:app"); !reflect.DeepEqual(svc, foreign) {
+		t.Errorf("foreign service changed: %+v", svc)
 	}
 }
 
@@ -149,11 +153,14 @@ func TestKnownBad_ReleaseSharedDNSDeletesOnLastRef(t *testing.T) {
 	tm := newTestManager(t)
 	const zone = "src.example"
 	const resolver = "100.100.0.53"
-	tm.dest.PutService(tsclient.VIPService{Name: "svc:tnl-dns-src-example-dns", Addrs: []string{resolver}})
+	tm.dest.PutService(tsclient.VIPService{
+		Name: "svc:tnl-dns-src-example-dns", Addrs: []string{resolver},
+		Annotations: map[string]string{"tailnetlink/owner": testOwner},
+	})
 	tm.dest.SetSplitDNS(zone, []string{resolver})
 
 	client := tm.m.apiClients["dest"]
-	ds := NewDNSServer(nil, client, "dns-src-example", nil, zone, discardLogger())
+	ds := NewDNSServer(nil, client, "dns-src-example", nil, testOwner, zone, discardLogger())
 	ds.svcName = "svc:tnl-dns-src-example-dns"
 	ds.AddRecord("web-1", mustAddr("100.100.0.1"))
 	tm.m.sharedDNS["dest/"+zone] = &sharedDNSEntry{
@@ -176,5 +183,78 @@ func TestKnownBad_ReleaseSharedDNSDeletesOnLastRef(t *testing.T) {
 	}
 	if tm.dest.HasZone(zone) {
 		t.Error("expected split-DNS zone to be removed today")
+	}
+}
+
+// sharedDNSFixture puts one shared DNS zone with refs references into the
+// manager, backed by a DNS VIP with the given annotations.
+func sharedDNSFixture(tm *testManager, refs int, annotations map[string]string, resolvers ...string) {
+	const zone = "src.example"
+	tm.dest.PutService(tsclient.VIPService{Name: "svc:tnl-dns-src-example-dns", Addrs: []string{resolvers[0]}, Annotations: annotations})
+	tm.dest.SetSplitDNS(zone, resolvers)
+	client := tm.m.apiClients["dest"]
+	ds := NewDNSServer(nil, client, "dns-src-example", nil, testOwner, zone, discardLogger())
+	ds.svcName = "svc:tnl-dns-src-example-dns"
+	tm.m.sharedDNS["dest/"+zone] = &sharedDNSEntry{
+		server: ds,
+		sdns:   NewSplitDNSConfigurator(client, zone, resolvers[0], discardLogger()),
+		refs:   refs,
+	}
+}
+
+// Removing our resolver leaves a resolver someone else added to the same
+// zone in place.
+func TestReleaseSharedDNSKeepsForeignResolver(t *testing.T) {
+	tm := newTestManager(t)
+	sharedDNSFixture(tm, 1, map[string]string{"tailnetlink/owner": testOwner}, "100.100.0.53", "100.99.0.1")
+	tm.m.releaseSharedDNS("dest", "src.example", "web-1")
+	if got := tm.dest.SplitDNS("src.example"); !slices.Equal(got, []string{"100.99.0.1"}) {
+		t.Errorf("resolvers = %v, want only the foreign one", got)
+	}
+}
+
+// If the DNS VIP is no longer ours, neither it nor its split-DNS entry is
+// touched.
+func TestReleaseSharedDNSLeavesForeignDNSService(t *testing.T) {
+	tm := newTestManager(t)
+	sharedDNSFixture(tm, 1, map[string]string{"tailnetlink/owner": "someone-else"}, "100.100.0.53")
+	tm.m.releaseSharedDNS("dest", "src.example", "web-1")
+	if w := tm.dest.Writes(); len(w) != 0 {
+		t.Errorf("writes = %v, want none", callStrings(w))
+	}
+	if !tm.dest.HasZone("src.example") {
+		t.Error("split-DNS zone was removed")
+	}
+}
+
+// A foreign service with the UI's name keeps the UI from being published in
+// that tailnet, and is left alone.
+func TestWebUIRefusesForeignService(t *testing.T) {
+	tm := newTestManager(t)
+	foreign := tsclient.VIPService{Name: "svc:tailnetlink", Addrs: []string{"100.100.8.8"}, Comment: "someone else's"}
+	tm.dest.PutService(foreign)
+	tm.m.serveWebUI(context.Background(), "dest", nil, tm.m.apiClients["dest"], []string{"tag:bridge"})
+	if w := tm.dest.Writes(); len(w) != 0 {
+		t.Errorf("writes = %v, want none", callStrings(w))
+	}
+	if svc, _ := tm.dest.Service("svc:tailnetlink"); !reflect.DeepEqual(svc, foreign) {
+		t.Errorf("foreign service changed: %+v", svc)
+	}
+	found := false
+	for _, l := range tm.m.store.GetLogs(10) {
+		found = found || (l.Level == "error" && strings.Contains(l.Message, "web UI not published") && strings.Contains(l.Message, "name conflict"))
+	}
+	if !found {
+		t.Error("conflict not reported")
+	}
+}
+
+// Any other failure creating the UI service is a warning, not a conflict.
+func TestWebUICreateError(t *testing.T) {
+	tm := newTestManager(t)
+	tm.dest.Fail("GET", "/vip-services/svc:tailnetlink", 500)
+	tm.m.serveWebUI(context.Background(), "dest", nil, tm.m.apiClients["dest"], nil)
+	if w := tm.dest.Writes(); len(w) != 0 {
+		t.Errorf("writes = %v, want none", callStrings(w))
 	}
 }
