@@ -412,15 +412,17 @@ func (l *link) run(t *testing.T, ctx context.Context, webUI bool) {
 	logger := slog.New(slog.NewTextHandler(l.logOutput, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	store := state.New()
 	l.store = store
+	var ui http.Handler
 	if webUI {
 		cs, err := config.NewStore(l.cfgPath)
 		if err != nil {
 			t.Fatal(err)
 		}
-		srv := server.New(l.webAddr, store, cs, logger)
+		srv := server.New(l.webAddr, store, cs.Get, logger)
+		ui = srv.Handler()
 		go srv.Run(mctx) //nolint:errcheck // stops with the manager
 	}
-	mgr := bridge.New(store, logger, l.webAddr)
+	mgr := bridge.New(store, logger, ui)
 	l.mgr = mgr
 	go mgr.Reconcile(mctx, l.cfg)
 	t.Cleanup(func() {
@@ -685,27 +687,45 @@ func TestRealRestartReusesNode(t *testing.T) {
 	}
 }
 
-// TestRealNoSecretsOverHTTP (problem 4, fixed by PR 7): neither the local
-// UI nor svc:tailnetlink reached from a client in dst hands out an OAuth
-// client secret, in any route, the SSE stream or a CORS header.
-func TestRealNoSecretsOverHTTP(t *testing.T) {
+// TestRealReadOnlyUI (problems 4 and 5, fixed by PRs 7 and 9): the
+// read-only UI is reachable locally and through svc:tailnetlink from a
+// client in each tailnet. Every read route works, the old config and write
+// routes are gone, every write is refused, and nothing served carries an
+// OAuth client secret, a client ID or a secret file path, in any route,
+// the SSE stream or a header.
+func TestRealReadOnlyUI(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 	l := startLink(t, ctx, linkOpts{webUI: true})
+	srcClient := join(t, ctx, l.src, "e2e-srcclient-"+l.sfx, "tag:e2e-client")
+	acceptRoutes(t, ctx, srcClient)
 
-	vip := l.waitService(t, ctx, "svc:tailnetlink")
-	viaVIP := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return l.client.srv.Dial(ctx, "tcp", netip.AddrPortFrom(vip, 80).String())
-		}},
+	via := func(n node, vip netip.Addr) *http.Client {
+		return &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return n.srv.Dial(ctx, "tcp", netip.AddrPortFrom(vip, 80).String())
+			}},
+		}
 	}
+	dstVIP := l.waitService(t, ctx, "svc:tailnetlink")
+	srcVIP := waitServiceIn(t, ctx, l.src, "svc:tailnetlink")
+
+	private := append([]string{}, l.secrets...)
+	for _, tc := range l.cfg.Tailnets {
+		private = append(private, tc.OAuth.ClientID, tc.OAuth.ClientSecretFile)
+	}
+	read := []string{"/", "/api/status", "/api/bridges", "/api/connections", "/api/logs"}
+	removed := []string{"/api/config", "/api/settings", "/api/tailnets", "/api/tailnets/detect",
+		"/api/tailnets/src-" + l.sfx + "/devices", "/api/bridge-rules", "/api/bridge-rules/e2e-" + l.sfx}
+
 	for where, c := range map[string]struct {
 		hc   *http.Client
 		base string
 	}{
-		"local": {&http.Client{Timeout: 30 * time.Second}, "http://" + l.webAddr},
-		"vip":   {viaVIP, "http://tailnetlink"},
+		"local":   {&http.Client{Timeout: 30 * time.Second}, "http://" + l.webAddr},
+		"dst vip": {via(l.client, dstVIP), "http://tailnetlink"},
+		"src vip": {via(srcClient, srcVIP), "http://tailnetlink"},
 	} {
 		var all strings.Builder
 		waitFor(t, 3*time.Minute, where+" UI reachable", func() bool {
@@ -716,12 +736,11 @@ func TestRealNoSecretsOverHTTP(t *testing.T) {
 			resp.Body.Close()
 			return resp.StatusCode == http.StatusOK
 		})
-		for _, p := range []string{"/", "/api/status", "/api/bridges", "/api/connections", "/api/logs", "/api/config",
-			"/api/tailnets/src-" + l.sfx + "/devices", "/api/tailnets/dst-" + l.sfx + "/services"} {
+		get := func(p string, want int) {
 			resp, err := c.hc.Get(c.base + p)
 			if err != nil {
 				t.Errorf("%s GET %s: %v", where, p, err)
-				continue
+				return
 			}
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
@@ -730,8 +749,33 @@ func TestRealNoSecretsOverHTTP(t *testing.T) {
 			if v := resp.Header.Get("Access-Control-Allow-Origin"); v != "" {
 				t.Errorf("%s GET %s: Access-Control-Allow-Origin = %q", where, p, v)
 			}
+			if resp.StatusCode != want {
+				t.Errorf("%s GET %s = %d, want %d", where, p, resp.StatusCode, want)
+			}
 		}
-		sctx, scancel := context.WithTimeout(ctx, 2*time.Second)
+		for _, p := range read {
+			get(p, http.StatusOK)
+		}
+		for _, p := range removed {
+			get(p, http.StatusNotFound)
+		}
+		for _, p := range append(append([]string{"/api/events"}, read...), removed...) {
+			for _, m := range []string{"POST", "PUT", "PATCH", "DELETE"} {
+				req, _ := http.NewRequestWithContext(ctx, m, c.base+p, strings.NewReader(`{"name":"x"}`))
+				req.Header.Set("Content-Type", "application/json")
+				resp, err := c.hc.Do(req)
+				if err != nil {
+					t.Errorf("%s %s %s: %v", where, m, p, err)
+					continue
+				}
+				_, _ = io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+				if resp.StatusCode != http.StatusMethodNotAllowed && resp.StatusCode != http.StatusNotFound {
+					t.Errorf("%s %s %s = %d, want 405 or 404", where, m, p, resp.StatusCode)
+				}
+			}
+		}
+		sctx, scancel := context.WithTimeout(ctx, 3*time.Second)
 		req, _ := http.NewRequestWithContext(sctx, http.MethodGet, c.base+"/api/events", nil)
 		if resp, err := c.hc.Do(req); err == nil {
 			sse, _ := io.ReadAll(resp.Body)
@@ -739,15 +783,41 @@ func TestRealNoSecretsOverHTTP(t *testing.T) {
 			all.Write(sse)
 		}
 		scancel()
-		for _, sec := range l.secrets {
+		for _, sec := range private {
+			if sec == "" {
+				continue
+			}
 			for _, form := range []string{sec, base64.StdEncoding.EncodeToString([]byte(sec)), base64.URLEncoding.EncodeToString([]byte(sec))} {
 				if strings.Contains(all.String(), form) {
-					t.Errorf("%s: an OAuth client secret leaked over HTTP", where)
+					t.Errorf("%s: a secret, client ID or secret path leaked over HTTP", where)
 				}
 			}
 		}
-		if !strings.Contains(all.String(), "client_secret_file") {
-			t.Errorf("%s: no config served", where)
+		if !strings.Contains(all.String(), "event: init") {
+			t.Errorf("%s: no SSE init event", where)
 		}
 	}
+	if svc := l.service(ctx, l.svc); svc == nil || len(svc.Ports) != 1 {
+		t.Errorf("bridged service changed: %+v", svc)
+	}
+}
+
+// waitServiceIn waits for a VIP service with an address in s.
+func waitServiceIn(t *testing.T, ctx context.Context, s *side, name string) netip.Addr {
+	t.Helper()
+	var vip netip.Addr
+	waitFor(t, 3*time.Minute, name+" in "+s.role, func() bool {
+		svc, err := s.client().VIPServices().Get(ctx, name)
+		if err != nil {
+			return false
+		}
+		for _, a := range svc.Addrs {
+			if ip, err := netip.ParseAddr(a); err == nil && ip.Is4() {
+				vip = ip
+				return true
+			}
+		}
+		return false
+	})
+	return vip
 }

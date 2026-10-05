@@ -21,6 +21,7 @@ import (
 
 	"github.com/rajsinghtech/tailnetlink/internal/bridge"
 	"github.com/rajsinghtech/tailnetlink/internal/config"
+	"github.com/rajsinghtech/tailnetlink/internal/server"
 	"github.com/rajsinghtech/tailnetlink/internal/state"
 	"tailscale.com/net/netns"
 )
@@ -151,15 +152,26 @@ type running struct {
 	logs   *lockedBuffer
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	cfgMu sync.Mutex
+	cfg   *config.Config // last config passed to reconcile
 }
 
-// startManager runs a bridge manager with cfg until the test ends.
+// startManager runs a bridge manager with cfg until the test ends. With
+// webAddr set it also runs the read-only UI: served locally on webAddr and
+// handed to the manager to publish in each tailnet, the way main does.
 func startManager(t *testing.T, cfg *config.Config, webAddr string) *running {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &running{store: state.New(), logs: &lockedBuffer{}, ctx: ctx, cancel: cancel}
+	r := &running{store: state.New(), logs: &lockedBuffer{}, ctx: ctx, cancel: cancel, cfg: cfg.Clone()}
 	r.logger = slog.New(slog.NewTextHandler(r.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	r.m = bridge.New(r.store, r.logger, webAddr)
+	var ui http.Handler
+	if webAddr != "" {
+		srv := server.New(webAddr, r.store, r.config, r.logger)
+		ui = srv.Handler()
+		go srv.Run(ctx) //nolint:errcheck // stops with the manager
+	}
+	r.m = bridge.New(r.store, r.logger, ui)
 	t.Cleanup(func() {
 		r.stop(t)
 		if t.Failed() {
@@ -168,6 +180,21 @@ func startManager(t *testing.T, cfg *config.Config, webAddr string) *running {
 	})
 	r.m.Reconcile(ctx, cfg)
 	return r
+}
+
+// config returns the last config given to the manager.
+func (r *running) config() *config.Config {
+	r.cfgMu.Lock()
+	defer r.cfgMu.Unlock()
+	return r.cfg.Clone()
+}
+
+// reconcile applies a new config.
+func (r *running) reconcile(cfg *config.Config) {
+	r.cfgMu.Lock()
+	r.cfg = cfg.Clone()
+	r.cfgMu.Unlock()
+	r.m.Reconcile(r.ctx, cfg)
 }
 
 // stop shuts the manager down the way SIGTERM does: cancel, then Close with

@@ -44,7 +44,7 @@ func newTestManager(t *testing.T) *testManager {
 	// needs a running tsnet node, is skipped.
 	dest.AssignAddrs = false
 
-	m := New(state.New(), discardLogger(), "")
+	m := New(state.New(), discardLogger(), nil)
 	m.owner = testOwner
 	m.uiService = config.DefaultUIServiceName
 	m.servers["src"] = &tsnet.Server{}

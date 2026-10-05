@@ -62,6 +62,15 @@ type UIConfig struct {
 	// ServiceName is the VIP service the UI is published as in each tailnet.
 	// Two instances that share a tailnet need different names.
 	ServiceName string `json:"service_name,omitempty"`
+
+	// Enabled turns the UI on or off: both the local listener and the VIP
+	// service. Unset means on.
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// UIEnabled reports whether the UI is on. It is unless ui.enabled is false.
+func (c *Config) UIEnabled() bool {
+	return c.UI.Enabled == nil || *c.UI.Enabled
 }
 
 // UIServiceName returns the UI service name, or the default.
@@ -91,11 +100,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("tailnet %q: %w", name, err)
 		}
 	}
-	return nil
+	return c.validateBridges()
 }
 
 type TailnetConfig struct {
-	OAuth   OAuthCreds `json:"oauth"`
+	OAuth   OAuthCreds `json:"oauth,omitzero"`
 	Tags    []string   `json:"tags,omitempty"`
 	Tailnet string     `json:"tailnet"`
 
@@ -250,38 +259,45 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
-func save(path string, cfg *Config) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
-	}
-	return os.WriteFile(path, data, 0600)
-}
-
-// Store is a thread-safe config holder that persists to a JSON file and
-// notifies listeners on change.
+// Store holds the config loaded from a file. The file is the only way to
+// change it: Watch reloads it when it changes and tells the OnChange
+// listeners. Nothing writes the file back.
 type Store struct {
 	mu       sync.RWMutex
 	path     string
 	cfg      *Config
 	onChange []func(*Config)
+	interval time.Duration
+	modTime  time.Time // of the file when cfg was loaded
 }
 
 // NewStore loads config from path (or starts empty) and returns a Store.
 func NewStore(path string) (*Store, error) {
+	var modTime time.Time
+	if fi, err := os.Stat(path); err == nil {
+		modTime = fi.ModTime()
+	}
 	cfg, err := Load(path)
 	if err != nil {
 		return nil, err
 	}
-	return &Store{path: path, cfg: cfg}, nil
+	return &Store{path: path, cfg: cfg, interval: 3 * time.Second, modTime: modTime}, nil
 }
 
-// Get returns a shallow copy of the current config. Safe for concurrent use.
+// Get returns a deep copy of the current config, so callers can't change
+// what other callers see.
 func (s *Store) Get() *Config {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	cp := *s.cfg
-	return &cp
+	return s.cfg.Clone()
+}
+
+// SetWatchInterval sets how often Watch checks the file. The default is
+// 3 s. Call it before Watch.
+func (s *Store) SetWatchInterval(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.interval = d
 }
 
 // Watch polls the config file for external edits (e.g. direct JSON edits) and
@@ -291,13 +307,11 @@ func (s *Store) Watch(ctx context.Context, logger interface {
 	Warn(string, ...any)
 }) {
 	s.mu.RLock()
-	lastMod := time.Time{}
-	if fi, err := os.Stat(s.path); err == nil {
-		lastMod = fi.ModTime()
-	}
+	interval := s.interval
+	lastMod := s.modTime // so an edit made before Watch starts is not missed
 	s.mu.RUnlock()
 
-	ticker := time.NewTicker(3 * time.Second)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -320,59 +334,58 @@ func (s *Store) Watch(ctx context.Context, logger interface {
 			s.mu.Unlock()
 			logger.Info("config reloaded from file")
 			for _, cb := range listeners {
-				go cb(cfg)
+				go cb(cfg.Clone())
 			}
 		}
 	}
 }
 
-// OnChange registers a callback invoked (in a goroutine) after each successful Update.
+// OnChange registers a callback, run in its own goroutine with its own copy
+// of the config, after each reload from the file.
 func (s *Store) OnChange(fn func(*Config)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onChange = append(s.onChange, fn)
 }
 
-// Update applies fn to a copy of the config, persists it, and notifies listeners.
-// fn must not retain a reference to cfg after returning.
-func (s *Store) Update(fn func(*Config) error) error {
-	s.mu.Lock()
-
-	cp := *s.cfg
-	if cp.Tailnets == nil {
-		cp.Tailnets = make(map[string]TailnetConfig)
+// Clone returns a deep copy of c.
+func (c *Config) Clone() *Config {
+	cp := *c
+	if c.UI.Enabled != nil {
+		v := *c.UI.Enabled
+		cp.UI.Enabled = &v
 	}
-	if cp.Bridges == nil {
-		cp.Bridges = []BridgeRule{}
+	if c.Tailnets != nil {
+		cp.Tailnets = make(map[string]TailnetConfig, len(c.Tailnets))
+		for k, tc := range c.Tailnets {
+			tc.Tags = slices.Clone(tc.Tags)
+			cp.Tailnets[k] = tc
+		}
 	}
-	if err := fn(&cp); err != nil {
-		s.mu.Unlock()
-		return err
+	if c.Bridges != nil {
+		cp.Bridges = make([]BridgeRule, len(c.Bridges))
+		for i, b := range c.Bridges {
+			b.DestTailnets = slices.Clone(b.DestTailnets)
+			b.SourceDevices = slices.Clone(b.SourceDevices)
+			b.SourceServices = slices.Clone(b.SourceServices)
+			b.LocalSources = slices.Clone(b.LocalSources)
+			b.Ports = slices.Clone(b.Ports)
+			cp.Bridges[i] = b
+		}
 	}
-	if err := cp.Validate(); err != nil {
-		s.mu.Unlock()
-		return err
-	}
-	if err := save(s.path, &cp); err != nil {
-		s.mu.Unlock()
-		return fmt.Errorf("persist config: %w", err)
-	}
-	s.cfg = &cp
-	listeners := s.onChange
-	s.mu.Unlock()
-
-	for _, cb := range listeners {
-		go cb(&cp)
-	}
-	return nil
+	return &cp
 }
 
-// JSON returns the current config as indented JSON. It backs GET
-// /api/config and the SSE init event. The config never holds a secret, only
-// where to read it from, so this is safe to serve.
-func (s *Store) JSON() []byte {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	data, _ := json.MarshalIndent(s.cfg, "", "  ")
+// PublicJSON returns the config as indented JSON with every tailnet's oauth
+// block left out. It is what the read-only UI shows. The config never holds
+// a secret anyway, only where to read one, but the UI is published in every
+// connected tailnet and has no use for client IDs or file paths.
+func (c *Config) PublicJSON() []byte {
+	cp := c.Clone()
+	for k, tc := range cp.Tailnets {
+		tc.OAuth = OAuthCreds{}
+		cp.Tailnets[k] = tc
+	}
+	data, _ := json.MarshalIndent(cp, "", "  ")
 	return data
 }

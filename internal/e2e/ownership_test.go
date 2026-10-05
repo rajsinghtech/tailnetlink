@@ -163,7 +163,6 @@ func TestManagerUIServiceConflict(t *testing.T) {
 	cfg := b.config()
 	webAddr := freeAddr(t)
 	r := startManager(t, cfg, webAddr)
-	startUI(t, r, cfg, webAddr)
 
 	vip := waitVIP(t, b.srcAPI, "svc:tailnetlink")
 	if s, _ := b.srcAPI.Service("svc:tailnetlink"); s.Annotations["tailnetlink/owner"] != cfg.InstanceID {

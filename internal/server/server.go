@@ -8,32 +8,30 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"mime"
 	"net"
 	"net/http"
-	"net/netip"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/rajsinghtech/tailnetlink/internal/config"
 	"github.com/rajsinghtech/tailnetlink/internal/state"
-	"github.com/rajsinghtech/tailnetlink/internal/tsapi"
-	tsclient "tailscale.com/client/tailscale/v2"
 )
 
 //go:embed web
 var webFS embed.FS
 
+// Server serves the read-only web UI and its API. It has no write routes:
+// the config file is the only way to change anything.
 type Server struct {
-	store    *state.Store
-	cfgStore *config.Store
-	logger   *slog.Logger
-	addr     string
+	store  *state.Store
+	config func() *config.Config
+	logger *slog.Logger
+	addr   string
 }
 
-func New(addr string, store *state.Store, cfgStore *config.Store, logger *slog.Logger) *Server {
-	return &Server{addr: addr, store: store, cfgStore: cfgStore, logger: logger}
+// New returns a server for addr. config returns the running config; only
+// its public view (no oauth blocks) is ever served.
+func New(addr string, store *state.Store, config func() *config.Config, logger *slog.Logger) *Server {
+	return &Server{addr: addr, store: store, config: config, logger: logger}
 }
 
 // Run listens on the configured address and serves until ctx is done.
@@ -77,7 +75,8 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 // shutdownGrace is how long Serve waits for open requests after ctx is done.
 var shutdownGrace = 5 * time.Second
 
-// Handler returns the HTTP handler for the UI and its API.
+// Handler returns the HTTP handler for the UI and its API. Only GET and
+// HEAD are allowed; every other method gets 405.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
@@ -86,30 +85,24 @@ func (s *Server) Handler() http.Handler {
 		panic(err) // the embedded tree always has web/
 	}
 	mux.Handle("/", http.FileServer(http.FS(webRoot)))
-
-	// Read-only status / data
-	mux.HandleFunc("/api/status", s.api(s.handleStatus))
-	mux.HandleFunc("/api/bridges", s.api(s.handleBridges))
-	mux.HandleFunc("/api/connections", s.api(s.handleConns))
-	mux.HandleFunc("/api/logs", s.api(s.handleLogs))
-	mux.HandleFunc("/api/config", s.api(s.handleConfig))
-
-	// Tailnet CRUD: /api/tailnets  /api/tailnets/{name}
-	mux.HandleFunc("/api/tailnets/detect", s.api(s.handleTailnetDetect))
-	mux.HandleFunc("/api/tailnets/", s.api(s.handleTailnetByName))
-	mux.HandleFunc("/api/tailnets", s.api(s.handleTailnets))
-
-	// Bridge CRUD: /api/bridge-rules  /api/bridge-rules/{name}
-	mux.HandleFunc("/api/bridge-rules/", s.api(s.handleBridgeRuleByName))
-	mux.HandleFunc("/api/bridge-rules", s.api(s.handleBridgeRules))
-
-	// Settings
-	mux.HandleFunc("/api/settings", s.api(s.handleSettings))
-
-	// SSE
+	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/api/bridges", s.handleBridges)
+	mux.HandleFunc("/api/connections", s.handleConns)
+	mux.HandleFunc("/api/logs", s.handleLogs)
 	mux.HandleFunc("/api/events", s.handleSSE)
+	return readOnly(mux)
+}
 
-	return mux
+// readOnly rejects every method but GET and HEAD.
+func readOnly(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "read-only", http.StatusMethodNotAllowed)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 // ── Status / data handlers ────────────────────────────────────────────────────
@@ -129,391 +122,6 @@ func (s *Server) handleConns(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.store.GetLogs(100))
 }
-
-func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(s.cfgStore.JSON())
-}
-
-// ── Tailnet CRUD ──────────────────────────────────────────────────────────────
-
-// POST /api/tailnets/detect — probe OAuth creds and return the resolved tailnet name.
-// Uses Tailnet: "-" which the API resolves to the token's tailnet, then reads a device
-// name to infer the ts.net domain.
-func (s *Server) handleTailnetDetect(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var creds config.OAuthCreds
-	if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
-		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if err := checkCreds(creds); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	c := clientForTailnet(config.TailnetConfig{OAuth: creds})
-	devices, err := c.Devices().List(r.Context())
-	if err != nil {
-		http.Error(w, "credentials rejected or insufficient scope: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// Extract tailnet domain from the first device FQDN (e.g. "host.org.ts.net" → "org.ts.net").
-	tailnet := ""
-	for _, d := range devices {
-		if idx := strings.Index(d.Name, "."); idx >= 0 {
-			tailnet = d.Name[idx+1:]
-			break
-		}
-	}
-	if tailnet == "" {
-		http.Error(w, "unable to detect tailnet domain: no devices found in tailnet", http.StatusBadRequest)
-		return
-	}
-
-	writeJSON(w, map[string]string{"tailnet": tailnet})
-}
-
-// POST /api/tailnets — add a tailnet
-func (s *Server) handleTailnets(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var body struct {
-		Name    string            `json:"name"`
-		Tailnet string            `json:"tailnet"`
-		OAuth   config.OAuthCreds `json:"oauth"`
-		Tags    []string          `json:"tags"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if body.Name == "" || body.Tailnet == "" {
-		http.Error(w, "name and tailnet are required", http.StatusBadRequest)
-		return
-	}
-	if err := checkCreds(body.OAuth); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	if err := s.cfgStore.Update(func(cfg *config.Config) error {
-		if _, exists := cfg.Tailnets[body.Name]; exists {
-			return fmt.Errorf("tailnet %q already exists", body.Name)
-		}
-		cfg.Tailnets[body.Name] = config.TailnetConfig{
-			OAuth:   body.OAuth,
-			Tailnet: body.Tailnet,
-			Tags:    body.Tags,
-		}
-		return nil
-	}); err != nil {
-		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	w.Write(s.cfgStore.JSON())
-}
-
-// GET /api/tailnets/{name}/devices — list live devices from the tailnet's API
-func (s *Server) handleTailnetDevices(w http.ResponseWriter, name string, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	tc, ok := s.cfgStore.Get().Tailnets[name]
-	if !ok {
-		http.Error(w, fmt.Sprintf("tailnet %q not found", name), http.StatusNotFound)
-		return
-	}
-	devices, err := clientForTailnet(tc).Devices().List(r.Context())
-	if err != nil {
-		http.Error(w, "failed to list devices: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-
-	type devInfo struct {
-		Name     string   `json:"name"`
-		Hostname string   `json:"hostname"`
-		IP       string   `json:"ip"`
-		Tags     []string `json:"tags"`
-	}
-	out := make([]devInfo, 0, len(devices))
-	for _, d := range devices {
-		var ip string
-		for _, a := range d.Addresses {
-			if len(a) > 0 {
-				ip = a
-				break
-			}
-		}
-		out = append(out, devInfo{Name: d.Name, Hostname: d.Hostname, IP: ip, Tags: d.Tags})
-	}
-	writeJSON(w, out)
-}
-
-// GET /api/tailnets/{name}/services — list VIP services from the tailnet API
-func (s *Server) handleTailnetServices(w http.ResponseWriter, name string, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	tc, ok := s.cfgStore.Get().Tailnets[name]
-	if !ok {
-		http.Error(w, fmt.Sprintf("tailnet %q not found", name), http.StatusNotFound)
-		return
-	}
-	svcs, err := clientForTailnet(tc).VIPServices().List(r.Context())
-	if err != nil {
-		http.Error(w, "failed to list services: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-
-	type svcInfo struct {
-		Name  string   `json:"name"`
-		Addrs []string `json:"addrs"`
-		Ports []string `json:"ports"`
-		Tags  []string `json:"tags"`
-	}
-	out := make([]svcInfo, 0, len(svcs))
-	for _, svc := range svcs {
-		out = append(out, svcInfo{Name: svc.Name, Addrs: svc.Addrs, Ports: svc.Ports, Tags: svc.Tags})
-	}
-	writeJSON(w, out)
-}
-
-// DELETE/PUT /api/tailnets/{name}
-func (s *Server) handleTailnetByName(w http.ResponseWriter, r *http.Request) {
-	rest := strings.TrimPrefix(r.URL.Path, "/api/tailnets/")
-	if rest == "" {
-		http.Error(w, "name required", http.StatusBadRequest)
-		return
-	}
-
-	// Sub-resource: /api/tailnets/{name}/devices or /api/tailnets/{name}/services
-	if name, sub, ok := strings.Cut(rest, "/"); ok {
-		switch sub {
-		case "devices":
-			s.handleTailnetDevices(w, name, r)
-		case "services":
-			s.handleTailnetServices(w, name, r)
-		default:
-			http.Error(w, "not found", http.StatusNotFound)
-		}
-		return
-	}
-	name := rest
-
-	switch r.Method {
-	case http.MethodDelete:
-		if err := s.cfgStore.Update(func(cfg *config.Config) error {
-			if _, ok := cfg.Tailnets[name]; !ok {
-				return fmt.Errorf("tailnet %q not found", name)
-			}
-			delete(cfg.Tailnets, name)
-			return nil
-		}); err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-
-	case http.MethodPut:
-		var body config.TailnetConfig
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := checkCreds(body.OAuth); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := s.cfgStore.Update(func(cfg *config.Config) error {
-			cfg.Tailnets[name] = body
-			return nil
-		}); err != nil {
-			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(s.cfgStore.JSON())
-
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-// ── Bridge rule CRUD ──────────────────────────────────────────────────────────
-
-// POST /api/bridge-rules — add a bridge rule
-func (s *Server) handleBridgeRules(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var rule config.BridgeRule
-	if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
-		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if err := validateBridgeRule(rule); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	if err := s.cfgStore.Update(func(cfg *config.Config) error {
-		for _, b := range cfg.Bridges {
-			if b.Name == rule.Name {
-				return fmt.Errorf("bridge rule %q already exists", rule.Name)
-			}
-		}
-		if len(rule.LocalSources) == 0 {
-			if _, ok := cfg.Tailnets[rule.SourceTailnet]; !ok {
-				return fmt.Errorf("source_tailnet %q not found", rule.SourceTailnet)
-			}
-		}
-		for _, dt := range rule.DestTailnets {
-			if _, ok := cfg.Tailnets[dt]; !ok {
-				return fmt.Errorf("dest_tailnet %q not found", dt)
-			}
-		}
-		if err := checkShortNameConflicts(cfg, rule, ""); err != nil {
-			return err
-		}
-		cfg.Bridges = append(cfg.Bridges, rule)
-		return nil
-	}); err != nil {
-		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	w.Write(s.cfgStore.JSON())
-}
-
-// PUT /api/bridge-rules/{name}  DELETE /api/bridge-rules/{name}
-func (s *Server) handleBridgeRuleByName(w http.ResponseWriter, r *http.Request) {
-	name := strings.TrimPrefix(r.URL.Path, "/api/bridge-rules/")
-	if name == "" {
-		http.Error(w, "name required", http.StatusBadRequest)
-		return
-	}
-
-	switch r.Method {
-	case http.MethodDelete:
-		if err := s.cfgStore.Update(func(cfg *config.Config) error {
-			out := make([]config.BridgeRule, 0, len(cfg.Bridges))
-			found := false
-			for _, b := range cfg.Bridges {
-				if b.Name == name {
-					found = true
-					continue
-				}
-				out = append(out, b)
-			}
-			if !found {
-				return fmt.Errorf("bridge rule %q not found", name)
-			}
-			cfg.Bridges = out
-			return nil
-		}); err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-
-	case http.MethodPut:
-		var rule config.BridgeRule
-		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
-			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		rule.Name = name
-		if err := validateBridgeRule(rule); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := s.cfgStore.Update(func(cfg *config.Config) error {
-			for _, dt := range rule.DestTailnets {
-				if _, ok := cfg.Tailnets[dt]; !ok {
-					return fmt.Errorf("dest_tailnet %q not found", dt)
-				}
-			}
-			for i, b := range cfg.Bridges {
-				if b.Name == name {
-					if err := checkShortNameConflicts(cfg, rule, name); err != nil {
-						return err
-					}
-					cfg.Bridges[i] = rule
-					return nil
-				}
-			}
-			return fmt.Errorf("bridge rule %q not found", name)
-		}); err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(s.cfgStore.JSON())
-
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-// ── Settings ──────────────────────────────────────────────────────────────────
-
-func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPut {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var body struct {
-		PollInterval string `json:"poll_interval"`
-		DialTimeout  string `json:"dial_timeout"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	if err := s.cfgStore.Update(func(cfg *config.Config) error {
-		if body.PollInterval != "" {
-			d, err := time.ParseDuration(body.PollInterval)
-			if err != nil {
-				return fmt.Errorf("invalid poll_interval: %w", err)
-			}
-			cfg.PollInterval = config.Duration{Duration: d}
-		}
-		if body.DialTimeout != "" {
-			d, err := time.ParseDuration(body.DialTimeout)
-			if err != nil {
-				return fmt.Errorf("invalid dial_timeout: %w", err)
-			}
-			cfg.DialTimeout = config.Duration{Duration: d}
-		}
-		return nil
-	}); err != nil {
-		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(s.cfgStore.JSON())
-}
-
-// ── SSE ───────────────────────────────────────────────────────────────────────
 
 func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -538,7 +146,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 		Bridges:     s.store.GetBridges(),
 		Connections: s.store.GetConns(),
 		Logs:        s.store.GetLogs(50),
-		Config:      s.cfgStore.JSON(),
+		Config:      s.config().PublicJSON(),
 	}
 	writeSSEEvent(w, state.EventInit, init)
 	flusher.Flush()
@@ -566,40 +174,6 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// api wraps an API handler. Anything other than GET or HEAD must be sent
-// as application/json. A browser can't send that cross-origin without a
-// CORS preflight, which this server never answers, so other sites can't
-// drive the API from a visitor's browser.
-func (s *Server) api(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-			if err != nil || mt != "application/json" {
-				http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
-				return
-			}
-		}
-		h(w, r)
-	}
-}
-
-// checkCreds rejects OAuth credentials sent to the API that carry an
-// inline secret or no way to find one.
-func checkCreds(creds config.OAuthCreds) error {
-	cfg := config.Config{InstanceID: "check", Tailnets: map[string]config.TailnetConfig{"new": {OAuth: creds}}}
-	if err := cfg.Validate(); err != nil {
-		return err
-	}
-	if !(config.TailnetConfig{OAuth: creds}).HasAuth() {
-		return errors.New("oauth.client_id and one of oauth.client_secret_file or oauth.client_secret_env are required")
-	}
-	return nil
-}
-
-func clientForTailnet(tc config.TailnetConfig) *tsclient.Client {
-	return tsapi.NewClient(tc)
-}
-
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
@@ -608,152 +182,4 @@ func writeJSON(w http.ResponseWriter, v any) {
 func writeSSEEvent(w http.ResponseWriter, eventType string, payload any) {
 	data, _ := json.Marshal(payload)
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, data)
-}
-
-// checkShortNameConflicts returns an error if the incoming rule has a short_name
-// that already exists in any other rule for the same dest tailnet. Pass skipRule=""
-// on create, or the rule's own name on update (to exclude self from the check).
-func checkShortNameConflicts(cfg *config.Config, incoming config.BridgeRule, skipRule string) error {
-	// Collect short_names already in use per dest tailnet (excluding skipRule).
-	used := map[string]map[string]bool{} // dest → set of short_names
-	for _, b := range cfg.Bridges {
-		if b.Name == skipRule {
-			continue
-		}
-		for _, dest := range b.DestTailnets {
-			for _, spec := range b.SourceDevices {
-				if spec.ShortName != "" {
-					if used[dest] == nil {
-						used[dest] = map[string]bool{}
-					}
-					used[dest][spec.ShortName] = true
-				}
-			}
-			for _, spec := range b.SourceServices {
-				if spec.ShortName != "" {
-					if used[dest] == nil {
-						used[dest] = map[string]bool{}
-					}
-					used[dest][spec.ShortName] = true
-				}
-			}
-			for _, spec := range b.LocalSources {
-				if spec.ShortName != "" {
-					if used[dest] == nil {
-						used[dest] = map[string]bool{}
-					}
-					used[dest][spec.ShortName] = true
-				}
-			}
-		}
-	}
-
-	// Check incoming rule against collected set, and also within itself.
-	selfSeen := map[string]map[string]bool{} // dest → set within incoming rule
-	for _, dest := range incoming.DestTailnets {
-		for _, spec := range incoming.SourceDevices {
-			if spec.ShortName == "" {
-				continue
-			}
-			if used[dest][spec.ShortName] {
-				return fmt.Errorf("short_name %q already used in dest tailnet %q", spec.ShortName, dest)
-			}
-			if selfSeen[dest] == nil {
-				selfSeen[dest] = map[string]bool{}
-			}
-			if selfSeen[dest][spec.ShortName] {
-				return fmt.Errorf("short_name %q appears more than once for dest tailnet %q", spec.ShortName, dest)
-			}
-			selfSeen[dest][spec.ShortName] = true
-		}
-		for _, spec := range incoming.SourceServices {
-			if spec.ShortName == "" {
-				continue
-			}
-			if used[dest][spec.ShortName] {
-				return fmt.Errorf("short_name %q already used in dest tailnet %q", spec.ShortName, dest)
-			}
-			if selfSeen[dest] == nil {
-				selfSeen[dest] = map[string]bool{}
-			}
-			if selfSeen[dest][spec.ShortName] {
-				return fmt.Errorf("short_name %q appears more than once for dest tailnet %q", spec.ShortName, dest)
-			}
-			selfSeen[dest][spec.ShortName] = true
-		}
-		for _, spec := range incoming.LocalSources {
-			if spec.ShortName == "" {
-				continue
-			}
-			if used[dest][spec.ShortName] {
-				return fmt.Errorf("short_name %q already used in dest tailnet %q", spec.ShortName, dest)
-			}
-			if selfSeen[dest] == nil {
-				selfSeen[dest] = map[string]bool{}
-			}
-			if selfSeen[dest][spec.ShortName] {
-				return fmt.Errorf("short_name %q appears more than once for dest tailnet %q", spec.ShortName, dest)
-			}
-			selfSeen[dest][spec.ShortName] = true
-		}
-	}
-	return nil
-}
-
-// validateBridgeRule validates a bridge rule for both tailnet and local-source rules.
-func validateBridgeRule(rule config.BridgeRule) error {
-	if rule.Name == "" {
-		return fmt.Errorf("name is required")
-	}
-	if len(rule.DestTailnets) == 0 {
-		return fmt.Errorf("dest_tailnets is required")
-	}
-	if len(rule.LocalSources) > 0 {
-		if rule.SourceTailnet != "" || rule.SourceTag != "" || len(rule.SourceDevices) > 0 || len(rule.SourceServices) > 0 || len(rule.Ports) > 0 {
-			return fmt.Errorf("local rules must not set source_tailnet, source_tag, source_devices, source_services, or ports")
-		}
-		return validateLocalSources(rule.LocalSources)
-	}
-	if rule.SourceTailnet == "" {
-		return fmt.Errorf("source_tailnet is required for non-local rules")
-	}
-	if len(rule.Ports) == 0 {
-		return fmt.Errorf("ports is required for non-local rules")
-	}
-	if rule.SourceTag == "" && len(rule.SourceDevices) == 0 && len(rule.SourceServices) == 0 {
-		return fmt.Errorf("either source_tag, source_devices, or source_services must be specified")
-	}
-	return nil
-}
-
-// validateLocalSources checks each LocalSourceSpec in isolation.
-func validateLocalSources(sources []config.LocalSourceSpec) error {
-	for i, src := range sources {
-		host, portStr, err := net.SplitHostPort(src.Addr)
-		if err != nil {
-			return fmt.Errorf("local_sources[%d].addr %q is invalid: %w", i, src.Addr, err)
-		}
-		p, err := strconv.Atoi(portStr)
-		if err != nil || p <= 0 || p > 65535 {
-			return fmt.Errorf("local_sources[%d].addr %q has invalid port", i, src.Addr)
-		}
-		if src.ExposePort > 65535 {
-			return fmt.Errorf("local_sources[%d].expose_port %d is out of range", i, src.ExposePort)
-		}
-		if isLocalHostServer(host) && src.DNSName == "" {
-			return fmt.Errorf("local_sources[%d].addr %q requires dns_name (cannot derive from localhost/IP)", i, src.Addr)
-		}
-	}
-	return nil
-}
-
-// isLocalHostServer mirrors bridge.isLocalHost for use in the server package.
-// Keep in sync with bridge.isLocalHost if either is updated.
-func isLocalHostServer(host string) bool {
-	h := strings.ToLower(host)
-	if h == "localhost" || h == "127.0.0.1" || h == "::1" || h == "0.0.0.0" {
-		return true
-	}
-	_, err := netip.ParseAddr(h)
-	return err == nil
 }

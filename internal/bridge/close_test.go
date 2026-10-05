@@ -55,7 +55,7 @@ func TestManagerCloseStopsEverything(t *testing.T) {
 
 // A rule that never exits makes Close give up when ctx is done.
 func TestManagerCloseRespectsTimeout(t *testing.T) {
-	m := New(nil, discardLogger(), "")
+	m := New(nil, discardLogger(), nil)
 	m.rules["stuck"] = func() {}
 	m.ruleDone["stuck"] = make(chan struct{}) // never closed
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)

@@ -1,6 +1,8 @@
 package bridge
 
 import (
+	"context"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,7 +13,7 @@ import (
 )
 
 func TestNodeDirPersistent(t *testing.T) {
-	m := New(nil, discardLogger(), "")
+	m := New(nil, discardLogger(), nil)
 	base := t.TempDir()
 	dir, err := m.nodeDir("work", config.TailnetConfig{}, base)
 	if err != nil {
@@ -34,7 +36,7 @@ func TestNodeDirPersistent(t *testing.T) {
 }
 
 func TestNodeDirDefaults(t *testing.T) {
-	m := New(nil, discardLogger(), "")
+	m := New(nil, discardLogger(), nil)
 	def := t.TempDir()
 	m.SetDefaultStateDir(def)
 	dir, err := m.nodeDir("home", config.TailnetConfig{}, "")
@@ -57,7 +59,7 @@ func TestNodeDirDefaults(t *testing.T) {
 }
 
 func TestNodeDirEphemeralIsFresh(t *testing.T) {
-	m := New(nil, discardLogger(), "")
+	m := New(nil, discardLogger(), nil)
 	base := t.TempDir()
 	a, err := m.nodeDir("work", config.TailnetConfig{Ephemeral: true}, base)
 	if err != nil {
@@ -72,7 +74,7 @@ func TestNodeDirEphemeralIsFresh(t *testing.T) {
 }
 
 func TestNodeDirError(t *testing.T) {
-	m := New(nil, discardLogger(), "")
+	m := New(nil, discardLogger(), nil)
 	f := filepath.Join(t.TempDir(), "file")
 	_ = os.WriteFile(f, nil, 0o600)
 	if _, err := m.nodeDir("work", config.TailnetConfig{}, f); err == nil {
@@ -98,7 +100,6 @@ func TestHasNodeState(t *testing.T) {
 
 func uiTestManager(t *testing.T) *testManager {
 	tm := newTestManager(t)
-	tm.m.webAddr = "127.0.0.1:1"
 	tm.dest.PutService(tsclient.VIPService{
 		Name:        config.DefaultUIServiceName,
 		Annotations: map[string]string{annotationOwner: testOwner, annotationManaged: "true"},
@@ -140,7 +141,6 @@ func TestRemoveTailnetDeletesUIService(t *testing.T) {
 
 func TestRemoveTailnetLeavesForeignUIService(t *testing.T) {
 	tm := newTestManager(t)
-	tm.m.webAddr = "127.0.0.1:1"
 	tm.dest.PutService(tsclient.VIPService{
 		Name:        config.DefaultUIServiceName,
 		Annotations: map[string]string{annotationOwner: "someone-else"},
@@ -156,19 +156,45 @@ func TestRemoveTailnetLeavesForeignUIService(t *testing.T) {
 	}
 }
 
-func TestUIDialAddr(t *testing.T) {
-	for in, want := range map[string]string{
-		"127.0.0.1:8888": "127.0.0.1:8888",
-		":9000":          "127.0.0.1:9000",
-		"0.0.0.0:80":     "127.0.0.1:80",
-		"[::]:80":        "127.0.0.1:80",
-		"10.1.2.3:8080":  "10.1.2.3:8080",
-		"[fd00::1]:8080": "[fd00::1]:8080",
-		"localhost:1234": "127.0.0.1:1234",
-		"":               "127.0.0.1:8888",
-	} {
-		if got := uiDialAddr(in); got != want {
-			t.Errorf("uiDialAddr(%q) = %q, want %q", in, got, want)
+// Turning ui.enabled off in the config withdraws the UI from every running
+// tailnet: our UI service is deleted and nothing else is touched.
+func TestReconcileUIDisabledRemovesUIService(t *testing.T) {
+	tm := uiTestManager(t)
+	tm.m.ui = http.NotFoundHandler()
+	tm.m.uiOn = true
+	tm.m.cfg.InstanceID = testOwner
+	off := false
+	cfg := tm.m.cfg.Clone()
+	cfg.UI.Enabled = &off
+	tm.dest.ResetCalls()
+	tm.m.Reconcile(context.Background(), cfg)
+	if _, ok := tm.dest.Service(config.DefaultUIServiceName); ok {
+		t.Error("UI service still there after ui.enabled=false")
+	}
+	if tm.m.uiOn {
+		t.Error("uiOn still set")
+	}
+	for _, w := range tm.dest.Writes() {
+		if w.Method != http.MethodDelete || !strings.Contains(w.Path, "svc:tailnetlink") {
+			t.Errorf("unexpected write %s %s", w.Method, w.Path)
 		}
+	}
+	if _, ok := tm.m.servers["dest"]; !ok {
+		t.Error("tailnet stopped; only the UI should go")
+	}
+}
+
+// A manager without a UI handler never publishes the UI, whatever the
+// config says.
+func TestReconcileNoUIHandler(t *testing.T) {
+	tm := uiTestManager(t)
+	tm.m.cfg.InstanceID = testOwner
+	tm.dest.ResetCalls()
+	tm.m.Reconcile(context.Background(), tm.m.cfg.Clone())
+	if tm.m.uiOn {
+		t.Error("uiOn set without a handler")
+	}
+	if w := tm.dest.Writes(); len(w) != 0 {
+		t.Errorf("writes = %v", w)
 	}
 }
