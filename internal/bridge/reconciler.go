@@ -115,14 +115,3 @@ func (r *Reconciler) Delete(ctx context.Context, srcTailnet string, dev Device, 
 	r.logger.Info("VIP service deleted", "name", svcName, "source", dev.FQDN)
 	return nil
 }
-
-// List returns all currently managed VIP services.
-func (r *Reconciler) List() []*VIPService {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make([]*VIPService, 0, len(r.services))
-	for _, svc := range r.services {
-		out = append(out, svc)
-	}
-	return out
-}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -32,6 +33,9 @@ func (c *Config) validateBridges() error {
 				used[dest] = map[string]string{}
 			}
 			for _, sn := range r.shortNames() {
+				if !shortNameRe.MatchString(sn) {
+					return fmt.Errorf("bridge rule %q: short_name %q must be 1 to 63 lowercase letters, digits or dashes, starting and ending with a letter or digit", r.Name, sn)
+				}
 				if other, ok := used[dest][sn]; ok {
 					if other == r.Name {
 						return fmt.Errorf("bridge rule %q: short_name %q appears more than once for dest tailnet %q", r.Name, sn, dest)
@@ -50,6 +54,9 @@ func (c *Config) validateBridges() error {
 	return nil
 }
 
+// shortNameRe is one DNS label, so svc:<short_name> is a valid service name.
+var shortNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
 func (r BridgeRule) shortNames() []string {
 	var out []string
 	for _, d := range r.SourceDevices {
@@ -63,8 +70,8 @@ func (r BridgeRule) shortNames() []string {
 		}
 	}
 	for _, l := range r.LocalSources {
-		if l.ShortName != "" {
-			out = append(out, l.ShortName)
+		if sn := l.EffectiveShortName(); sn != "" {
+			out = append(out, sn)
 		}
 	}
 	return out
@@ -106,6 +113,9 @@ func validateLocalSources(sources []LocalSourceSpec) error {
 		if err != nil {
 			return fmt.Errorf("local_sources[%d].addr %q is invalid: %w", i, src.Addr, err)
 		}
+		if host == "" {
+			return fmt.Errorf("local_sources[%d].addr %q has no host", i, src.Addr)
+		}
 		p, err := strconv.Atoi(portStr)
 		if err != nil || p <= 0 || p > 65535 {
 			return fmt.Errorf("local_sources[%d].addr %q has invalid port", i, src.Addr)
@@ -129,4 +139,57 @@ func isLocalOrIP(host string) bool {
 	}
 	_, err := netip.ParseAddr(h)
 	return err == nil
+}
+
+// EffectiveDNSName is the name a local source is published under in the
+// destination tailnet: dns_name, or else the host in addr. A localhost or
+// bare-IP addr needs dns_name.
+func (l LocalSourceSpec) EffectiveDNSName() (string, error) {
+	if l.DNSName != "" {
+		return l.DNSName, nil
+	}
+	host, _, err := net.SplitHostPort(l.Addr)
+	if err != nil {
+		return "", fmt.Errorf("invalid addr %q: %w", l.Addr, err)
+	}
+	if isLocalOrIP(host) {
+		return "", fmt.Errorf("addr %q requires dns_name (cannot derive from localhost/IP)", l.Addr)
+	}
+	return host, nil
+}
+
+// EffectiveShortName is the bare service name for a local source:
+// short_name, or else the first label of its DNS name, lower-cased.
+func (l LocalSourceSpec) EffectiveShortName() string {
+	if l.ShortName != "" {
+		return l.ShortName
+	}
+	name, err := l.EffectiveDNSName()
+	if err != nil {
+		return ""
+	}
+	if dot := strings.IndexByte(name, '.'); dot > 0 {
+		name = name[:dot]
+	}
+	return strings.ToLower(name)
+}
+
+// EffectivePort is the port the service listens on in the destination
+// tailnet: expose_port, or else the port in addr.
+func (l LocalSourceSpec) EffectivePort() (int, error) {
+	if l.ExposePort < 0 || l.ExposePort > 65535 {
+		return 0, fmt.Errorf("expose_port %d out of range", l.ExposePort)
+	}
+	if l.ExposePort > 0 {
+		return l.ExposePort, nil
+	}
+	_, portStr, err := net.SplitHostPort(l.Addr)
+	if err != nil {
+		return 0, fmt.Errorf("invalid addr %q: %w", l.Addr, err)
+	}
+	p, err := strconv.Atoi(portStr)
+	if err != nil || p <= 0 || p > 65535 {
+		return 0, fmt.Errorf("invalid port in addr %q", l.Addr)
+	}
+	return p, nil
 }

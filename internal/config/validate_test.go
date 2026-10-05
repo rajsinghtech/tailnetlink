@@ -48,6 +48,16 @@ func TestValidateBridges(t *testing.T) {
 			tag("r1", func(r *config.BridgeRule) { r.SourceServices = []config.ServiceSpec{{Name: "svc:s", ShortName: "x"}} }),
 			local("r2", config.LocalSourceSpec{Addr: "db.lan:5432", ShortName: "x"}),
 		}, `already used by rule "r1"`},
+		{"short name too long", []config.BridgeRule{tag("r", func(r *config.BridgeRule) {
+			r.SourceServices = []config.ServiceSpec{{Name: "svc:s", ShortName: strings.Repeat("a", 64)}}
+		})}, "1 to 63 lowercase"},
+		{"short name 63", []config.BridgeRule{tag("r", func(r *config.BridgeRule) {
+			r.SourceServices = []config.ServiceSpec{{Name: "svc:s", ShortName: strings.Repeat("a", 63)}}
+		})}, ""},
+		{"short name upper case", []config.BridgeRule{tag("r", func(r *config.BridgeRule) {
+			r.SourceDevices = []config.DeviceSpec{{FQDN: "d.a", ShortName: "Api"}}
+		})}, "1 to 63 lowercase"},
+		{"short name with dot", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "db.lan:5432", ShortName: "db.lan"})}, "1 to 63 lowercase"},
 		{"local", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "127.0.0.1:8080", DNSName: "app.example"})}, ""},
 		{"local named host", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "db.lan:5432"})}, ""},
 		{"local with ports", []config.BridgeRule{func() config.BridgeRule {

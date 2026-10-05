@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rajsinghtech/tailnetlink/internal/testutil/fakeapi"
 	tsclient "tailscale.com/client/tailscale/v2"
@@ -72,12 +73,10 @@ func TestDiscovererTagModeIncludesTaggedServices(t *testing.T) {
 	}
 }
 
-// KNOWN-BAD: tag mode also picks up VIP services that tailnetlink created
-// itself, so a setup where the source tag matches the tag on bridged
-// services (or two instances pointed at each other) re-bridges its own
-// output. Flip in roadmap PR 10: skip services carrying the
-// tailnetlink/managed annotation.
-func TestKnownBad_TagModeDiscoversOwnServices(t *testing.T) {
+// Tag mode skips VIP services tailnetlink created (tailnetlink/managed
+// annotation) and tailnetlink's own nodes, so its output is never bridged
+// again. Flipped from TestKnownBad_TagModeDiscoversOwnServices.
+func TestTagModeSkipsOwnOutput(t *testing.T) {
 	api := fakeapi.New(t)
 	api.PutService(tsclient.VIPService{
 		Name:        "svc:tnl-other-web-1",
@@ -85,11 +84,17 @@ func TestKnownBad_TagModeDiscoversOwnServices(t *testing.T) {
 		Tags:        []string{"tag:web"},
 		Annotations: map[string]string{"tailnetlink/managed": "true"},
 	})
+	api.PutService(tsclient.VIPService{Name: "svc:real", Addrs: []string{"100.100.1.2"}, Tags: []string{"tag:web"}})
+	api.SetDevices([]tsclient.Device{
+		dev("tailnetlink-dst", []string{"tag:web"}, "100.64.0.9"),
+		dev("web-1", []string{"tag:web"}, "100.64.0.1"),
+	})
 	d := NewDiscoverer(api.Client(), "tag:web", nil, nil, 0, discardLogger())
 	d.poll1(context.Background())
 
-	if added := names(drain(d.Added())); !added["svc:tnl-other-web-1"] {
-		t.Errorf("expected own service to be discovered today, added = %v", added)
+	added := names(drain(d.Added()))
+	if len(added) != 2 || !added["svc:real"] || !added["web-1.src.example"] {
+		t.Errorf("added = %v, want only svc:real and web-1", added)
 	}
 }
 
@@ -201,10 +206,53 @@ func TestDiscovererAPIErrorKeepsState(t *testing.T) {
 	}
 }
 
-// KNOWN-BAD: the added channel holds 16 events and extra events are dropped,
-// but the discoverer still records the device as seen, so a dropped device is
-// never announced again. Flip in roadmap PR 10.
-func TestKnownBad_DiscovererDropsEventsOverBuffer(t *testing.T) {
+// Every change is announced even when there are more than the channels
+// hold: 50 devices in one poll are all added, and all removed later.
+// Flipped from TestKnownBad_DiscovererDropsEventsOverBuffer.
+func TestDiscovererAnnouncesEveryDevice(t *testing.T) {
+	api := fakeapi.New(t)
+	var ds []tsclient.Device
+	for i := range 50 {
+		ds = append(ds, dev(fmt.Sprintf("web-%02d", i), []string{"tag:web"}, fmt.Sprintf("100.64.0.%d", i+1)))
+	}
+	api.SetDevices(ds)
+	d := NewDiscoverer(api.Client(), "tag:web", nil, nil, 0, discardLogger())
+
+	collect := func(ch <-chan Device, poll func()) map[string]bool {
+		got := make(chan map[string]bool)
+		go func() {
+			seen := map[string]bool{}
+			for len(seen) < 50 {
+				select {
+				case dv := <-ch:
+					seen[dv.FQDN] = true
+				case <-time.After(5 * time.Second):
+					got <- seen
+					return
+				}
+			}
+			got <- seen
+		}()
+		poll()
+		return <-got
+	}
+	ctx := context.Background()
+	if added := collect(d.Added(), func() { d.poll1(ctx) }); len(added) != 50 {
+		t.Fatalf("added %d devices, want 50", len(added))
+	}
+	d.poll1(ctx)
+	if again := drain(d.Added()); len(again) != 0 {
+		t.Errorf("second poll re-announced %d devices", len(again))
+	}
+	api.SetDevices(nil)
+	if removed := collect(d.Removed(), func() { d.poll1(ctx) }); len(removed) != 50 {
+		t.Fatalf("removed %d devices, want 50", len(removed))
+	}
+}
+
+// When the rule stops while events are pending, the poll gives up instead
+// of blocking, and whatever wasn't announced is announced on a later poll.
+func TestDiscovererCancelledPollRetriesLater(t *testing.T) {
 	api := fakeapi.New(t)
 	var ds []tsclient.Device
 	for i := range 20 {
@@ -213,15 +261,31 @@ func TestKnownBad_DiscovererDropsEventsOverBuffer(t *testing.T) {
 	api.SetDevices(ds)
 	d := NewDiscoverer(api.Client(), "tag:web", nil, nil, 0, discardLogger())
 
-	d.poll1(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		d.poll1(ctx) // fills the 16-slot channel, then blocks
+		close(done)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("poll did not return after cancel")
+	}
 	first := drain(d.Added())
+	if len(first) != 16 {
+		t.Fatalf("first poll announced %d, want 16", len(first))
+	}
 	d.poll1(context.Background())
 	second := drain(d.Added())
-
-	if len(first) != 16 {
-		t.Errorf("first poll announced %d devices, expected 16 today", len(first))
+	if len(first)+len(second) != 20 {
+		t.Errorf("announced %d + %d devices, want 20 in total", len(first), len(second))
 	}
-	if len(second) != 0 {
-		t.Errorf("second poll announced %d devices, expected the dropped ones to stay lost today", len(second))
+	for _, dv := range second {
+		if names(first)[dv.FQDN] {
+			t.Errorf("%s announced twice", dv.FQDN)
+		}
 	}
 }

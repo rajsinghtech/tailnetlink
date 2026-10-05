@@ -3,6 +3,8 @@ package bridge
 import (
 	"strings"
 	"testing"
+
+	"tailscale.com/tailcfg"
 )
 
 func TestServiceName(t *testing.T) {
@@ -47,13 +49,20 @@ func TestServiceNameLongIsCappedAndStable(t *testing.T) {
 	}
 }
 
-// KNOWN-BAD: short names are not length capped, so a long short_name gives
-// a service name the API will reject. Not tied to a roadmap PR yet; fix
-// alongside config validation.
-func TestKnownBad_ShortNameNotCapped(t *testing.T) {
+// A short name longer than a DNS label is capped to one the API accepts,
+// and two long names that share a prefix stay different. Config validation
+// rejects such names up front. Flipped from TestKnownBad_ShortNameNotCapped.
+func TestShortNameCapped(t *testing.T) {
 	got := ServiceName("src", "x", strings.Repeat("s", 70))
-	if len(got) <= 63 {
-		t.Fatalf("expected an uncapped name today, got len %d", len(got))
+	if err := tailcfg.ServiceName(got).Validate(); err != nil {
+		t.Fatalf("%q: %v", got, err)
+	}
+	other := ServiceName("src", "x", strings.Repeat("s", 69)+"t")
+	if other == got {
+		t.Errorf("long short names collided: %q", got)
+	}
+	if ok := ServiceName("src", "x", "api"); ok != "svc:api" {
+		t.Errorf("short name changed: %q", ok)
 	}
 }
 

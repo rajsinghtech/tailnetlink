@@ -24,6 +24,13 @@ type Device struct {
 // or explicit VIP service name list. When source_tag is set it always drives discovery;
 // source_devices/source_services only act as DNS/name overrides in that case.
 // Without a tag: source_services takes priority, then source_devices.
+//
+// Tag mode never picks up tailnetlink's own output: services carrying the
+// tailnetlink/managed annotation and tailnetlink's own nodes are skipped,
+// so two instances bridging A to B and B to A with the same tag don't loop.
+//
+// Every change is announced: sends block until the rule reads them or ctx
+// is done, and a device only counts as seen once its add went out.
 type Discoverer struct {
 	client   *tsclient.Client
 	tag      string
@@ -111,7 +118,7 @@ func (d *Discoverer) poll1(ctx context.Context) {
 			for _, t := range dev.Tags {
 				allTags[t] = struct{}{}
 			}
-			if !hasTag(dev.Tags, d.tag) {
+			if !hasTag(dev.Tags, d.tag) || isTailnetlinkNode(dev.Hostname) {
 				continue
 			}
 		}
@@ -140,7 +147,7 @@ func (d *Discoverer) poll1(ctx context.Context) {
 			d.logger.Warn("discoverer: list vip services failed (tag mode)", "err", err)
 		} else {
 			for _, svc := range svcs {
-				if !hasTag(svc.Tags, d.tag) {
+				if !hasTag(svc.Tags, d.tag) || svc.Annotations[annotationManaged] == "true" {
 					continue
 				}
 				ip, ok := firstIP(svc.Addrs)
@@ -180,7 +187,7 @@ func (d *Discoverer) poll1(ctx context.Context) {
 		d.logger.Info("discoverer: poll", "tag", d.tag, "total_devices", len(devices), "matched_devices", len(found)-matchedSvcs, "matched_services", matchedSvcs)
 	}
 
-	d.diffAndNotify(found, "device/service")
+	d.diffAndNotify(ctx, found, "device/service")
 }
 
 func (d *Discoverer) pollServices(ctx context.Context) {
@@ -209,29 +216,44 @@ func (d *Discoverer) pollServices(ctx context.Context) {
 	}
 
 	d.logger.Info("discoverer: poll (service mode)", "wanted", len(d.services), "online", len(found))
-	d.diffAndNotify(found, "vip service")
+	d.diffAndNotify(ctx, found, "vip service")
 }
 
-func (d *Discoverer) diffAndNotify(found map[string]Device, kind string) {
+// diffAndNotify announces what changed between the last poll and found. It
+// blocks until each event is taken or ctx is done. d.current only changes
+// for events that went out, so anything not announced before ctx ended is
+// still a difference next time.
+func (d *Discoverer) diffAndNotify(ctx context.Context, found map[string]Device, kind string) {
 	for id, dev := range found {
-		if _, seen := d.current[id]; !seen {
-			d.logger.Info("discoverer: "+kind+" added", "name", dev.Name, "ip", dev.IP)
-			select {
-			case d.added <- dev:
-			default:
-			}
+		if _, seen := d.current[id]; seen {
+			continue
+		}
+		d.logger.Info("discoverer: "+kind+" added", "name", dev.Name, "ip", dev.IP)
+		select {
+		case d.added <- dev:
+			d.current[id] = dev
+		case <-ctx.Done():
+			return
 		}
 	}
 	for id, dev := range d.current {
-		if _, still := found[id]; !still {
-			d.logger.Info("discoverer: "+kind+" removed", "name", dev.Name)
-			select {
-			case d.removed <- dev:
-			default:
-			}
+		if _, still := found[id]; still {
+			continue
+		}
+		d.logger.Info("discoverer: "+kind+" removed", "name", dev.Name)
+		select {
+		case d.removed <- dev:
+			delete(d.current, id)
+		case <-ctx.Done():
+			return
 		}
 	}
-	d.current = found
+}
+
+// isTailnetlinkNode reports whether a device is one of tailnetlink's own
+// nodes, which are named tailnetlink-<tailnet>.
+func isTailnetlinkNode(hostname string) bool {
+	return strings.HasPrefix(hostname, "tailnetlink-")
 }
 
 func hasTag(tags []string, want string) bool {
