@@ -30,7 +30,6 @@ type DNSServer struct {
 	svcName   string // populated by Start
 	mux       *dns.ServeMux
 	tcpServer *dns.Server
-	udpServer *dns.Server
 }
 
 func NewDNSServer(srv *tsnet.Server, apiClient *tsclient.Client, ruleName string, destTags []string, zone string, logger *slog.Logger) *DNSServer {
