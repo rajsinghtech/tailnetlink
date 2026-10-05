@@ -42,7 +42,7 @@ make build && make run
 
 ## Configuration
 
-Config is stored as JSON (default: `data.json`). The web UI at `127.0.0.1:8888` lets you add tailnets and bridge rules without editing the file directly.
+Config is a JSON file (default: `data.json`). The file is the only way to change it: tailnetlink checks it every few seconds and applies changes without a restart. It never writes the file.
 
 ```json
 {
@@ -148,6 +148,7 @@ The secret is read each time tailnetlink needs a new API token, so rotating the 
 |---|---|---|
 | `-data` | `tailnetlink.json` | Path to config/state JSON file |
 | `-listen` | `127.0.0.1:8888` | Web UI listen address |
+| `-ui` | `true` | `-ui=false` turns the web UI off: no local listener and no `svc:tailnetlink`, whatever the config says |
 | `-log-level` | `info` | Log level: `debug`, `info`, `warn`, `error` |
 | `-shutdown-timeout` | `20s` | How long to wait for a clean shutdown on SIGTERM or SIGINT. A second signal exits at once. |
 
@@ -175,22 +176,24 @@ Node state lives in `/tailnetlink-state` (next to `/data.json`) unless `state_di
 
 ## Web UI
 
-Available at `http://localhost:8888` (or the configured `-listen` address). It listens on loopback only by default. The UI also registers itself as `svc:tailnetlink` on TCP:80 in each connected tailnet, so you can reach it via the Tailscale VIP from within either network.
+The UI is read-only. It is served at `http://localhost:8888` (or the configured `-listen` address), on loopback only by default, and published as `svc:tailnetlink` on TCP:80 in every connected tailnet so you can open it from either side. The UI service goes through the same ownership check as every other service.
 
-The UI never sees OAuth client secrets: the config only says where to read them, and adding a tailnet through the UI takes a secret file path, not the secret. There are no CORS headers, and every API call other than GET must be sent as `Content-Type: application/json`. Until the UI becomes read-only, anyone who can reach `svc:tailnetlink` can still change the config through it, so keep ACLs on that service tight.
+It has no write routes at all: every method other than GET and HEAD gets 405, and there is no config, settings, CRUD or detect API. The config it shows leaves out every tailnet's `oauth` block, so no client ID or secret path is served, and the config never holds a secret in the first place. There are no CORS headers.
+
+To turn it off, set `"ui": {"enabled": false}` in the config or run with `-ui=false`. Either way nothing listens locally and no UI service is created. Turning `ui.enabled` off in a running instance deletes the UI services it owns; turning it back on republishes them. The local listener follows the setting tailnetlink started with.
 
 The UI provides:
 
 - **Networks** — tailnet connection status, topology visualization, activity log
 - **Services** — live bridge table with VIP addresses, port mapping, connection counts, traffic bytes
 - **Connections** — active and recently-closed TCP sessions with source identity (node name / user / tag)
-- **Config** — read-only view of the current JSON config
+- **Config** — the running config, without the oauth blocks
 
 ## Architecture
 
 ```
 cmd/tailnetlink/        entry point — flag parsing, signal handling
-internal/config/        config store (JSON, hot-reload on change)
+internal/config/        config loading, validation, file watch
 internal/state/         in-memory state store + SSE pub/sub
 internal/bridge/
   bridge.go             Manager — reconcile loop, tailnet lifecycle
@@ -200,7 +203,7 @@ internal/bridge/
   dns.go                authoritative DNS server (split-DNS)
   splitdns.go           configures split-DNS on dest tailnet
   naming.go             deterministic VIP service name generation
-internal/server/        HTTP API + SSE + embedded web UI
+internal/server/        read-only HTTP API + SSE + embedded web UI
 ```
 
 ## Development
@@ -208,7 +211,7 @@ internal/server/        HTTP API + SSE + embedded web UI
 ```bash
 make deps      # go mod tidy + download
 make lint      # go vet
-make dev       # run with debug logging (hot-reloads config on UI changes)
+make dev       # run with debug logging (reloads the config file when it changes)
 ```
 
 ## License

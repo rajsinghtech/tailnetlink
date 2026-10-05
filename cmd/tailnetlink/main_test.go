@@ -277,3 +277,38 @@ func TestRunRejectsInlineSecret(t *testing.T) {
 		t.Errorf("output:\n%s", out.String())
 	}
 }
+
+// With -ui=false, or ui.enabled false in the config, nothing listens on the
+// UI address.
+func TestRunUIOff(t *testing.T) {
+	dir := t.TempDir()
+	disabled := filepath.Join(dir, "off.json")
+	if err := os.WriteFile(disabled, []byte(`{"ui": {"enabled": false}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, args := range map[string][]string{
+		"flag":   {"-data", emptyConfig(t), "-ui=false"},
+		"config": {"-data", disabled},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			addr := ln.Addr().String()
+			ln.Close()
+			out := &syncBuffer{}
+			sig := make(chan os.Signal, 2)
+			code := runAsync(append(args, "-listen", addr), out, sig)
+			waitForOutput(t, out, "web UI is off")
+			if c, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
+				c.Close()
+				t.Errorf("something listens on %s with the UI off", addr)
+			}
+			sig <- syscall.SIGTERM
+			if c := <-code; c != 0 {
+				t.Errorf("exit code %d:\n%s", c, out)
+			}
+		})
+	}
+}

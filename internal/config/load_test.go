@@ -1,18 +1,19 @@
 package config_test
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/rajsinghtech/tailnetlink/internal/config"
 )
-
-// Tests named TestKnownBad_* pin behavior the roadmap says is wrong. They
-// pass today on purpose; the PR that fixes the behavior should flip them.
 
 func writeFile(t *testing.T, body string) string {
 	t.Helper()
@@ -123,68 +124,127 @@ func TestDurationRoundTrip(t *testing.T) {
 	}
 }
 
-func TestStoreUpdatePersists(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "config.json")
+// Get hands out deep copies: changing one snapshot changes neither the
+// store nor any other snapshot. The bridge manager diffs old against new
+// snapshots, so shared maps or slices would hide changes from it.
+func TestStoreGetIsDeepCopy(t *testing.T) {
+	p := writeFile(t, `{"instance_id": "test", "ui": {"enabled": true},
+		"tailnets": {"a": {"tailnet": "one", "tags": ["tag:x"]}},
+		"bridges": [{"name": "r", "source_tailnet": "a", "dest_tailnets": ["a"], "source_tag": "tag:web", "ports": [1],
+			"source_devices": [{"fqdn": "d.one"}], "source_services": [{"name": "svc:s"}]}]}`)
 	s, err := config.NewStore(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Update(func(c *config.Config) error {
-		c.InstanceID = "test"
-		c.Tailnets["a"] = config.TailnetConfig{Tailnet: "a.example"}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	fi, err := os.Stat(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Mode().Perm() != 0600 {
-		t.Errorf("mode = %v, want 0600", fi.Mode().Perm())
-	}
-	again, err := config.Load(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if again.Tailnets["a"].Tailnet != "a.example" {
-		t.Errorf("reloaded = %+v", again.Tailnets)
-	}
-}
-
-func TestStoreUpdateErrorDoesNotPersist(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "config.json")
-	s, _ := config.NewStore(p)
-	err := s.Update(func(c *config.Config) error { return os.ErrInvalid })
-	if err == nil {
-		t.Fatal("want error")
-	}
-	if _, statErr := os.Stat(p); !os.IsNotExist(statErr) {
-		t.Errorf("file written despite error: %v", statErr)
-	}
-}
-
-// KNOWN-BAD: Get and Update make shallow copies, so an older snapshot shares
-// the Tailnets map and Bridges array with the new config. The bridge manager
-// compares old and new snapshots to decide what to restart, so edits made
-// through the UI are invisible to it. Flip in roadmap PR 9 (deep copy and no
-// UI writes).
-func TestKnownBad_SnapshotsShareState(t *testing.T) {
-	s, _ := config.NewStore(filepath.Join(t.TempDir(), "config.json"))
-	_ = s.Update(func(c *config.Config) error {
-		c.InstanceID = "test"
-		c.Tailnets["a"] = config.TailnetConfig{Tailnet: "one"}
-		c.Bridges = append(c.Bridges, config.BridgeRule{Name: "r", Ports: []int{1}})
-		return nil
-	})
 	old := s.Get()
-	_ = s.Update(func(c *config.Config) error {
-		c.Tailnets["a"] = config.TailnetConfig{Tailnet: "two"}
-		c.Bridges[0] = config.BridgeRule{Name: "r", Ports: []int{2}}
-		return nil
-	})
-	if old.Tailnets["a"].Tailnet != "two" || old.Bridges[0].Ports[0] != 2 {
-		t.Errorf("expected the old snapshot to see the edit today, got %+v / %+v", old.Tailnets, old.Bridges)
+	old.Tailnets["a"] = config.TailnetConfig{Tailnet: "two"}
+	old.Bridges[0].Ports[0] = 2
+	old.Bridges[0].DestTailnets[0] = "b"
+	old.Bridges[0].SourceDevices[0].FQDN = "x"
+	*old.UI.Enabled = false
+	now := s.Get()
+	if now.Tailnets["a"].Tailnet != "one" || now.Bridges[0].Ports[0] != 1 || now.Bridges[0].DestTailnets[0] != "a" ||
+		now.Bridges[0].SourceDevices[0].FQDN != "d.one" || !now.UIEnabled() {
+		t.Errorf("editing a snapshot changed the store: %+v / %+v", now.Tailnets, now.Bridges)
+	}
+}
+
+func TestCloneEmpty(t *testing.T) {
+	c := (&config.Config{}).Clone()
+	if c.Tailnets != nil || c.Bridges != nil || c.UI.Enabled != nil {
+		t.Errorf("clone of empty config = %+v", c)
+	}
+}
+
+// Watch reloads the file when it changes, hands each listener its own copy,
+// and ignores a file that no longer loads.
+func TestStoreWatchReloads(t *testing.T) {
+	p := writeFile(t, `{"instance_id": "test"}`)
+	s, err := config.NewStore(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetWatchInterval(10 * time.Millisecond)
+	got := make(chan *config.Config, 4)
+	s.OnChange(func(c *config.Config) { got <- c })
+	s.OnChange(func(c *config.Config) { got <- c })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Watch(ctx, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	bump := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		future := time.Now().Add(time.Duration(bumps.Add(1)) * time.Second)
+		if err := os.Chtimes(p, future, future); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bump(`{"instance_id": "changed", "poll_interval": "5s"}`)
+	next := func() *config.Config {
+		t.Helper()
+		select {
+		case c := <-got:
+			return c
+		case <-time.After(10 * time.Second):
+			t.Fatal("no reload")
+			return nil
+		}
+	}
+	a, b := next(), next()
+	if a == b {
+		t.Error("listeners share one config")
+	}
+	if a.InstanceID != "changed" || a.PollInterval.Duration != 5*time.Second {
+		t.Errorf("reloaded = %+v", a)
+	}
+	if s.Get().InstanceID != "changed" {
+		t.Error("store not updated")
+	}
+
+	bump(`{not json`)
+	select {
+	case c := <-got:
+		t.Fatalf("bad file reloaded: %+v", c)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if s.Get().InstanceID != "changed" {
+		t.Error("bad file replaced the config")
+	}
+}
+
+var bumps atomic.Int64
+
+func TestUIEnabled(t *testing.T) {
+	off, on := false, true
+	for _, c := range []struct {
+		v    *bool
+		want bool
+	}{{nil, true}, {&on, true}, {&off, false}} {
+		if got := (&config.Config{UI: config.UIConfig{Enabled: c.v}}).UIEnabled(); got != c.want {
+			t.Errorf("UIEnabled(%v) = %v", c.v, got)
+		}
+	}
+}
+
+// The public view the UI shows has no oauth block at all.
+func TestPublicJSON(t *testing.T) {
+	c := &config.Config{InstanceID: "x", Tailnets: map[string]config.TailnetConfig{
+		"a": {Tailnet: "a.example", Tags: []string{"tag:t"}, OAuth: config.OAuthCreds{ClientID: "cid-123", ClientSecretFile: "/run/secret-path"}},
+	}}
+	out := string(c.PublicJSON())
+	for _, bad := range []string{"oauth", "cid-123", "/run/secret-path"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("public JSON has %q:\n%s", bad, out)
+		}
+	}
+	if !strings.Contains(out, "a.example") || !strings.Contains(out, "tag:t") {
+		t.Errorf("public JSON lost fields:\n%s", out)
+	}
+	if c.Tailnets["a"].OAuth.ClientID != "cid-123" {
+		t.Error("PublicJSON changed the config")
 	}
 }
 
@@ -258,50 +318,6 @@ func TestSecret(t *testing.T) {
 	}
 }
 
-// The config never holds a secret, so neither JSON nor a save can carry
-// one.
-func TestConfigJSONHasNoSecret(t *testing.T) {
-	dir := t.TempDir()
-	secretFile := filepath.Join(dir, "secret")
-	_ = os.WriteFile(secretFile, []byte("very-secret"), 0o600)
-	p := filepath.Join(dir, "config.json")
-	s, _ := config.NewStore(p)
-	if err := s.Update(func(c *config.Config) error {
-		c.InstanceID = "test"
-		c.Tailnets["a"] = config.TailnetConfig{OAuth: config.OAuthCreds{ClientID: "id", ClientSecretFile: secretFile}}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	saved, _ := os.ReadFile(p)
-	for where, out := range map[string]string{"JSON": string(s.JSON()), "file": string(saved)} {
-		if strings.Contains(out, "very-secret") || strings.Contains(out, `"client_secret"`) {
-			t.Errorf("%s carries a secret:\n%s", where, out)
-		}
-		if !strings.Contains(out, secretFile) {
-			t.Errorf("%s lost client_secret_file:\n%s", where, out)
-		}
-	}
-}
-
-// Writes through the store validate too, so an inline secret sent to the
-// UI API is refused.
-func TestStoreUpdateRejectsInlineSecret(t *testing.T) {
-	s, _ := config.NewStore(filepath.Join(t.TempDir(), "config.json"))
-	var oauth config.OAuthCreds
-	if err := json.Unmarshal([]byte(`{"client_id":"id","client_secret":"x"}`), &oauth); err != nil {
-		t.Fatal(err)
-	}
-	err := s.Update(func(c *config.Config) error {
-		c.InstanceID = "test"
-		c.Tailnets["a"] = config.TailnetConfig{OAuth: oauth}
-		return nil
-	})
-	if err == nil || !strings.Contains(err.Error(), "client_secret is not supported") {
-		t.Fatalf("err = %v", err)
-	}
-}
-
 func TestValidate(t *testing.T) {
 	tn := map[string]config.TailnetConfig{"a": {}}
 	cases := []struct {
@@ -337,21 +353,6 @@ func TestLoadRejectsMissingInstanceID(t *testing.T) {
 	_, err := config.Load(writeFile(t, `{"tailnets": {"a": {"tailnet": "a.example"}}}`))
 	if err == nil || !strings.Contains(err.Error(), "instance_id is required") {
 		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestStoreUpdateValidates(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "config.json")
-	s, _ := config.NewStore(p)
-	err := s.Update(func(c *config.Config) error {
-		c.Tailnets["a"] = config.TailnetConfig{}
-		return nil
-	})
-	if err == nil {
-		t.Fatal("want an error without instance_id")
-	}
-	if _, statErr := os.Stat(p); !os.IsNotExist(statErr) {
-		t.Errorf("file written despite error: %v", statErr)
 	}
 }
 

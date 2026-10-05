@@ -18,17 +18,14 @@ import (
 
 	"github.com/rajsinghtech/tailnetlink/internal/config"
 	"github.com/rajsinghtech/tailnetlink/internal/state"
-	"github.com/rajsinghtech/tailnetlink/internal/testutil/fakeapi"
-	tsclient "tailscale.com/client/tailscale/v2"
 )
 
 var testSecrets = []string{"alpha-secret-0001", "beta-secret-0002"}
 
-// newTestServer serves the UI for a config with two tailnets whose admin
-// API is a fake, and returns its URL and config store.
-func newTestServer(t *testing.T) (string, *config.Store, *fakeapi.Server) {
+// newTestServer serves the UI for a config with two tailnets and a rule,
+// and returns its URL and config store.
+func newTestServer(t *testing.T) (string, *config.Store) {
 	t.Helper()
-	api := fakeapi.New(t)
 	dir := t.TempDir()
 	files := make([]string, len(testSecrets))
 	for i, sec := range testSecrets {
@@ -37,12 +34,11 @@ func newTestServer(t *testing.T) (string, *config.Store, *fakeapi.Server) {
 			t.Fatal(err)
 		}
 	}
-	api.SetDevices([]tsclient.Device{{NodeID: "n1", Name: "web.a.example", Hostname: "web", Addresses: []string{"100.64.0.1"}}})
 	cfg := config.Config{
 		InstanceID: "test",
 		Tailnets: map[string]config.TailnetConfig{
-			"a": {Tailnet: api.Tailnet, APIBaseURL: api.URL(), OAuth: config.OAuthCreds{ClientID: "id-a", ClientSecretFile: files[0]}},
-			"b": {Tailnet: api.Tailnet, APIBaseURL: api.URL(), OAuth: config.OAuthCreds{ClientID: "id-b", ClientSecretFile: files[1]}},
+			"a": {Tailnet: "a.example", OAuth: config.OAuthCreds{ClientID: "id-a", ClientSecretFile: files[0]}},
+			"b": {Tailnet: "b.example", OAuth: config.OAuthCreds{ClientID: "id-b", ClientSecretFile: files[1]}},
 		},
 		Bridges: []config.BridgeRule{{Name: "r", SourceTailnet: "a", DestTailnets: []string{"b"}, SourceTag: "tag:web", Ports: []int{80}}},
 	}
@@ -57,9 +53,9 @@ func newTestServer(t *testing.T) (string, *config.Store, *fakeapi.Server) {
 	}
 	st := state.New()
 	st.Log("info", "hello", nil)
-	srv := httptest.NewServer(New("", st, cs, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler())
+	srv := httptest.NewServer(New("", st, cs.Get, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler())
 	t.Cleanup(srv.Close)
-	return srv.URL, cs, api
+	return srv.URL, cs
 }
 
 // leaks returns the secrets found in s, in plain form or base64 encoded.
@@ -101,42 +97,55 @@ func dumpHeaders(h http.Header) string {
 	return b.String()
 }
 
-// No route hands out a client secret, there is no CORS header anywhere,
-// and the SSE init event is redacted too.
-func TestNoRouteServesSecrets(t *testing.T) {
-	base, _, _ := newTestServer(t)
-	reqs := []struct{ method, path, body string }{
-		{"GET", "/", ""},
-		{"GET", "/api/status", ""},
-		{"GET", "/api/bridges", ""},
-		{"GET", "/api/connections", ""},
-		{"GET", "/api/logs", ""},
-		{"GET", "/api/config", ""},
-		{"GET", "/api/tailnets/a/devices", ""},
-		{"GET", "/api/tailnets/b/services", ""},
-		{"OPTIONS", "/api/config", ""},
-		{"PUT", "/api/settings", `{"poll_interval":"45s"}`},
-		{"PUT", "/api/tailnets/b", `{"tailnet":"x.example","oauth":{"client_id":"id-b","client_secret_env":"B_SECRET"}}`},
-		{"POST", "/api/bridge-rules", `{"name":"r2","source_tailnet":"a","dest_tailnets":["b"],"source_tag":"tag:x","ports":[81]}`},
-		{"PUT", "/api/bridge-rules/r2", `{"source_tailnet":"a","dest_tailnets":["b"],"source_tag":"tag:x","ports":[82]}`},
-		{"POST", "/api/tailnets", `{"name":"c","tailnet":"c.example","oauth":{"client_id":"id-c","client_secret_file":"/run/c"}}`},
-		{"DELETE", "/api/bridge-rules/r2", ""},
-		{"DELETE", "/api/tailnets/c", ""},
-		{"GET", "/api/nope", ""},
+// sensitive is everything the UI must never show: the secrets, plus the
+// client IDs and secret file paths, which the public config view leaves
+// out along with the rest of each oauth block.
+func sensitive(t *testing.T, s string) []string {
+	out := leaks(s)
+	for _, v := range []string{"id-a", "id-b", "secret-0", "secret-1", "client_secret", "oauth"} {
+		if strings.Contains(s, v) {
+			out = append(out, v)
+		}
 	}
-	for _, r := range reqs {
-		resp, body := do(t, r.method, base+r.path, "application/json", r.body)
-		if l := leaks(body + dumpHeaders(resp.Header)); len(l) != 0 {
-			t.Errorf("%s %s (%d) leaked %v:\n%s", r.method, r.path, resp.StatusCode, l, body)
-		}
-		if v := resp.Header.Get("Access-Control-Allow-Origin"); v != "" {
-			t.Errorf("%s %s: Access-Control-Allow-Origin = %q", r.method, r.path, v)
-		}
-		if r.method != "GET" && r.method != "OPTIONS" && resp.StatusCode >= 400 {
-			t.Errorf("%s %s = %d: %s", r.method, r.path, resp.StatusCode, body)
+	return out
+}
+
+// readRoutes are the only routes the read-only UI serves.
+var readRoutes = []string{"/", "/index.html", "/api/status", "/api/bridges", "/api/connections", "/api/logs"}
+
+// removedRoutes are the old write and config routes. They are all gone.
+var removedRoutes = []string{
+	"/api/config", "/api/settings", "/api/tailnets", "/api/tailnets/a", "/api/tailnets/detect",
+	"/api/tailnets/a/devices", "/api/tailnets/b/services", "/api/bridge-rules", "/api/bridge-rules/r",
+}
+
+// No route hands out a secret or the oauth settings, there is no CORS header
+// anywhere, and the SSE init event carries only the public config.
+func TestNoRouteServesSecrets(t *testing.T) {
+	base, _ := newTestServer(t)
+	for _, path := range append(append([]string{"/api/nope"}, readRoutes...), removedRoutes...) {
+		for _, method := range []string{"GET", "HEAD", "OPTIONS", "POST"} {
+			resp, body := do(t, method, base+path, "application/json", `{}`)
+			if l := sensitive(t, body+dumpHeaders(resp.Header)); len(l) != 0 {
+				t.Errorf("%s %s (%d) leaked %v:\n%s", method, path, resp.StatusCode, l, body)
+			}
+			if v := resp.Header.Get("Access-Control-Allow-Origin"); v != "" {
+				t.Errorf("%s %s: Access-Control-Allow-Origin = %q", method, path, v)
+			}
 		}
 	}
 
+	init := sseInit(t, base)
+	if !strings.Contains(init, `"config"`) || !strings.Contains(init, "a.example") || !strings.Contains(init, "tag:web") {
+		t.Fatalf("SSE init event missing the public config: %s", init)
+	}
+	if l := sensitive(t, init); len(l) != 0 {
+		t.Errorf("SSE init leaked %v", l)
+	}
+}
+
+func sseInit(t *testing.T, base string) string {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "GET", base+"/api/events", nil)
@@ -148,86 +157,63 @@ func TestNoRouteServesSecrets(t *testing.T) {
 	if v := resp.Header.Get("Access-Control-Allow-Origin"); v != "" {
 		t.Errorf("SSE Access-Control-Allow-Origin = %q", v)
 	}
-	var init string
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	for sc.Scan() {
 		if strings.HasPrefix(sc.Text(), "data: ") {
-			init = sc.Text()
-			break
+			return sc.Text()
 		}
 	}
-	if !strings.Contains(init, `"config"`) || !strings.Contains(init, "client_secret_file") {
-		t.Fatalf("SSE init event missing the config: %s", init)
+	t.Fatal("no SSE init event")
+	return ""
+}
+
+// The UI is read-only: every method but GET and HEAD gets 405 on every
+// path, whatever the content type, and the config is never touched.
+func TestEveryWriteIsRejected(t *testing.T) {
+	base, cs := newTestServer(t)
+	before := string(cs.Get().PublicJSON())
+	paths := append(append([]string{"/api/events", "/api/nope"}, readRoutes...), removedRoutes...)
+	for _, path := range paths {
+		for _, method := range []string{"POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT", "TRACE"} {
+			for _, ctype := range []string{"application/json", "text/plain", ""} {
+				resp, _ := do(t, method, base+path, ctype, `{"name":"x","poll_interval":"1s"}`)
+				if resp.StatusCode != http.StatusMethodNotAllowed && resp.StatusCode != http.StatusNotFound {
+					t.Errorf("%s %s (%q) = %d, want 405 or 404", method, path, ctype, resp.StatusCode)
+				}
+			}
+		}
 	}
-	if l := leaks(init); len(l) != 0 {
-		t.Errorf("SSE init leaked %v", l)
+	if after := string(cs.Get().PublicJSON()); after != before {
+		t.Errorf("config changed:\n%s", after)
 	}
 }
 
-// Writes need Content-Type: application/json, so a cross-site form or a
-// no-cors fetch can't change the config.
-func TestWritesRequireJSON(t *testing.T) {
-	base, cs, _ := newTestServer(t)
-	before := string(cs.JSON())
-	cases := []struct{ method, path, ctype, body string }{
-		{"POST", "/api/bridge-rules", "text/plain", `{"name":"x","source_tailnet":"a","dest_tailnets":["b"],"source_tag":"tag:x","ports":[1]}`},
-		{"POST", "/api/bridge-rules", "application/x-www-form-urlencoded", `name=x`},
-		{"POST", "/api/bridge-rules", "multipart/form-data; boundary=x", `--x--`},
-		{"POST", "/api/bridge-rules", "", `{}`},
-		{"PUT", "/api/settings", "text/plain", `{"poll_interval":"1s"}`},
-		{"DELETE", "/api/bridge-rules/r", "", ""},
-		{"DELETE", "/api/tailnets/a", "text/plain", ""},
-		{"POST", "/api/tailnets/detect", "text/plain", `{"client_id":"x","client_secret":"y"}`},
-	}
-	for _, c := range cases {
-		resp, _ := do(t, c.method, base+c.path, c.ctype, c.body)
-		if resp.StatusCode != http.StatusUnsupportedMediaType {
-			t.Errorf("%s %s with %q = %d, want 415", c.method, c.path, c.ctype, resp.StatusCode)
+// The old config and CRUD routes don't exist any more.
+func TestRemovedRoutesAreGone(t *testing.T) {
+	base, _ := newTestServer(t)
+	for _, path := range removedRoutes {
+		resp, _ := do(t, "GET", base+path, "", "")
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404", path, resp.StatusCode)
 		}
 	}
-	if after := string(cs.JSON()); after != before {
-		t.Errorf("config changed:\n%s", after)
-	}
-
-	resp, body := do(t, "DELETE", base+"/api/bridge-rules/r", "application/json; charset=utf-8", "")
-	if resp.StatusCode != http.StatusNoContent {
-		t.Errorf("DELETE with JSON content type = %d: %s", resp.StatusCode, body)
+	for _, path := range readRoutes {
+		resp, body := do(t, "GET", base+path, "", "")
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET %s = %d: %s", path, resp.StatusCode, body)
+		}
 	}
 }
 
-// The API takes only client_secret_file or client_secret_env. An inline
-// secret is refused and never stored.
-func TestTailnetAPIRejectsInlineSecret(t *testing.T) {
-	base, cs, _ := newTestServer(t)
-	before := string(cs.JSON())
-	cases := []struct{ method, path, body string }{
-		{"POST", "/api/tailnets", `{"name":"n","tailnet":"n.example","oauth":{"client_id":"x","client_secret":"inline-value"}}`},
-		{"PUT", "/api/tailnets/a", `{"tailnet":"a.example","oauth":{"client_id":"x","client_secret":"inline-value"}}`},
-		{"PUT", "/api/tailnets/a", `{"tailnet":"a.example","oauth":{"client_id":"x"}}`},
-		{"POST", "/api/tailnets", `{"name":"n","tailnet":"n.example","oauth":{"client_id":"x","client_secret_file":"/f","client_secret_env":"E"}}`},
-		{"POST", "/api/tailnets/detect", `{"client_id":"x","client_secret":"inline-value"}`},
-		{"POST", "/api/tailnets/detect", `{"client_id":"x"}`},
-	}
-	for _, c := range cases {
-		resp, body := do(t, c.method, base+c.path, "application/json", c.body)
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Errorf("%s %s %s = %d: %s", c.method, c.path, c.body, resp.StatusCode, body)
+// The page has no forms or calls to write routes left.
+func TestPageHasNoWriteControls(t *testing.T) {
+	base, _ := newTestServer(t)
+	_, page := do(t, "GET", base+"/", "", "")
+	for _, bad := range []string{"<form", "method: 'POST'", "method:'POST'", "method: 'PUT'", "method:'DELETE'", "/api/tailnets", "/api/bridge-rules", "/api/settings", "client_secret"} {
+		if strings.Contains(page, bad) {
+			t.Errorf("page still has %q", bad)
 		}
-		if strings.Contains(body, "inline-value") {
-			t.Errorf("error echoes the secret: %s", body)
-		}
-	}
-	if after := string(cs.JSON()); after != before {
-		t.Errorf("config changed:\n%s", after)
-	}
-
-	resp, body := do(t, "PUT", base+"/api/tailnets/a", "application/json", `{"tailnet":"a.example","oauth":{"client_id":"id-a","client_secret_env":"A_SECRET"}}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("PUT with client_secret_env = %d: %s", resp.StatusCode, body)
-	}
-	if got := cs.Get().Tailnets["a"].OAuth; got.ClientSecretEnv != "A_SECRET" || got.ClientSecretFile != "" {
-		t.Errorf("oauth = %+v", got)
 	}
 }
 

@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -25,9 +25,9 @@ import (
 // Manager orchestrates all bridging. Reconcile() diffs old vs new config and
 // hot-applies changes without restarting unchanged bridges.
 type Manager struct {
-	logger  *slog.Logger
-	store   *state.Store
-	webAddr string // local web UI listen address (e.g. ":8888")
+	logger *slog.Logger
+	store  *state.Store
+	ui     http.Handler // the read-only web UI; nil means never publish it
 
 	reconcileMu sync.Mutex // serializes concurrent Reconcile calls
 	mu          sync.Mutex
@@ -35,19 +35,20 @@ type Manager struct {
 	cfg         *config.Config // last applied config
 	owner       string         // instance id, written to tailnetlink/owner
 	uiService   string         // VIP service name for the web UI
+	uiOn        bool           // the UI is published (ui set and ui.enabled not false)
 
 	defaultStateDir string            // used when the config has no state_dir
 	nodeDirs        map[string]string // tailnet name -> node state dir
 	ephemeral       map[string]bool   // tailnet name -> node is ephemeral
 
-	servers      map[string]*tsnet.Server // keyed by tailnet name
-	apiClients   map[string]*tsclient.Client
-	forwarders   map[string]*Forwarder         // keyed by bridge entry ID (rule/dest/fqdn)
-	dnsCleanups  map[string]func(remove bool)  // keyed by bridge entry ID; tears down per-device DNS
-	rules        map[string]context.CancelFunc // keyed by bridge rule name
-	ruleDone     map[string]chan struct{}      // closed when the rule goroutine fully exits
-	ruleRemove   map[string]bool               // set by stopRule: true means delete what the rule owns
-	webListeners map[string]net.Listener       // keyed by tailnet name
+	servers     map[string]*tsnet.Server // keyed by tailnet name
+	apiClients  map[string]*tsclient.Client
+	forwarders  map[string]*Forwarder         // keyed by bridge entry ID (rule/dest/fqdn)
+	dnsCleanups map[string]func(remove bool)  // keyed by bridge entry ID; tears down per-device DNS
+	rules       map[string]context.CancelFunc // keyed by bridge rule name
+	ruleDone    map[string]chan struct{}      // closed when the rule goroutine fully exits
+	ruleRemove  map[string]bool               // set by stopRule: true means delete what the rule owns
+	webServers  map[string]*http.Server       // UI server on the VIP, keyed by tailnet name
 
 	dnsMu      sync.Mutex                 // protects sharedDNS and dnsPending
 	sharedDNS  map[string]*sharedDNSEntry // keyed by destName+"/"+parentDomain
@@ -62,24 +63,26 @@ var startForwarder = (*Forwarder).Start
 // were never started.
 var closeServer = (*tsnet.Server).Close
 
-func New(store *state.Store, logger *slog.Logger, webAddr string) *Manager {
+// New returns a manager. ui is the read-only web UI handler to publish as a
+// VIP service in every tailnet; nil means the UI is off.
+func New(store *state.Store, logger *slog.Logger, ui http.Handler) *Manager {
 	return &Manager{
-		logger:       logger,
-		store:        store,
-		webAddr:      webAddr,
-		cfg:          &config.Config{Tailnets: map[string]config.TailnetConfig{}, Bridges: []config.BridgeRule{}},
-		servers:      make(map[string]*tsnet.Server),
-		apiClients:   make(map[string]*tsclient.Client),
-		forwarders:   make(map[string]*Forwarder),
-		dnsCleanups:  make(map[string]func(bool)),
-		rules:        make(map[string]context.CancelFunc),
-		ruleDone:     make(map[string]chan struct{}),
-		ruleRemove:   make(map[string]bool),
-		webListeners: make(map[string]net.Listener),
-		nodeDirs:     make(map[string]string),
-		ephemeral:    make(map[string]bool),
-		sharedDNS:    make(map[string]*sharedDNSEntry),
-		dnsPending:   make(map[string]*dnsCreation),
+		logger:      logger,
+		store:       store,
+		ui:          ui,
+		cfg:         &config.Config{Tailnets: map[string]config.TailnetConfig{}, Bridges: []config.BridgeRule{}},
+		servers:     make(map[string]*tsnet.Server),
+		apiClients:  make(map[string]*tsclient.Client),
+		forwarders:  make(map[string]*Forwarder),
+		dnsCleanups: make(map[string]func(bool)),
+		rules:       make(map[string]context.CancelFunc),
+		ruleDone:    make(map[string]chan struct{}),
+		ruleRemove:  make(map[string]bool),
+		webServers:  make(map[string]*http.Server),
+		nodeDirs:    make(map[string]string),
+		ephemeral:   make(map[string]bool),
+		sharedDNS:   make(map[string]*sharedDNSEntry),
+		dnsPending:  make(map[string]*dnsCreation),
 	}
 }
 
@@ -98,7 +101,26 @@ func (m *Manager) Reconcile(ctx context.Context, newCfg *config.Config) {
 	// A new instance id or UI service name changes what every running piece
 	// owns or publishes, so everything restarts.
 	restartAll := m.owner != newCfg.InstanceID || m.uiService != newCfg.UIServiceName()
+	uiOn := m.ui != nil && newCfg.UIEnabled()
+	uiToggled := !restartAll && uiOn != m.uiOn
+	m.uiOn = uiOn
+	running := make(map[string]bool, len(m.servers))
+	for name := range m.servers {
+		running[name] = true
+	}
 	m.mu.Unlock()
+
+	// ui.enabled changed: publish the UI in, or withdraw it from, every
+	// running tailnet. Tailnets that start or restart below follow uiOn.
+	if uiToggled {
+		for name := range running {
+			if uiOn {
+				m.startWebUI(ctx, name, old.Tailnets[name].Tags)
+			} else {
+				m.stopWebUI(name, true)
+			}
+		}
+	}
 
 	if restartAll {
 		for _, rule := range old.Bridges {
@@ -358,11 +380,45 @@ func (m *Manager) startTailnet(ctx context.Context, name string, tc config.Tailn
 	m.store.SetTailnet(name, state.TailnetStatus{Name: tc.Tailnet, Role: name, Connected: true})
 	m.store.Log("info", fmt.Sprintf("connected to tailnet %q (%s)", name, tc.Tailnet), nil)
 
-	// Expose the web UI as svc:tailnetlink TCP:80 in this tailnet.
-	if m.webAddr != "" {
+	// Publish the web UI as svc:tailnetlink TCP:80 in this tailnet.
+	m.mu.Lock()
+	uiOn := m.uiOn
+	m.mu.Unlock()
+	if uiOn {
 		go m.serveWebUI(ctx, name, srv, apiClient, tc.Tags)
 	}
 	return nil
+}
+
+// startWebUI publishes the UI in a running tailnet.
+func (m *Manager) startWebUI(ctx context.Context, name string, tags []string) {
+	m.mu.Lock()
+	srv, client := m.servers[name], m.apiClients[name]
+	m.mu.Unlock()
+	if srv != nil {
+		go m.serveWebUI(ctx, name, srv, client, tags)
+	}
+}
+
+// stopWebUI stops serving the UI in a tailnet, closing open connections.
+// With remove set it also deletes the UI service if we own it.
+func (m *Manager) stopWebUI(name string, remove bool) {
+	m.mu.Lock()
+	ws, ok := m.webServers[name]
+	delete(m.webServers, name)
+	client := m.apiClients[name]
+	uiService, owner := m.uiService, m.owner
+	m.mu.Unlock()
+	if ok {
+		_ = ws.Close()
+	}
+	if remove && client != nil {
+		if err := deleteOwnedVIPService(context.Background(), client, owner, uiService); err != nil {
+			m.logger.Warn("web UI VIP: delete failed", "tailnet", name, "err", err)
+		} else {
+			m.store.Log("info", fmt.Sprintf("[%s] web UI withdrawn", name), nil)
+		}
+	}
 }
 
 // stopTailnet closes a tailnet's node and UI listener. With remove set (the
@@ -380,16 +436,17 @@ func (m *Manager) stopTailnet(name string, remove bool) {
 		delete(m.nodeDirs, name)
 		delete(m.ephemeral, name)
 	}
-	if wl, ok := m.webListeners[name]; ok {
-		_ = wl.Close()
-		delete(m.webListeners, name)
-	}
+	ws, hasUI := m.webServers[name]
+	delete(m.webServers, name)
 	m.mu.Unlock()
+	if hasUI {
+		_ = ws.Close()
+	}
 
 	if !ok {
 		return
 	}
-	if remove && m.webAddr != "" {
+	if remove {
 		if err := deleteOwnedVIPService(context.Background(), client, owner, uiService); err != nil {
 			m.logger.Warn("web UI VIP: delete failed", "tailnet", name, "err", err)
 		}
@@ -943,13 +1000,13 @@ func (m *Manager) ownerID() string {
 }
 
 // serveWebUI registers the web UI VIP service (svc:tailnetlink unless the
-// config names another) as TCP:80 in the given tailnet and proxies incoming
-// connections to the local web UI server. The service goes through the same
+// config names another) as TCP:80 in the given tailnet and serves the
+// read-only UI handler on it directly. The service goes through the same
 // ownership guard as every other: if a service with that name exists and is
 // not ours, the UI is not published in this tailnet.
 func (m *Manager) serveWebUI(ctx context.Context, tailnetName string, srv *tsnet.Server, client *tsclient.Client, tags []string) {
 	m.mu.Lock()
-	svcName, owner := m.uiService, m.owner
+	svcName, owner, handler := m.uiService, m.owner, m.ui
 	m.mu.Unlock()
 
 	if _, err := ensureVIPService(ctx, client, owner, tsclient.VIPService{
@@ -975,65 +1032,33 @@ func (m *Manager) serveWebUI(ctx context.Context, tailnetName string, srv *tsnet
 		return
 	}
 
+	hs := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
+	}
 	m.mu.Lock()
-	m.webListeners[tailnetName] = ln
-	m.mu.Unlock()
-
-	localAddr := uiDialAddr(m.webAddr)
-
-	m.logger.Info("web UI VIP service active", "tailnet", tailnetName, "service", svcName, "local", localAddr)
-	m.store.Log("info", fmt.Sprintf("[%s] web UI: %s → %s", tailnetName, svcName, localAddr), nil)
-
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			select {
-			case <-ctx.Done():
-			default:
-				m.logger.Warn("web UI VIP: accept error", "tailnet", tailnetName, "err", err)
-			}
-			return
-		}
-		go proxyToLocal(conn, localAddr)
-	}
-}
-
-// uiDialAddr is where the UI VIP forwards to: the local listener, through
-// loopback unless it is bound to one specific address.
-func uiDialAddr(webAddr string) string {
-	host, port, _ := net.SplitHostPort(webAddr)
-	if port == "" {
-		port = "8888"
-	}
-	if ip, err := netip.ParseAddr(host); host == "" || err != nil || ip.IsUnspecified() {
-		host = "127.0.0.1"
-	}
-	return net.JoinHostPort(host, port)
-}
-
-func proxyToLocal(client net.Conn, localAddr string) {
-	defer client.Close()
-	upstream, err := net.Dial("tcp", localAddr)
-	if err != nil {
+	// The UI may have been turned off, or the tailnet stopped, while the
+	// service was being set up.
+	if !m.uiOn || m.servers[tailnetName] != srv {
+		m.mu.Unlock()
+		_ = ln.Close()
 		return
 	}
-	defer upstream.Close()
+	if old, ok := m.webServers[tailnetName]; ok {
+		_ = old.Close()
+	}
+	m.webServers[tailnetName] = hs
+	m.mu.Unlock()
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		io.Copy(upstream, client) //nolint:errcheck
-		if hc, ok := upstream.(halfCloser); ok {
-			hc.CloseWrite() //nolint:errcheck
+	m.logger.Info("web UI VIP service active", "tailnet", tailnetName, "service", svcName)
+	m.store.Log("info", fmt.Sprintf("[%s] web UI published as %s", tailnetName, svcName), nil)
+
+	if err := hs.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		select {
+		case <-ctx.Done():
+		default:
+			m.logger.Warn("web UI VIP: serve error", "tailnet", tailnetName, "err", err)
 		}
-	}()
-	go func() {
-		defer wg.Done()
-		io.Copy(client, upstream) //nolint:errcheck
-		if hc, ok := client.(halfCloser); ok {
-			hc.CloseWrite() //nolint:errcheck
-		}
-	}()
-	wg.Wait()
+	}
 }

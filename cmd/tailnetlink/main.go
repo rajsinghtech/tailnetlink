@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -40,6 +41,7 @@ func run(args []string, stdout io.Writer, sig <-chan os.Signal) int {
 	var (
 		dataFile        = fs.String("data", "tailnetlink.json", "path to config/state JSON file")
 		listenAddr      = fs.String("listen", "", "web UI listen address (default 127.0.0.1:8888)")
+		uiFlag          = fs.Bool("ui", true, "serve the read-only web UI locally and publish it in every tailnet; -ui=false turns both off whatever the config says")
 		logLevel        = fs.String("log-level", "info", "log level: debug, info, warn, error")
 		shutdownTimeout = fs.Duration("shutdown-timeout", 20*time.Second, "how long to wait for a clean shutdown before giving up")
 	)
@@ -89,13 +91,22 @@ func run(args []string, stdout io.Writer, sig <-chan os.Signal) int {
 	}()
 
 	stateStore := state.New()
-	mgr := bridge.New(stateStore, logger, addr)
+	// The UI is on unless -ui=false or ui.enabled is false at startup. With
+	// it on, a later config change can still withdraw or republish the VIP;
+	// the local listener follows the setting at startup.
+	uiOn := *uiFlag && cfgStore.Get().UIEnabled()
+	srv := server.New(addr, stateStore, cfgStore.Get, logger)
+	var uiHandler http.Handler
+	if *uiFlag {
+		uiHandler = srv.Handler()
+	}
+	mgr := bridge.New(stateStore, logger, uiHandler)
 	mgr.SetDefaultStateDir(filepath.Join(filepath.Dir(*dataFile), "tailnetlink-state"))
 
 	// Apply initial config (no-op if empty).
 	go mgr.Reconcile(ctx, cfgStore.Get())
 
-	// Hot-reload on every UI-driven change or direct file edit.
+	// Hot-reload when the config file changes.
 	cfgStore.OnChange(func(cfg *config.Config) {
 		mgr.Reconcile(ctx, cfg)
 	})
@@ -116,8 +127,13 @@ func run(args []string, stdout io.Writer, sig <-chan os.Signal) int {
 		}
 	}()
 
-	srvErr := make(chan error, 1)
-	go func() { srvErr <- server.New(addr, stateStore, cfgStore, logger).Run(ctx) }()
+	var srvErr chan error
+	if uiOn {
+		srvErr = make(chan error, 1)
+		go func() { srvErr <- srv.Run(ctx) }()
+	} else {
+		logger.Info("web UI is off")
+	}
 
 	code := 0
 	select {
