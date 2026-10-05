@@ -8,7 +8,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 env:
   REGISTRY: ghcr.io
@@ -25,11 +24,28 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Check go mod tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
       - name: Vet
         run: go vet ./...
 
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
 
       - name: Build
         run: CGO_ENABLED=0 go build -ldflags "-s -w" -o tailnetlink ./cmd/tailnetlink
@@ -37,6 +53,9 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v6
 
