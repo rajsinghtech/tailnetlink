@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -32,12 +34,54 @@ func New(addr string, store *state.Store, cfgStore *config.Store, logger *slog.L
 	return &Server{addr: addr, store: store, cfgStore: cfgStore, logger: logger}
 }
 
-func (s *Server) Run() error {
+// Run listens on the configured address and serves until ctx is done.
+func (s *Server) Run(ctx context.Context) error {
+	ln, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		return err
+	}
+	return s.Serve(ctx, ln)
+}
+
+// Serve serves on ln until ctx is done, then shuts down. Open requests,
+// including SSE streams, see their context cancelled and get up to
+// shutdownGrace to finish.
+func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
+	srv := &http.Server{
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
+	}
+	errc := make(chan error, 1)
+	go func() { errc <- srv.Serve(ln) }()
+	s.logger.Info("web UI available", "addr", "http://"+ln.Addr().String())
+
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+	}
+	sctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+	defer cancel()
+	if err := srv.Shutdown(sctx); err != nil {
+		_ = srv.Close()
+	}
+	if err := <-errc; err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+// shutdownGrace is how long Serve waits for open requests after ctx is done.
+var shutdownGrace = 5 * time.Second
+
+// Handler returns the HTTP handler for the UI and its API.
+func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	webRoot, err := fs.Sub(webFS, "web")
 	if err != nil {
-		return err
+		panic(err) // the embedded tree always has web/
 	}
 	mux.Handle("/", http.FileServer(http.FS(webRoot)))
 
@@ -63,8 +107,7 @@ func (s *Server) Run() error {
 	// SSE
 	mux.HandleFunc("/api/events", s.handleSSE)
 
-	s.logger.Info("web UI available", "addr", "http://localhost"+s.addr)
-	return http.ListenAndServe(s.addr, mux)
+	return mux
 }
 
 // ── Status / data handlers ────────────────────────────────────────────────────

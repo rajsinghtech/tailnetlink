@@ -121,6 +121,7 @@ Services made by older versions of tailnetlink only carry `tailnetlink/managed=t
 | `-data` | `tailnetlink.json` | Path to config/state JSON file |
 | `-listen` | `:8888` | Web UI listen address |
 | `-log-level` | `info` | Log level: `debug`, `info`, `warn`, `error` |
+| `-shutdown-timeout` | `20s` | How long to wait for a clean shutdown on SIGTERM or SIGINT. A second signal exits at once. |
 
 ## Docker
 

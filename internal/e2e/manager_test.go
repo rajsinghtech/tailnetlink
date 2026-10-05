@@ -147,7 +147,7 @@ func startManager(t *testing.T, cfg *config.Config, webAddr string) *running {
 	r.logger = slog.New(slog.NewTextHandler(r.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	r.m = bridge.New(r.store, r.logger, webAddr)
 	t.Cleanup(func() {
-		cancel()
+		r.stop(t)
 		if t.Failed() {
 			t.Logf("tailnetlink log:\n%s", r.logs.String())
 		}
@@ -157,6 +157,18 @@ func startManager(t *testing.T, cfg *config.Config, webAddr string) *running {
 	})
 	r.m.Reconcile(ctx, cfg)
 	return r
+}
+
+// stop shuts the manager down the way SIGTERM does: cancel, then Close with
+// the default 20 s limit. Calling it twice is fine.
+func (r *running) stop(t *testing.T) {
+	t.Helper()
+	r.cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := r.m.Close(ctx); err != nil {
+		t.Errorf("close: %v", err)
+	}
 }
 
 // bridgeStatus returns the status and error of a bridge entry, or "" if it

@@ -70,7 +70,7 @@ func TestManagerLeavesForeignServiceAlone(t *testing.T) {
 	}
 	echoVia(t, ctx, cl, netip.AddrPortFrom(vip, 9000), "after")
 
-	r.cancel()
+	r.stop(t)
 	time.Sleep(500 * time.Millisecond)
 	if got, _ := b.dstAPI.Service(foreign.Name); !reflect.DeepEqual(got, foreign) {
 		t.Errorf("foreign service changed after shutdown: %+v", got)
@@ -122,7 +122,7 @@ func TestManagerInstancesDoNotTouchEachOther(t *testing.T) {
 	dnsOwner := ownerOf(dnsVIP)
 	before, _ := b.dstAPI.Service(svcA)
 
-	rb.cancel()
+	rb.stop(t)
 	waitFor(t, 30*time.Second, "instance B's own service removed on its shutdown", func() bool {
 		_, ok := b.dstAPI.Service(svcB)
 		return !ok
