@@ -374,8 +374,8 @@ func startBorder(t *testing.T, ctx context.Context, src, dst *side, o linkOpts) 
 	poll, dial := config.Duration{Duration: 5 * time.Second}, config.Duration{Duration: 10 * time.Second}
 	bd := &config.Border{
 		Name:   name,
-		Source: config.Side{OAuth: creds["src"], Tags: []string{linkTag}, Tailnet: src.id},
-		Dest:   config.Side{OAuth: creds["dst"], Tags: []string{linkTag}, Tailnet: dst.id},
+		Source: config.Side{OAuth: creds[src.role], Tags: []string{linkTag}, Tailnet: src.id},
+		Dest:   config.Side{OAuth: creds[dst.role], Tags: []string{linkTag}, Tailnet: dst.id},
 		Node:   config.NodeConfig{StateDir: stateDir, Ephemeral: !o.persistent},
 		Links: []config.Link{{
 			Name:    "echo",
