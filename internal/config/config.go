@@ -52,6 +52,9 @@ type Config struct {
 	PollInterval Duration                 `json:"poll_interval"`
 	DialTimeout  Duration                 `json:"dial_timeout"`
 	ListenAddr   string                   `json:"listen_addr"`
+	// MetricsAddr is where /healthz, /readyz and /metrics are served,
+	// separate from the UI. "off" turns the listener off.
+	MetricsAddr string `json:"metrics_addr,omitempty"`
 }
 
 // DefaultUIServiceName is the VIP service the web UI is published as.
@@ -228,6 +231,11 @@ type BridgeRule struct {
 // tailnets through its VIP service, not from the local network.
 const DefaultListenAddr = "127.0.0.1:8888"
 
+// DefaultMetricsAddr is where the metrics and health endpoints listen
+// unless the config or -metrics-listen says otherwise. In a container set
+// it to ":9090" so probes can reach it.
+const DefaultMetricsAddr = "127.0.0.1:9090"
+
 func defaults() *Config {
 	return &Config{
 		Tailnets:     make(map[string]TailnetConfig),
@@ -235,6 +243,7 @@ func defaults() *Config {
 		PollInterval: Duration{30 * time.Second},
 		DialTimeout:  Duration{10 * time.Second},
 		ListenAddr:   DefaultListenAddr,
+		MetricsAddr:  DefaultMetricsAddr,
 	}
 }
 

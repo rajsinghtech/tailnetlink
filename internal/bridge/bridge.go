@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/netip"
@@ -17,7 +18,9 @@ import (
 	"time"
 
 	"github.com/rajsinghtech/tailnetlink/internal/config"
+	"github.com/rajsinghtech/tailnetlink/internal/metrics"
 	"github.com/rajsinghtech/tailnetlink/internal/state"
+	"github.com/rajsinghtech/tailnetlink/internal/tsapi"
 	tsclient "tailscale.com/client/tailscale/v2"
 	"tailscale.com/tsnet"
 )
@@ -49,6 +52,10 @@ type Manager struct {
 	ruleDone    map[string]chan struct{}      // closed when the rule goroutine fully exits
 	ruleRemove  map[string]bool               // set by stopRule: true means delete what the rule owns
 	webServers  map[string]*http.Server       // UI server on the VIP, keyed by tailnet name
+
+	metrics  *metrics.Metrics     // nil means no metrics
+	lastPoll map[string]time.Time // rule name -> last successful discovery poll
+	applied  bool                 // a Reconcile has finished at least once
 
 	dnsMu      sync.Mutex                 // protects sharedDNS and dnsPending
 	sharedDNS  map[string]*sharedDNSEntry // keyed by destName+"/"+parentDomain
@@ -83,7 +90,92 @@ func New(store *state.Store, logger *slog.Logger, ui http.Handler) *Manager {
 		ephemeral:   make(map[string]bool),
 		sharedDNS:   make(map[string]*sharedDNSEntry),
 		dnsPending:  make(map[string]*dnsCreation),
+		lastPoll:    make(map[string]time.Time),
 	}
+}
+
+// SetMetrics makes the manager record into mt. Call it before the first
+// Reconcile.
+func (m *Manager) SetMetrics(mt *metrics.Metrics) {
+	m.mu.Lock()
+	m.metrics = mt
+	m.mu.Unlock()
+	mt.TrackBridges([]string{state.BridgeStatusPending, state.BridgeStatusActive, state.BridgeStatusError}, func() map[string]int {
+		counts := make(map[string]int)
+		for _, b := range m.store.GetBridges() {
+			counts[b.Status]++
+		}
+		return counts
+	})
+}
+
+// Ready returns nil once the config has been applied, every configured
+// tailnet's node is up and every tailnet rule has polled recently (within
+// three poll intervals). Otherwise it says what is missing.
+func (m *Manager) Ready() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.applied {
+		return errors.New("config not applied yet")
+	}
+	for _, name := range slices.Sorted(maps.Keys(m.cfg.Tailnets)) {
+		if m.servers[name] == nil {
+			return fmt.Errorf("tailnet %q is not connected", name)
+		}
+	}
+	poll := m.cfg.PollInterval.Duration
+	if poll <= 0 {
+		poll = 30 * time.Second
+	}
+	for _, r := range m.cfg.Bridges {
+		if len(r.LocalSources) > 0 {
+			continue
+		}
+		last, ok := m.lastPoll[r.Name]
+		if !ok {
+			return fmt.Errorf("rule %q has not polled yet", r.Name)
+		}
+		if age := time.Since(last); age > 3*poll {
+			return fmt.Errorf("rule %q last polled %s ago", r.Name, age.Round(time.Second))
+		}
+	}
+	return nil
+}
+
+func (m *Manager) pollDone(rule string, d time.Duration, err error) {
+	m.mu.Lock()
+	mt := m.metrics
+	if err == nil {
+		m.lastPoll[rule] = time.Now()
+	}
+	m.mu.Unlock()
+	mt.PollDone(rule, d, err)
+}
+
+// conflict records an ownership conflict in tailnet if err is one.
+func (m *Manager) conflict(tailnet string, err error) {
+	if errors.Is(err, ErrNameConflict) {
+		m.mu.Lock()
+		mt := m.metrics
+		m.mu.Unlock()
+		mt.Conflict(tailnet)
+	}
+}
+
+func (m *Manager) metricsRef() *metrics.Metrics {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.metrics
+}
+
+func (m *Manager) newAPIClient(tc config.TailnetConfig) *tsclient.Client {
+	m.mu.Lock()
+	mt := m.metrics
+	m.mu.Unlock()
+	if mt == nil {
+		return newAPIClient(tc)
+	}
+	return tsapi.NewClient(tc, mt.Transport(nil))
 }
 
 // Reconcile diffs newCfg against the running config and applies the minimum
@@ -215,6 +307,7 @@ func (m *Manager) Reconcile(ctx context.Context, newCfg *config.Config) {
 
 	m.mu.Lock()
 	m.cfg = newCfg
+	m.applied = true
 	m.mu.Unlock()
 }
 
@@ -319,7 +412,7 @@ func hasNodeState(dir string) bool {
 }
 
 func (m *Manager) startTailnet(ctx context.Context, name string, tc config.TailnetConfig, stateDir string) error {
-	apiClient := newAPIClient(tc)
+	apiClient := m.newAPIClient(tc)
 	dir, err := m.nodeDir(name, tc, stateDir)
 	if err != nil {
 		return err
@@ -469,6 +562,7 @@ func (m *Manager) stopRule(name string, remove bool) {
 	if ok {
 		delete(m.rules, name)
 		delete(m.ruleDone, name)
+		delete(m.lastPoll, name)
 		m.ruleRemove[name] = remove
 	}
 	m.mu.Unlock()
@@ -572,6 +666,7 @@ func (m *Manager) runRule(ctx context.Context, rule config.BridgeRule, pollInter
 	disc.OnWarn(func(msg string) {
 		m.store.Log("warn", fmt.Sprintf("[%s] %s", rule.Name, msg), nil)
 	})
+	disc.onPoll = func(d time.Duration, err error) { m.pollDone(rule.Name, d, err) }
 
 	destNames := make([]string, len(dests))
 	for i, d := range dests {
@@ -659,6 +754,7 @@ func (m *Manager) handleDeviceAdded(
 
 		vip, err := dest.rec.Ensure(ctx, rule.SourceTailnet, dev, shortName)
 		if err != nil {
+			m.conflict(dest.name, err)
 			m.logger.Error("reconciler: ensure failed", "rule", rule.Name, "dest", dest.name, "device", dev.Name, "err", err)
 			m.store.UpsertBridge(state.BridgeEntry{
 				ID: bridgeID, RuleName: rule.Name, DestTailnet: dest.name,
@@ -671,6 +767,7 @@ func (m *Manager) handleDeviceAdded(
 		}
 
 		fwd := NewForwarder(dest.srv, srcSrv, vip, bridgeID, dialTimeout, m.store, m.logger)
+		fwd.rule, fwd.metrics = rule.Name, m.metricsRef()
 		if err := startForwarder(fwd, ctx); err != nil {
 			m.logger.Error("forwarder: start failed", "rule", rule.Name, "dest", dest.name, "device", dev.Name, "err", err)
 			m.store.UpsertBridge(state.BridgeEntry{
@@ -870,6 +967,7 @@ func (m *Manager) acquireSharedDNS(ctx context.Context, destName, parentDomain s
 			dnsServer := NewDNSServer(dest.srv, dest.client, dest.tags, m.ownerID(), parentDomain, m.logger)
 			resolverIP, err := dnsServer.Start(ctx)
 			if err != nil {
+				m.conflict(destName, err)
 				return nil, fmt.Errorf("shared DNS start: %w", err)
 			}
 			sdns := NewSplitDNSConfigurator(dest.client, parentDomain, resolverIP.String(), m.logger)
@@ -1016,6 +1114,7 @@ func (m *Manager) serveWebUI(ctx context.Context, tailnetName string, srv *tsnet
 		Comment: "managed by tailnetlink (web UI)",
 	}); err != nil {
 		if errors.Is(err, ErrNameConflict) {
+			m.conflict(tailnetName, err)
 			m.logger.Error("web UI not published", "tailnet", tailnetName, "err", err)
 			m.store.Log("error", fmt.Sprintf("[%s] web UI not published: %v", tailnetName, err), nil)
 			return

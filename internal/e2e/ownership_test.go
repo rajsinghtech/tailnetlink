@@ -59,6 +59,9 @@ func TestManagerLeavesForeignServiceAlone(t *testing.T) {
 		st, msg := r.bridgeStatus(id)
 		return st == string(state.BridgeStatusError) && strings.HasPrefix(msg, "name conflict")
 	})
+	if n := metricSum(t, r.metrics, "tailnetlink_ownership_conflicts_total", nil); n < 1 {
+		t.Errorf("ownership conflicts = %v, want at least 1", n)
+	}
 
 	if got, _ := b.dstAPI.Service(foreign.Name); !reflect.DeepEqual(got, foreign) {
 		t.Errorf("foreign service changed:\n got %+v\nwant %+v", got, foreign)

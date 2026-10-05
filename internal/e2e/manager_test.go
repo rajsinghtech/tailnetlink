@@ -21,6 +21,7 @@ import (
 
 	"github.com/rajsinghtech/tailnetlink/internal/bridge"
 	"github.com/rajsinghtech/tailnetlink/internal/config"
+	"github.com/rajsinghtech/tailnetlink/internal/metrics"
 	"github.com/rajsinghtech/tailnetlink/internal/server"
 	"github.com/rajsinghtech/tailnetlink/internal/state"
 	"tailscale.com/net/netns"
@@ -146,12 +147,13 @@ func (l *lockedBuffer) String() string {
 }
 
 type running struct {
-	m      *bridge.Manager
-	logger *slog.Logger
-	store  *state.Store
-	logs   *lockedBuffer
-	ctx    context.Context
-	cancel context.CancelFunc
+	m       *bridge.Manager
+	metrics *metrics.Metrics
+	logger  *slog.Logger
+	store   *state.Store
+	logs    *lockedBuffer
+	ctx     context.Context
+	cancel  context.CancelFunc
 
 	cfgMu sync.Mutex
 	cfg   *config.Config // last config passed to reconcile
@@ -172,6 +174,8 @@ func startManager(t *testing.T, cfg *config.Config, webAddr string) *running {
 		go srv.Run(ctx) //nolint:errcheck // stops with the manager
 	}
 	r.m = bridge.New(r.store, r.logger, ui)
+	r.metrics = metrics.New()
+	r.m.SetMetrics(r.metrics)
 	t.Cleanup(func() {
 		r.stop(t)
 		if t.Failed() {
