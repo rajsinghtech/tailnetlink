@@ -30,4 +30,5 @@ docker-run:
 	docker run --rm \
 		-p 8080:8080 \
 		-v $(PWD)/data.json:/data.json \
+		-v tailnetlink-state:/tailnetlink-state \
 		tailnetlink:latest

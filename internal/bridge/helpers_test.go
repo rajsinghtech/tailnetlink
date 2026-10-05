@@ -3,7 +3,6 @@ package bridge
 import (
 	"io"
 	"log/slog"
-	"net/netip"
 	"testing"
 	"time"
 )
@@ -40,5 +39,3 @@ func callStrings[T interface{ String() string }](cs []T) []string {
 	}
 	return out
 }
-
-func mustAddr(s string) netip.Addr { return netip.MustParseAddr(s) }

@@ -39,6 +39,11 @@ type Config struct {
 
 	UI UIConfig `json:"ui,omitzero"`
 
+	// StateDir holds each tailnet's node state so nodes keep their identity
+	// across restarts. Empty means a tailnetlink-state directory next to the
+	// config file.
+	StateDir string `json:"state_dir,omitempty"`
+
 	Tailnets     map[string]TailnetConfig `json:"tailnets"`
 	Bridges      []BridgeRule             `json:"bridges"`
 	PollInterval Duration                 `json:"poll_interval"`
@@ -85,6 +90,11 @@ type TailnetConfig struct {
 	OAuth   OAuthCreds `json:"oauth"`
 	Tags    []string   `json:"tags,omitempty"`
 	Tailnet string     `json:"tailnet"`
+
+	// Ephemeral makes this tailnet's node ephemeral: no saved state, a new
+	// node on every start, and the control plane removes it when it goes
+	// offline. The default is a persistent node.
+	Ephemeral bool `json:"ephemeral,omitempty"`
 
 	// ControlURL and APIBaseURL point the node and the API client at
 	// something other than the hosted control plane. Empty means the

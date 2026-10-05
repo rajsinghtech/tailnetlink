@@ -16,13 +16,13 @@ source tailnet                         dest tailnet
 ## How it works
 
 1. Authenticates to each tailnet with OAuth credentials (OAuth scopes: `devices:read`, `keys:write`, `vip-services:write`).
-2. Spins up an ephemeral [tsnet](https://pkg.go.dev/tailscale.com/tsnet) node in each tailnet.
+2. Spins up a [tsnet](https://pkg.go.dev/tailscale.com/tsnet) node in each tailnet.
 3. Polls the Tailscale API for devices matching the configured tag or FQDN list.
 4. Creates a Tailscale VIP service in the destination tailnet for each discovered device.
 5. Registers the tsnet node as the VIP service host and proxies TCP connections back to the source device through the source tsnet node.
 6. Optionally starts an authoritative DNS server and configures split-DNS so `{hostname}.{zone}` resolves to the VIP IP.
 
-No static auth keys are stored — a fresh ephemeral key is generated at startup via the OAuth API.
+No static auth keys are stored. The first start mints an auth key through the OAuth API; after that each node reuses its saved state, so it keeps its identity and its VIP services across restarts.
 
 ## Quick start
 
@@ -88,6 +88,23 @@ If a service with the name tailnetlink wants already exists and isn't ours, tail
 
 Services made by older versions of tailnetlink only carry `tailnetlink/managed=true`. They are treated as foreign and never adopted. If you ran an older version, delete those services by hand in the admin console.
 
+### Restarts and node state
+
+Stopping tailnetlink (SIGTERM, a restart, a deploy) does not delete anything in your tailnets. VIP services, the DNS VIP and split-DNS stay in place, so clients keep their addresses and DNS keeps resolving while tailnetlink is down for a moment. tailnetlink only deletes a service when the rule or tailnet that made it is removed from the config while it is running.
+
+Each node keeps its state in `state_dir/<tailnet name>` (mode 0700). `state_dir` defaults to a `tailnetlink-state` directory next to the config file. Keep that directory on persistent storage; if it is lost, the next start registers new nodes, and the old devices stay in the admin console until you remove them. If saved state stops working (for example the device was deleted), tailnetlink logs a warning, wipes it and registers a fresh node.
+
+Set `"ephemeral": true` on a tailnet to get the old behavior for that node: no saved state, a new ephemeral device every start, removed by the control plane once it goes offline.
+
+To remove everything an instance created, stop it and run:
+
+```bash
+tailnetlink prune -data data.json -dry-run   # show what would go
+tailnetlink prune -data data.json
+```
+
+`prune` deletes every VIP service owned by this `instance_id` in every configured tailnet and takes their addresses out of split-DNS. Services owned by anything else are left alone. It does not remove the tailnetlink devices themselves.
+
 ### Bridge rule fields
 
 | Field | Description |
@@ -123,11 +140,13 @@ Services made by older versions of tailnetlink only carry `tailnetlink/managed=t
 | `-log-level` | `info` | Log level: `debug`, `info`, `warn`, `error` |
 | `-shutdown-timeout` | `20s` | How long to wait for a clean shutdown on SIGTERM or SIGINT. A second signal exits at once. |
 
+`tailnetlink prune [-data file] [-dry-run]` deletes this instance's services; see above.
+
 ## Docker
 
 ```bash
 make docker-build
-make docker-run       # mounts data.json from current directory
+make docker-run       # mounts data.json from current directory and a volume for node state
 ```
 
 Or manually:
@@ -136,8 +155,11 @@ Or manually:
 docker run --rm \
   -p 8080:8080 \
   -v $(pwd)/data.json:/data.json \
+  -v tailnetlink-state:/tailnetlink-state \
   tailnetlink:latest
 ```
+
+Node state lives in `/tailnetlink-state` (next to `/data.json`) unless `state_dir` says otherwise. Without a volume there, every container start registers new devices.
 
 ## Web UI
 

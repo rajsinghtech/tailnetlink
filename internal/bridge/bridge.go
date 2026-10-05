@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -28,18 +29,24 @@ type Manager struct {
 	store   *state.Store
 	webAddr string // local web UI listen address (e.g. ":8888")
 
-	reconcileMu  sync.Mutex // serializes concurrent Reconcile calls
-	mu           sync.Mutex
-	closed       bool                     // set by Close; Reconcile does nothing after
-	cfg          *config.Config           // last applied config
-	owner        string                   // instance id, written to tailnetlink/owner
-	uiService    string                   // VIP service name for the web UI
+	reconcileMu sync.Mutex // serializes concurrent Reconcile calls
+	mu          sync.Mutex
+	closed      bool           // set by Close; Reconcile does nothing after
+	cfg         *config.Config // last applied config
+	owner       string         // instance id, written to tailnetlink/owner
+	uiService   string         // VIP service name for the web UI
+
+	defaultStateDir string            // used when the config has no state_dir
+	nodeDirs        map[string]string // tailnet name -> node state dir
+	ephemeral       map[string]bool   // tailnet name -> node is ephemeral
+
 	servers      map[string]*tsnet.Server // keyed by tailnet name
 	apiClients   map[string]*tsclient.Client
 	forwarders   map[string]*Forwarder         // keyed by bridge entry ID (rule/dest/fqdn)
-	dnsCleanups  map[string]func()             // keyed by bridge entry ID; tears down per-device DNS
+	dnsCleanups  map[string]func(remove bool)  // keyed by bridge entry ID; tears down per-device DNS
 	rules        map[string]context.CancelFunc // keyed by bridge rule name
 	ruleDone     map[string]chan struct{}      // closed when the rule goroutine fully exits
+	ruleRemove   map[string]bool               // set by stopRule: true means delete what the rule owns
 	webListeners map[string]net.Listener       // keyed by tailnet name
 
 	dnsMu      sync.Mutex                 // protects sharedDNS and dnsPending
@@ -64,10 +71,13 @@ func New(store *state.Store, logger *slog.Logger, webAddr string) *Manager {
 		servers:      make(map[string]*tsnet.Server),
 		apiClients:   make(map[string]*tsclient.Client),
 		forwarders:   make(map[string]*Forwarder),
-		dnsCleanups:  make(map[string]func()),
+		dnsCleanups:  make(map[string]func(bool)),
 		rules:        make(map[string]context.CancelFunc),
 		ruleDone:     make(map[string]chan struct{}),
+		ruleRemove:   make(map[string]bool),
 		webListeners: make(map[string]net.Listener),
+		nodeDirs:     make(map[string]string),
+		ephemeral:    make(map[string]bool),
 		sharedDNS:    make(map[string]*sharedDNSEntry),
 		dnsPending:   make(map[string]*dnsCreation),
 	}
@@ -92,10 +102,10 @@ func (m *Manager) Reconcile(ctx context.Context, newCfg *config.Config) {
 
 	if restartAll {
 		for _, rule := range old.Bridges {
-			m.stopRule(rule.Name)
+			m.stopRule(rule.Name, false)
 		}
 		for name := range old.Tailnets {
-			m.stopTailnet(name)
+			m.stopTailnet(name, false)
 		}
 		m.mu.Lock()
 		m.owner = newCfg.InstanceID
@@ -105,24 +115,19 @@ func (m *Manager) Reconcile(ctx context.Context, newCfg *config.Config) {
 
 	// ── Tailnets ─────────────────────────────────────────────────────────────
 
+	// A tailnet whose config changed is restarted: its rules stop and come
+	// back, and nothing is deleted. A tailnet that left the config is removed:
+	// its rules delete what they own first, while the tailnet is still
+	// reachable.
 	for name, oldTC := range old.Tailnets {
 		newTC, still := newCfg.Tailnets[name]
 		if !still || !reflect.DeepEqual(oldTC, newTC) {
-			// Stop dependent rules first so they can clean up while the tailnet is
-			// still reachable, then tear down the tailnet itself.
 			for _, rule := range old.Bridges {
-				if rule.SourceTailnet == name {
-					m.stopRule(rule.Name)
-					continue
-				}
-				for _, dt := range rule.DestTailnets {
-					if dt == name {
-						m.stopRule(rule.Name)
-						break
-					}
+				if rule.SourceTailnet == name || slices.Contains(rule.DestTailnets, name) {
+					m.stopRule(rule.Name, !still)
 				}
 			}
-			m.stopTailnet(name)
+			m.stopTailnet(name, !still)
 		}
 	}
 
@@ -131,7 +136,7 @@ func (m *Manager) Reconcile(ctx context.Context, newCfg *config.Config) {
 		_, running := m.servers[name]
 		m.mu.Unlock()
 		if !running {
-			if err := m.startTailnet(ctx, name, tc); err != nil {
+			if err := m.startTailnet(ctx, name, tc, newCfg.StateDir); err != nil {
 				m.logger.Error("failed to start tailnet", "name", name, "err", err)
 				m.store.Log("error", fmt.Sprintf("tailnet %q failed to connect: %v", name, err), nil)
 			}
@@ -149,10 +154,12 @@ func (m *Manager) Reconcile(ctx context.Context, newCfg *config.Config) {
 		oldByName[r.Name] = r
 	}
 
+	// A changed rule restarts without deleting anything; a removed rule
+	// deletes the services it owns.
 	for name, oldRule := range oldByName {
 		newRule, still := newByName[name]
 		if !still || !reflect.DeepEqual(oldRule, newRule) {
-			m.stopRule(name)
+			m.stopRule(name, !still)
 		}
 	}
 
@@ -219,7 +226,7 @@ func (m *Manager) Close(ctx context.Context) error {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				m.stopRule(name)
+				m.stopRule(name, false)
 			}()
 		}
 		wg.Wait()
@@ -235,7 +242,7 @@ func (m *Manager) Close(ctx context.Context) error {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				m.stopTailnet(name)
+				m.stopTailnet(name, false)
 			}()
 		}
 		wg.Wait()
@@ -249,33 +256,103 @@ func (m *Manager) Close(ctx context.Context) error {
 	}
 }
 
-func (m *Manager) startTailnet(ctx context.Context, name string, tc config.TailnetConfig) error {
+// SetDefaultStateDir sets where node state goes when the config has no
+// state_dir. main points it next to the config file.
+func (m *Manager) SetDefaultStateDir(dir string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.defaultStateDir = dir
+}
+
+// reuseTimeout bounds how long a node with saved state gets to come up
+// before it is treated as logged out and re-registered with a new key.
+var reuseTimeout = time.Minute
+
+// nodeDir returns the state directory for a tailnet's node, creating it.
+// Persistent nodes live under state_dir and keep their identity across
+// restarts. Ephemeral nodes get a fresh directory every start.
+func (m *Manager) nodeDir(name string, tc config.TailnetConfig, stateDir string) (string, error) {
+	if tc.Ephemeral {
+		return os.MkdirTemp("", "tailnetlink-"+sanitize(name)+"-")
+	}
+	if stateDir == "" {
+		m.mu.Lock()
+		stateDir = m.defaultStateDir
+		m.mu.Unlock()
+	}
+	if stateDir == "" {
+		stateDir = "tailnetlink-state"
+	}
+	dir := filepath.Join(stateDir, sanitize(name))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("state dir: %w", err)
+	}
+	return dir, nil
+}
+
+// hasNodeState reports whether dir holds a node that already registered.
+func hasNodeState(dir string) bool {
+	fi, err := os.Stat(filepath.Join(dir, "tailscaled.state"))
+	return err == nil && fi.Size() > 0
+}
+
+func (m *Manager) startTailnet(ctx context.Context, name string, tc config.TailnetConfig, stateDir string) error {
 	apiClient := newAPIClient(tc)
-
-	authKey, err := m.fetchAuthKey(ctx, apiClient, tc.Tags)
+	dir, err := m.nodeDir(name, tc, stateDir)
 	if err != nil {
-		return fmt.Errorf("fetch auth key: %w", err)
+		return err
 	}
 
-	srv := &tsnet.Server{
-		Hostname:   "tailnetlink-" + name,
-		AuthKey:    authKey,
-		Ephemeral:  true,
-		Dir:        filepath.Join(os.TempDir(), "tailnetlink-"+name),
-		ControlURL: tc.ControlURL,
-		Logf: func(format string, args ...any) {
-			m.logger.Debug(fmt.Sprintf("[tsnet/%s] "+format, append([]any{name}, args...)...))
-		},
+	newServer := func(authKey string) *tsnet.Server {
+		return &tsnet.Server{
+			Hostname:   "tailnetlink-" + name,
+			AuthKey:    authKey,
+			Ephemeral:  tc.Ephemeral,
+			Dir:        dir,
+			ControlURL: tc.ControlURL,
+			Logf: func(format string, args ...any) {
+				m.logger.Debug(fmt.Sprintf("[tsnet/%s] "+format, append([]any{name}, args...)...))
+			},
+		}
 	}
 
-	m.logger.Info("connecting to tailnet", "name", name, "tailnet", tc.Tailnet)
-	if _, err := srv.Up(ctx); err != nil {
-		return fmt.Errorf("up: %w", err)
+	m.logger.Info("connecting to tailnet", "name", name, "tailnet", tc.Tailnet, "ephemeral", tc.Ephemeral, "dir", dir)
+	var srv *tsnet.Server
+	if !tc.Ephemeral && hasNodeState(dir) {
+		// Reuse the saved identity; no auth key needed.
+		srv = newServer("")
+		uctx, cancel := context.WithTimeout(ctx, reuseTimeout)
+		_, err := srv.Up(uctx)
+		cancel()
+		if err != nil {
+			m.logger.Warn("saved node did not come up; registering a new one", "name", name, "err", err)
+			_ = closeServer(srv)
+			srv = nil
+			if err := os.RemoveAll(dir); err != nil {
+				return fmt.Errorf("reset state dir: %w", err)
+			}
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				return fmt.Errorf("state dir: %w", err)
+			}
+		}
+	}
+	if srv == nil {
+		authKey, err := m.fetchAuthKey(ctx, apiClient, tc.Tags, tc.Ephemeral)
+		if err != nil {
+			return fmt.Errorf("fetch auth key: %w", err)
+		}
+		srv = newServer(authKey)
+		if _, err := srv.Up(ctx); err != nil {
+			_ = closeServer(srv)
+			return fmt.Errorf("up: %w", err)
+		}
 	}
 
 	m.mu.Lock()
 	m.servers[name] = srv
 	m.apiClients[name] = apiClient
+	m.nodeDirs[name] = dir
+	m.ephemeral[name] = tc.Ephemeral
 	m.mu.Unlock()
 
 	m.store.SetTailnet(name, state.TailnetStatus{Name: tc.Tailnet, Role: name, Connected: true})
@@ -288,12 +365,20 @@ func (m *Manager) startTailnet(ctx context.Context, name string, tc config.Tailn
 	return nil
 }
 
-func (m *Manager) stopTailnet(name string) {
+// stopTailnet closes a tailnet's node and UI listener. With remove set (the
+// tailnet left the config) it first deletes the UI service if we own it.
+// The node's saved state is kept either way, except for ephemeral nodes.
+func (m *Manager) stopTailnet(name string, remove bool) {
 	m.mu.Lock()
 	srv, ok := m.servers[name]
+	client := m.apiClients[name]
+	dir, ephemeral := m.nodeDirs[name], m.ephemeral[name]
+	uiService, owner := m.uiService, m.owner
 	if ok {
 		delete(m.servers, name)
 		delete(m.apiClients, name)
+		delete(m.nodeDirs, name)
+		delete(m.ephemeral, name)
 	}
 	if wl, ok := m.webListeners[name]; ok {
 		_ = wl.Close()
@@ -301,25 +386,43 @@ func (m *Manager) stopTailnet(name string) {
 	}
 	m.mu.Unlock()
 
-	if ok {
-		_ = closeServer(srv)
-		m.store.DeleteTailnet(name)
-		m.store.Log("info", fmt.Sprintf("disconnected from tailnet %q", name), nil)
+	if !ok {
+		return
 	}
+	if remove && m.webAddr != "" {
+		if err := deleteOwnedVIPService(context.Background(), client, owner, uiService); err != nil {
+			m.logger.Warn("web UI VIP: delete failed", "tailnet", name, "err", err)
+		}
+	}
+	_ = closeServer(srv)
+	if ephemeral && dir != "" {
+		_ = os.RemoveAll(dir)
+	}
+	m.store.DeleteTailnet(name)
+	m.store.Log("info", fmt.Sprintf("disconnected from tailnet %q", name), nil)
 }
 
-func (m *Manager) stopRule(name string) {
+// stopRule stops a running rule and waits for it to exit. With remove set
+// the rule deletes the services and DNS it owns on the way out; otherwise it
+// only stops listening and leaves everything in the tailnets as it is.
+func (m *Manager) stopRule(name string, remove bool) {
 	m.mu.Lock()
 	cancel, ok := m.rules[name]
 	done := m.ruleDone[name]
 	if ok {
 		delete(m.rules, name)
 		delete(m.ruleDone, name)
+		m.ruleRemove[name] = remove
 	}
 	m.mu.Unlock()
 	if !ok {
 		return
 	}
+	defer func() {
+		m.mu.Lock()
+		delete(m.ruleRemove, name)
+		m.mu.Unlock()
+	}()
 	cancel()
 	// Wait for the goroutine to fully exit so its cleanup (DNS teardown, forwarder
 	// stops) completes before the new rule starts.
@@ -329,6 +432,31 @@ func (m *Manager) stopRule(name string) {
 		case <-time.After(30 * time.Second):
 			m.logger.Warn("rule goroutine did not exit within 30s", "rule", name)
 		}
+	}
+}
+
+// removing reports whether the rule is being stopped for good, as opposed
+// to a restart or shutdown.
+func (m *Manager) removing(rule string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ruleRemove[rule]
+}
+
+// stopBridge stops one bridge's forwarder and DNS records. With remove set
+// the DNS cleanup may delete the shared DNS VIP; the bridge's own VIP
+// service is the caller's to delete.
+func (m *Manager) stopBridge(bridgeID string, remove bool) {
+	m.mu.Lock()
+	if fwd, ok := m.forwarders[bridgeID]; ok {
+		fwd.Stop()
+		delete(m.forwarders, bridgeID)
+	}
+	cleanup := m.dnsCleanups[bridgeID]
+	delete(m.dnsCleanups, bridgeID)
+	m.mu.Unlock()
+	if cleanup != nil {
+		cleanup(remove)
 	}
 }
 
@@ -405,6 +533,7 @@ func (m *Manager) runRule(ctx context.Context, rule config.BridgeRule, pollInter
 		select {
 		case <-ctx.Done():
 			devWg.Wait() // drain in-flight handlers before cleanup
+			remove := m.removing(rule.Name)
 			mu.Lock()
 			devs := make([]Device, 0, len(activeDevices))
 			for _, dev := range activeDevices {
@@ -414,21 +543,20 @@ func (m *Manager) runRule(ctx context.Context, rule config.BridgeRule, pollInter
 			for _, dev := range devs {
 				for _, dest := range dests {
 					bridgeID := rule.Name + "/" + dest.name + "/" + dev.FQDN
-					m.mu.Lock()
-					if fwd, ok := m.forwarders[bridgeID]; ok {
-						fwd.Stop()
-						delete(m.forwarders, bridgeID)
+					m.stopBridge(bridgeID, remove)
+					if remove {
+						if err := dest.rec.Delete(context.Background(), rule.SourceTailnet, dev, shortNameFor(rule, dev.FQDN)); err != nil {
+							m.logger.Warn("reconciler: delete failed", "rule", rule.Name, "dest", dest.name, "device", dev.Name, "err", err)
+						}
 					}
-					cleanup := m.dnsCleanups[bridgeID]
-					delete(m.dnsCleanups, bridgeID)
-					m.mu.Unlock()
-					if cleanup != nil {
-						cleanup()
-					}
-					_ = dest.rec.Delete(context.Background(), rule.SourceTailnet, dev, shortNameFor(rule, dev.FQDN))
 					m.store.DeleteBridge(bridgeID)
 				}
-				m.store.Log("info", fmt.Sprintf("[%s] bridge removed: %s", rule.Name, dev.Name), nil)
+				if remove {
+					m.store.Log("info", fmt.Sprintf("[%s] bridge removed: %s", rule.Name, dev.Name), nil)
+				}
+			}
+			if !remove {
+				m.store.Log("info", fmt.Sprintf("[%s] rule stopped; services left in place", rule.Name), nil)
 			}
 			return
 		case dev := <-disc.Added():
@@ -550,7 +678,7 @@ func (m *Manager) handleDeviceRemoved(
 		delete(m.dnsCleanups, bridgeID)
 		m.mu.Unlock()
 		if cleanup != nil {
-			cleanup()
+			cleanup(true)
 		}
 
 		m.store.DeleteBridge(bridgeID)
@@ -563,7 +691,7 @@ func (m *Manager) handleDeviceRemoved(
 	mu.Unlock()
 }
 
-func (m *Manager) fetchAuthKey(ctx context.Context, client *tsclient.Client, tags []string) (string, error) {
+func (m *Manager) fetchAuthKey(ctx context.Context, client *tsclient.Client, tags []string, ephemeral bool) (string, error) {
 	req := tsclient.CreateKeyRequest{
 		ExpirySeconds: 3600,
 		Description:   "tailnetlink-tsnet-node",
@@ -582,7 +710,7 @@ func (m *Manager) fetchAuthKey(ctx context.Context, client *tsclient.Client, tag
 					Tags          []string `json:"tags"`
 					Preauthorized bool     `json:"preauthorized"`
 				}{
-					Reusable: false, Ephemeral: true, Preauthorized: true, Tags: tags,
+					Reusable: false, Ephemeral: ephemeral, Preauthorized: true, Tags: tags,
 				},
 			},
 		},
@@ -711,7 +839,10 @@ func (m *Manager) acquireSharedDNS(ctx context.Context, destName, parentDomain s
 	}
 }
 
-func (m *Manager) releaseSharedDNS(destName, parentDomain, recordLabel string) {
+// releaseSharedDNS drops one record and one reference from a shared zone.
+// When the last reference goes the DNS listener stops, and with remove set
+// the DNS VIP and its split-DNS entry are deleted as well.
+func (m *Manager) releaseSharedDNS(destName, parentDomain, recordLabel string, remove bool) {
 	key := destName + "/" + parentDomain
 
 	m.dnsMu.Lock()
@@ -730,6 +861,9 @@ func (m *Manager) releaseSharedDNS(destName, parentDomain, recordLabel string) {
 	m.dnsMu.Unlock()
 
 	entry.server.Stop()
+	if !remove {
+		return
+	}
 	if err := entry.server.DeleteService(context.Background()); errors.Is(err, ErrNameConflict) {
 		// Someone else owns the DNS VIP now, so its address is not ours to
 		// take out of split-DNS either.
@@ -790,12 +924,12 @@ func (m *Manager) startDeviceDNS(ctx context.Context, bridgeID, ruleName, srcDom
 	}
 
 	m.mu.Lock()
-	m.dnsCleanups[bridgeID] = func() {
+	m.dnsCleanups[bridgeID] = func(remove bool) {
 		if srcAcquired {
-			m.releaseSharedDNS(dest.name, srcParent, srcLabel)
+			m.releaseSharedDNS(dest.name, srcParent, srcLabel, remove)
 		}
 		if customAcquired {
-			m.releaseSharedDNS(dest.name, customParent, customLabel)
+			m.releaseSharedDNS(dest.name, customParent, customLabel, remove)
 		}
 	}
 	m.mu.Unlock()

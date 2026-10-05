@@ -12,8 +12,6 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -53,11 +51,12 @@ type border struct {
 	src, dst         *tailnet
 	srcAPI, dstAPI   *ctlBridge
 	srcName, dstName string // tailnet names in the tailnetlink config
+	stateDir         string
 }
 
 func newBorder(t *testing.T) *border {
 	t.Helper()
-	b := &border{sfx: randSuffix(t)}
+	b := &border{sfx: randSuffix(t), stateDir: t.TempDir()}
 	b.src = newTailnet(t, "src.ts.net")
 	b.dst = newTailnet(t, "dst.ts.net")
 	b.srcAPI = newCtlBridge(t, b.src)
@@ -92,6 +91,7 @@ func (b *border) config(rules ...config.BridgeRule) *config.Config {
 			b.dstName: b.tailnetConfig(b.dst, b.dstAPI, s[1]),
 		},
 		Bridges:      rules,
+		StateDir:     b.stateDir,
 		PollInterval: config.Duration{Duration: 200 * time.Millisecond},
 		DialTimeout:  config.Duration{Duration: 5 * time.Second},
 	}
@@ -150,9 +150,6 @@ func startManager(t *testing.T, cfg *config.Config, webAddr string) *running {
 		r.stop(t)
 		if t.Failed() {
 			t.Logf("tailnetlink log:\n%s", r.logs.String())
-		}
-		for name := range cfg.Tailnets {
-			os.RemoveAll(filepath.Join(os.TempDir(), "tailnetlink-"+name))
 		}
 	})
 	r.m.Reconcile(ctx, cfg)

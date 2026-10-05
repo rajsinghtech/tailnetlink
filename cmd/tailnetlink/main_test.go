@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -13,6 +14,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/rajsinghtech/tailnetlink/internal/testutil/fakeapi"
+	tsclient "tailscale.com/client/tailscale/v2"
 )
 
 // syncBuffer is an io.Writer that tests can read while run writes to it.
@@ -197,5 +201,59 @@ func TestBinaryExitsOnSIGTERM(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		_ = cmd.Process.Kill()
 		t.Fatal("binary still running 10s after SIGTERM")
+	}
+}
+
+func TestPruneCommand(t *testing.T) {
+	api := fakeapi.New(t)
+	api.PutService(tsclient.VIPService{Name: "svc:mine", Addrs: []string{"100.100.0.1"}, Annotations: map[string]string{"tailnetlink/owner": "me"}})
+	api.PutService(tsclient.VIPService{Name: "svc:theirs", Annotations: map[string]string{"tailnetlink/owner": "them"}})
+	cfg := fmt.Sprintf(`{"instance_id":"me","tailnets":{"dest":{"tailnet":%q,"api_base_url":%q,"oauth":{"client_id":"id","client_secret":"s"}}}}`, api.Tailnet, api.URL())
+	p := filepath.Join(t.TempDir(), "c.json")
+	if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if c := run([]string{"prune", "-data", p, "-dry-run"}, &out, nil); c != 0 {
+		t.Fatalf("dry run exit %d:\n%s", c, out.String())
+	}
+	if !strings.Contains(out.String(), "would dest: delete service svc:mine") {
+		t.Errorf("dry run output:\n%s", out.String())
+	}
+	if _, ok := api.Service("svc:mine"); !ok {
+		t.Fatal("dry run deleted the service")
+	}
+
+	out.Reset()
+	if c := run([]string{"prune", "-data", p}, &out, nil); c != 0 {
+		t.Fatalf("exit %d:\n%s", c, out.String())
+	}
+	if got := api.ServiceNames(); len(got) != 1 || got[0] != "svc:theirs" {
+		t.Errorf("services left = %v", got)
+	}
+
+	out.Reset()
+	if c := run([]string{"prune", "-data", p}, &out, nil); c != 0 || !strings.Contains(out.String(), "nothing to prune") {
+		t.Errorf("second prune exit %d:\n%s", c, out.String())
+	}
+}
+
+func TestPruneCommandErrors(t *testing.T) {
+	if c := run([]string{"prune", "-h"}, io.Discard, nil); c != 0 {
+		t.Errorf("-h exit %d", c)
+	}
+	if c := run([]string{"prune", "-nope"}, io.Discard, nil); c != 2 {
+		t.Errorf("bad flag exit %d", c)
+	}
+	bad := filepath.Join(t.TempDir(), "bad.json")
+	_ = os.WriteFile(bad, []byte("{"), 0o600)
+	if c := run([]string{"prune", "-data", bad}, io.Discard, nil); c != 1 {
+		t.Errorf("bad config exit %d", c)
+	}
+	noID := filepath.Join(t.TempDir(), "empty.json")
+	_ = os.WriteFile(noID, []byte("{}"), 0o600)
+	if c := run([]string{"prune", "-data", noID}, io.Discard, nil); c != 1 {
+		t.Errorf("no instance_id exit %d", c)
 	}
 }

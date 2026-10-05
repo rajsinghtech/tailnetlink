@@ -206,24 +206,19 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 
 	<-ctx.Done()
 
+	// Shutdown and restarts leave the services in place; only removing the
+	// rule from the config deletes them.
+	remove := m.removing(rule.Name)
 	var wg sync.WaitGroup
 	for _, lb := range bridges {
 		wg.Add(1)
 		go func(lb localBridgeInfo) {
 			defer wg.Done()
-			m.mu.Lock()
-			if fwd, ok := m.forwarders[lb.bridgeID]; ok {
-				fwd.Stop()
-				delete(m.forwarders, lb.bridgeID)
-			}
-			cleanup := m.dnsCleanups[lb.bridgeID]
-			delete(m.dnsCleanups, lb.bridgeID)
-			m.mu.Unlock()
-			if cleanup != nil {
-				cleanup()
-			}
-			if err := lb.rec.Delete(context.Background(), "local", lb.dev, lb.shortName); err != nil {
-				m.logger.Warn("local rule: VIP delete failed", "bridge", lb.bridgeID, "err", err)
+			m.stopBridge(lb.bridgeID, remove)
+			if remove {
+				if err := lb.rec.Delete(context.Background(), "local", lb.dev, lb.shortName); err != nil {
+					m.logger.Warn("local rule: VIP delete failed", "bridge", lb.bridgeID, "err", err)
+				}
 			}
 			m.store.DeleteBridge(lb.bridgeID)
 		}(lb)

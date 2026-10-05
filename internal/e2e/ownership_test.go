@@ -78,7 +78,7 @@ func TestManagerLeavesForeignServiceAlone(t *testing.T) {
 }
 
 // Two instances with different instance ids on the same border never touch
-// each other's services, even when one of them shuts down.
+// each other's services, when one of them shuts down or removes its link.
 func TestManagerInstancesDoNotTouchEachOther(t *testing.T) {
 	ctx := e2eSetup(t)
 	b := newBorder(t)
@@ -122,14 +122,31 @@ func TestManagerInstancesDoNotTouchEachOther(t *testing.T) {
 	dnsOwner := ownerOf(dnsVIP)
 	before, _ := b.dstAPI.Service(svcA)
 
-	rb.stop(t)
-	waitFor(t, 30*time.Second, "instance B's own service removed on its shutdown", func() bool {
+	beforeB, _ := b.dstAPI.Service(svcB)
+
+	// B removes its link: only B's service goes.
+	cfgB2 := *cfgB
+	cfgB2.Bridges = nil
+	rb.m.Reconcile(rb.ctx, &cfgB2)
+	waitFor(t, 30*time.Second, "instance B's service removed with its link", func() bool {
 		_, ok := b.dstAPI.Service(svcB)
 		return !ok
 	})
 	time.Sleep(500 * time.Millisecond)
 	if after, ok := b.dstAPI.Service(svcA); !ok || !reflect.DeepEqual(after, before) {
+		t.Errorf("instance A's service changed when B removed its link: %+v", after)
+	}
+
+	// B shuts down: nothing in dst changes.
+	b.dstAPI.PutService(beforeB)
+	b.dstAPI.ResetCalls()
+	rb.stop(t)
+	time.Sleep(500 * time.Millisecond)
+	if after, ok := b.dstAPI.Service(svcA); !ok || !reflect.DeepEqual(after, before) {
 		t.Errorf("instance A's service changed when B stopped: %+v", after)
+	}
+	if _, ok := b.dstAPI.Service(svcB); !ok {
+		t.Error("instance B's service deleted on shutdown")
 	}
 	if dnsOwner == cfgA.InstanceID && ownerOf(dnsVIP) != cfgA.InstanceID {
 		t.Errorf("instance A's DNS VIP was touched by B")

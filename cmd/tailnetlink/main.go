@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -31,6 +32,9 @@ var forceExit = os.Exit
 // run is main without the process-global parts. It returns the exit code.
 // The first value on sig starts a clean shutdown; a second one exits at once.
 func run(args []string, stdout io.Writer, sig <-chan os.Signal) int {
+	if len(args) > 0 && args[0] == "prune" {
+		return runPrune(args[1:], stdout)
+	}
 	fs := flag.NewFlagSet("tailnetlink", flag.ContinueOnError)
 	fs.SetOutput(stdout)
 	var (
@@ -86,6 +90,7 @@ func run(args []string, stdout io.Writer, sig <-chan os.Signal) int {
 
 	stateStore := state.New()
 	mgr := bridge.New(stateStore, logger, addr)
+	mgr.SetDefaultStateDir(filepath.Join(filepath.Dir(*dataFile), "tailnetlink-state"))
 
 	// Apply initial config (no-op if empty).
 	go mgr.Reconcile(ctx, cfgStore.Get())
@@ -144,4 +149,47 @@ func run(args []string, stdout io.Writer, sig <-chan os.Signal) int {
 	}
 	logger.Info("stopped")
 	return code
+}
+
+// runPrune deletes every service this instance owns. See bridge.Prune.
+func runPrune(args []string, stdout io.Writer) int {
+	fs := flag.NewFlagSet("tailnetlink prune", flag.ContinueOnError)
+	fs.SetOutput(stdout)
+	dataFile := fs.String("data", "tailnetlink.json", "path to config JSON file")
+	dryRun := fs.Bool("dry-run", false, "print what would be deleted without deleting it")
+	fs.Usage = func() {
+		fmt.Fprintln(stdout, "usage: tailnetlink prune [-data file] [-dry-run]")
+		fmt.Fprintln(stdout, "Deletes every VIP service owned by this instance_id in every configured tailnet,")
+		fmt.Fprintln(stdout, "and removes their addresses from split-DNS. Stop tailnetlink first.")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	cfg, err := config.Load(*dataFile)
+	if err != nil {
+		fmt.Fprintln(stdout, "prune:", err)
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	actions, err := bridge.Prune(ctx, cfg, *dryRun)
+	prefix := ""
+	if *dryRun {
+		prefix = "would "
+	}
+	for _, a := range actions {
+		fmt.Fprintf(stdout, "%s%s\n", prefix, a)
+	}
+	if err != nil {
+		fmt.Fprintln(stdout, "prune:", err)
+		return 1
+	}
+	if len(actions) == 0 {
+		fmt.Fprintln(stdout, "nothing to prune")
+	}
+	return 0
 }

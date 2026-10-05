@@ -67,12 +67,10 @@ func (tm *testManager) bridgeActive(id string) bool {
 	return false
 }
 
-// KNOWN-BAD: when a rule's context is cancelled (process shutdown, or the
-// rule or its tailnet being reconfigured) every VIP service it created is
-// deleted from the destination tailnet. Flip in roadmap PR 6 (no delete on
-// shutdown): cancelling should make zero writes.
-func TestKnownBad_RuleShutdownDeletesServices(t *testing.T) {
-	tm := newTestManager(t)
+// runWebRule starts the tag:web rule from src to dest the way Reconcile
+// does, waits for its bridge to be active and returns the rule.
+func (tm *testManager) runWebRule(t *testing.T) config.BridgeRule {
+	t.Helper()
 	tm.src.SetDevices([]tsclient.Device{{
 		NodeID: "n1", Name: "web-1.src.example", Hostname: "web-1",
 		Tags: []string{"tag:web"}, Addresses: []string{"100.64.0.1"},
@@ -81,30 +79,130 @@ func TestKnownBad_RuleShutdownDeletesServices(t *testing.T) {
 		Name: "web", SourceTailnet: "src", DestTailnets: []string{"dest"},
 		SourceTag: "tag:web", Ports: []int{80},
 	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	tm.m.mu.Lock()
+	tm.m.rules[rule.Name] = cancel
+	tm.m.ruleDone[rule.Name] = done
+	tm.m.mu.Unlock()
 	go func() {
+		defer close(done)
 		tm.m.runRule(ctx, rule, time.Hour, time.Second)
-		close(done)
 	}()
-
+	t.Cleanup(cancel)
 	waitFor(t, 5*time.Second, "bridge active", func() bool {
 		return tm.bridgeActive("web/dest/web-1.src.example")
 	})
 	if _, ok := tm.dest.Service("svc:tnl-src-web-1"); !ok {
 		t.Fatal("service not created")
 	}
+	return rule
+}
 
+// Stopping a rule for a shutdown or restart makes no writes: the service
+// stays where it is for the next start to pick up.
+func TestRuleStopMakesNoWrites(t *testing.T) {
+	tm := newTestManager(t)
+	tm.runWebRule(t)
 	tm.dest.ResetCalls()
-	cancel()
-	<-done
+	tm.m.stopRule("web", false)
+
+	if w := tm.dest.Writes(); len(w) != 0 {
+		t.Errorf("writes on stop = %v, want none", callStrings(w))
+	}
+	if _, ok := tm.dest.Service("svc:tnl-src-web-1"); !ok {
+		t.Error("service deleted on stop")
+	}
+	if len(tm.m.store.GetBridges()) != 0 {
+		t.Error("bridge entries left in the state store")
+	}
+}
+
+// Removing a rule deletes the services it owns, and nothing else.
+func TestRuleRemoveDeletesOwnServices(t *testing.T) {
+	tm := newTestManager(t)
+	tm.dest.PutService(tsclient.VIPService{Name: "svc:other", Addrs: []string{"100.100.9.1"}})
+	tm.runWebRule(t)
+	tm.dest.ResetCalls()
+	tm.m.stopRule("web", true)
 
 	if got := callStrings(tm.dest.Writes()); !slices.Equal(got, []string{"DELETE /vip-services/svc:tnl-src-web-1"}) {
-		t.Errorf("writes on shutdown = %v", got)
+		t.Errorf("writes on remove = %v", got)
 	}
-	if _, ok := tm.dest.Service("svc:tnl-src-web-1"); ok {
-		t.Error("expected the service to be deleted on shutdown today")
+	if _, ok := tm.dest.Service("svc:other"); !ok {
+		t.Error("unrelated service deleted")
+	}
+}
+
+// Reconcile restarts a changed rule without deleting anything, and only a
+// rule that left the config gets its services deleted.
+func TestReconcileChangedVersusRemovedRule(t *testing.T) {
+	tm := newTestManager(t)
+	tm.src.SetDevices([]tsclient.Device{{
+		NodeID: "n1", Name: "web-1.src.example", Hostname: "web-1",
+		Tags: []string{"tag:web"}, Addresses: []string{"100.64.0.1"},
+	}})
+	base := *tm.m.cfg
+	base.InstanceID = testOwner
+	base.PollInterval = config.Duration{Duration: time.Hour}
+	base.DialTimeout = config.Duration{Duration: time.Second}
+	rule := config.BridgeRule{Name: "web", SourceTailnet: "src", DestTailnets: []string{"dest"}, SourceTag: "tag:web", Ports: []int{80}}
+	withRule := func(r ...config.BridgeRule) *config.Config {
+		c := base
+		c.Bridges = r
+		return &c
+	}
+	ctx := context.Background()
+
+	tm.m.Reconcile(ctx, withRule(rule))
+	waitFor(t, 5*time.Second, "bridge active", func() bool { return tm.bridgeActive("web/dest/web-1.src.example") })
+
+	tm.dest.ResetCalls()
+	changed := rule
+	changed.Ports = []int{80, 443}
+	tm.m.Reconcile(ctx, withRule(changed))
+	waitFor(t, 5*time.Second, "bridge active again", func() bool { return tm.bridgeActive("web/dest/web-1.src.example") })
+	for _, w := range callStrings(tm.dest.Writes()) {
+		if strings.HasPrefix(w, "DELETE") {
+			t.Errorf("changed rule deleted something: %s", w)
+		}
+	}
+	if svc, _ := tm.dest.Service("svc:tnl-src-web-1"); !slices.Equal(svc.Ports, []string{"tcp:80", "tcp:443"}) {
+		t.Errorf("ports after change = %v", svc.Ports)
+	}
+
+	tm.dest.ResetCalls()
+	tm.m.Reconcile(ctx, withRule())
+	if got := callStrings(tm.dest.Writes()); !slices.Equal(got, []string{"DELETE /vip-services/svc:tnl-src-web-1"}) {
+		t.Errorf("writes on removal = %v", got)
+	}
+}
+
+// A local rule's own services also survive a stop and go on remove.
+func TestLocalRuleStopVersusRemove(t *testing.T) {
+	for _, remove := range []bool{false, true} {
+		tm := newTestManager(t)
+		rule := config.BridgeRule{
+			Name: "loc", DestTailnets: []string{"dest"},
+			LocalSources: []config.LocalSourceSpec{{Addr: "localhost:8080", DNSName: "app.example.net"}},
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		tm.m.rules["loc"] = cancel
+		tm.m.ruleDone["loc"] = done
+		go func() {
+			defer close(done)
+			tm.m.runLocalRule(ctx, rule, time.Second)
+		}()
+		waitFor(t, 5*time.Second, "local bridge active", func() bool {
+			return tm.bridgeActive("loc/local/dest/localhost:8080")
+		})
+		tm.dest.ResetCalls()
+		tm.m.stopRule("loc", remove)
+		_, exists := tm.dest.Service("svc:app")
+		if exists == remove {
+			t.Errorf("remove=%v: service exists=%v, writes %v", remove, exists, callStrings(tm.dest.Writes()))
+		}
 	}
 }
 
@@ -148,43 +246,41 @@ func TestLocalRuleLeavesForeignServiceAlone(t *testing.T) {
 	}
 }
 
-// KNOWN-BAD: releasing the last reference to a shared DNS zone, which is what
-// rule shutdown does through dnsCleanups, deletes the DNS VIP service and
-// removes the split-DNS entry. Flip in roadmap PR 6 for the shutdown case.
-func TestKnownBad_ReleaseSharedDNSDeletesOnLastRef(t *testing.T) {
+// On a stop, releasing the last reference to a shared DNS zone only stops
+// the listener: the DNS VIP and split-DNS stay.
+func TestReleaseSharedDNSStopKeepsService(t *testing.T) {
 	tm := newTestManager(t)
-	const zone = "src.example"
-	const resolver = "100.100.0.53"
-	tm.dest.PutService(tsclient.VIPService{
-		Name: "svc:tnl-dns-src-example-dns", Addrs: []string{resolver},
-		Annotations: map[string]string{"tailnetlink/owner": testOwner},
-	})
-	tm.dest.SetSplitDNS(zone, []string{resolver})
-
-	client := tm.m.apiClients["dest"]
-	ds := NewDNSServer(nil, client, "dns-src-example", nil, testOwner, zone, discardLogger())
-	ds.svcName = "svc:tnl-dns-src-example-dns"
-	ds.AddRecord("web-1", mustAddr("100.100.0.1"))
-	tm.m.sharedDNS["dest/"+zone] = &sharedDNSEntry{
-		server: ds,
-		sdns:   NewSplitDNSConfigurator(client, zone, resolver, discardLogger()),
-		refs:   2,
+	sharedDNSFixture(tm, 2, map[string]string{"tailnetlink/owner": testOwner}, "100.100.0.53")
+	tm.m.releaseSharedDNS("dest", "src.example", "web-1", false)
+	tm.m.releaseSharedDNS("dest", "src.example", "web-2", false)
+	if w := tm.dest.Writes(); len(w) != 0 {
+		t.Errorf("writes = %v, want none", callStrings(w))
 	}
+	if _, ok := tm.m.sharedDNS["dest/src.example"]; ok {
+		t.Error("zone still held after the last release")
+	}
+	if !tm.dest.HasZone("src.example") {
+		t.Error("split-DNS zone removed on stop")
+	}
+}
 
-	// First release only drops a reference.
-	tm.m.releaseSharedDNS("dest", zone, "web-1")
+// On a remove, the last release deletes the DNS VIP and the split-DNS entry.
+func TestReleaseSharedDNSRemoveDeletesOnLastRef(t *testing.T) {
+	tm := newTestManager(t)
+	sharedDNSFixture(tm, 2, map[string]string{"tailnetlink/owner": testOwner}, "100.100.0.53")
+
+	tm.m.releaseSharedDNS("dest", "src.example", "web-1", true)
 	if w := tm.dest.Writes(); len(w) != 0 {
 		t.Fatalf("writes with refs remaining: %v", callStrings(w))
 	}
-
-	tm.m.releaseSharedDNS("dest", zone, "web-2")
+	tm.m.releaseSharedDNS("dest", "src.example", "web-2", true)
 	got := callStrings(tm.dest.Writes())
 	want := []string{"DELETE /vip-services/svc:tnl-dns-src-example-dns", "PATCH /dns/split-dns"}
 	if !slices.Equal(got, want) {
 		t.Errorf("writes = %v, want %v", got, want)
 	}
-	if tm.dest.HasZone(zone) {
-		t.Error("expected split-DNS zone to be removed today")
+	if tm.dest.HasZone("src.example") {
+		t.Error("split-DNS zone still there")
 	}
 }
 
@@ -209,7 +305,7 @@ func sharedDNSFixture(tm *testManager, refs int, annotations map[string]string, 
 func TestReleaseSharedDNSKeepsForeignResolver(t *testing.T) {
 	tm := newTestManager(t)
 	sharedDNSFixture(tm, 1, map[string]string{"tailnetlink/owner": testOwner}, "100.100.0.53", "100.99.0.1")
-	tm.m.releaseSharedDNS("dest", "src.example", "web-1")
+	tm.m.releaseSharedDNS("dest", "src.example", "web-1", true)
 	if got := tm.dest.SplitDNS("src.example"); !slices.Equal(got, []string{"100.99.0.1"}) {
 		t.Errorf("resolvers = %v, want only the foreign one", got)
 	}
@@ -220,7 +316,7 @@ func TestReleaseSharedDNSKeepsForeignResolver(t *testing.T) {
 func TestReleaseSharedDNSLeavesForeignDNSService(t *testing.T) {
 	tm := newTestManager(t)
 	sharedDNSFixture(tm, 1, map[string]string{"tailnetlink/owner": "someone-else"}, "100.100.0.53")
-	tm.m.releaseSharedDNS("dest", "src.example", "web-1")
+	tm.m.releaseSharedDNS("dest", "src.example", "web-1", true)
 	if w := tm.dest.Writes(); len(w) != 0 {
 		t.Errorf("writes = %v, want none", callStrings(w))
 	}
