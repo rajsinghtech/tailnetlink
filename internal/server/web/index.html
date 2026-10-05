@@ -788,7 +788,6 @@
       <div class="card-header">
         <span class="card-title">tailnetlink.json</span>
         <div style="display:flex;gap:6px">
-          <button class="btn btn-secondary btn-sm" id="btn-toggle-secrets" onclick="toggleSecrets()">Show secrets</button>
           <button class="btn btn-secondary btn-sm" onclick="copyConfig()">Copy JSON</button>
         </div>
       </div>
@@ -2031,28 +2030,10 @@ function renderLogs() {
   }).join('');
 }
 
-let secretsVisible = false;
-
-function toggleSecrets() {
-  secretsVisible = !secretsVisible;
-  document.getElementById('btn-toggle-secrets').textContent = secretsVisible ? 'Hide secrets' : 'Show secrets';
-  renderConfig();
-}
-
-function maskSecrets(cfg) {
-  const masked = JSON.parse(JSON.stringify(cfg));
-  for (const tc of Object.values(masked.tailnets || {})) {
-    if (tc.oauth && tc.oauth.client_secret) {
-      tc.oauth.client_secret = '••••••••';
-    }
-  }
-  return masked;
-}
-
 function renderConfig() {
   const el = document.getElementById('json-viewer');
-  const data = secretsVisible ? state.config : maskSecrets(state.config);
-  el.textContent = JSON.stringify(data, null, 2);
+  // The server redacts secrets before sending the config.
+  el.textContent = JSON.stringify(state.config, null, 2);
 }
 
 function copyConfig() {
@@ -2137,7 +2118,7 @@ async function apiPut(path, body) {
 }
 
 async function apiDelete(path) {
-  const r = await fetch(path, { method: 'DELETE' });
+  const r = await fetch(path, { method: 'DELETE', headers: {'Content-Type':'application/json'} });
   if (!r.ok) throw new Error(await r.text());
 }
 

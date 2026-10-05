@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -86,23 +88,23 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/", http.FileServer(http.FS(webRoot)))
 
 	// Read-only status / data
-	mux.HandleFunc("/api/status", s.withCORS(s.handleStatus))
-	mux.HandleFunc("/api/bridges", s.withCORS(s.handleBridges))
-	mux.HandleFunc("/api/connections", s.withCORS(s.handleConns))
-	mux.HandleFunc("/api/logs", s.withCORS(s.handleLogs))
-	mux.HandleFunc("/api/config", s.withCORS(s.handleConfig))
+	mux.HandleFunc("/api/status", s.api(s.handleStatus))
+	mux.HandleFunc("/api/bridges", s.api(s.handleBridges))
+	mux.HandleFunc("/api/connections", s.api(s.handleConns))
+	mux.HandleFunc("/api/logs", s.api(s.handleLogs))
+	mux.HandleFunc("/api/config", s.api(s.handleConfig))
 
 	// Tailnet CRUD: /api/tailnets  /api/tailnets/{name}
-	mux.HandleFunc("/api/tailnets/detect", s.withCORS(s.handleTailnetDetect))
-	mux.HandleFunc("/api/tailnets/", s.withCORS(s.handleTailnetByName))
-	mux.HandleFunc("/api/tailnets", s.withCORS(s.handleTailnets))
+	mux.HandleFunc("/api/tailnets/detect", s.api(s.handleTailnetDetect))
+	mux.HandleFunc("/api/tailnets/", s.api(s.handleTailnetByName))
+	mux.HandleFunc("/api/tailnets", s.api(s.handleTailnets))
 
 	// Bridge CRUD: /api/bridge-rules  /api/bridge-rules/{name}
-	mux.HandleFunc("/api/bridge-rules/", s.withCORS(s.handleBridgeRuleByName))
-	mux.HandleFunc("/api/bridge-rules", s.withCORS(s.handleBridgeRules))
+	mux.HandleFunc("/api/bridge-rules/", s.api(s.handleBridgeRuleByName))
+	mux.HandleFunc("/api/bridge-rules", s.api(s.handleBridgeRules))
 
 	// Settings
-	mux.HandleFunc("/api/settings", s.withCORS(s.handleSettings))
+	mux.HandleFunc("/api/settings", s.api(s.handleSettings))
 
 	// SSE
 	mux.HandleFunc("/api/events", s.handleSSE)
@@ -134,7 +136,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(s.cfgStore.RawJSON())
+	w.Write(s.cfgStore.RedactedJSON())
 }
 
 // ── Tailnet CRUD ──────────────────────────────────────────────────────────────
@@ -151,7 +153,7 @@ func (s *Server) handleTailnetDetect(w http.ResponseWriter, r *http.Request) {
 		ClientID     string `json:"client_id"`
 		ClientSecret string `json:"client_secret"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ClientID == "" {
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ClientID == "" || !secretGiven(body.ClientSecret) {
 		http.Error(w, "client_id and client_secret required", http.StatusBadRequest)
 		return
 	}
@@ -198,7 +200,7 @@ func (s *Server) handleTailnets(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if body.Name == "" || body.Tailnet == "" || body.OAuth.ClientID == "" || body.OAuth.ClientSecret == "" {
+	if body.Name == "" || body.Tailnet == "" || body.OAuth.ClientID == "" || !secretGiven(body.OAuth.ClientSecret) {
 		http.Error(w, "name, tailnet, oauth.client_id, and oauth.client_secret are required", http.StatusBadRequest)
 		return
 	}
@@ -219,7 +221,7 @@ func (s *Server) handleTailnets(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	w.Write(s.cfgStore.RawJSON())
+	w.Write(s.cfgStore.RedactedJSON())
 }
 
 // GET /api/tailnets/{name}/devices — list live devices from the tailnet's API
@@ -332,6 +334,15 @@ func (s *Server) handleTailnetByName(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.cfgStore.Update(func(cfg *config.Config) error {
+			// The UI only ever sees a redacted secret, so an empty or
+			// redacted one means "keep what is there".
+			if !secretGiven(body.OAuth.ClientSecret) {
+				old, ok := cfg.Tailnets[name]
+				if !ok || old.OAuth.ClientSecret == "" {
+					return fmt.Errorf("oauth.client_secret is required for a new tailnet")
+				}
+				body.OAuth.ClientSecret = old.OAuth.ClientSecret
+			}
 			cfg.Tailnets[name] = body
 			return nil
 		}); err != nil {
@@ -339,7 +350,7 @@ func (s *Server) handleTailnetByName(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(s.cfgStore.RawJSON())
+		w.Write(s.cfgStore.RedactedJSON())
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -392,7 +403,7 @@ func (s *Server) handleBridgeRules(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	w.Write(s.cfgStore.RawJSON())
+	w.Write(s.cfgStore.RedactedJSON())
 }
 
 // PUT /api/bridge-rules/{name}  DELETE /api/bridge-rules/{name}
@@ -458,7 +469,7 @@ func (s *Server) handleBridgeRuleByName(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(s.cfgStore.RawJSON())
+		w.Write(s.cfgStore.RedactedJSON())
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -501,7 +512,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(s.cfgStore.RawJSON())
+	w.Write(s.cfgStore.RedactedJSON())
 }
 
 // ── SSE ───────────────────────────────────────────────────────────────────────
@@ -510,7 +521,6 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -530,7 +540,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 		Bridges:     s.store.GetBridges(),
 		Connections: s.store.GetConns(),
 		Logs:        s.store.GetLogs(50),
-		Config:      s.cfgStore.RawJSON(),
+		Config:      s.cfgStore.RedactedJSON(),
 	}
 	writeSSEEvent(w, state.EventInit, init)
 	flusher.Flush()
@@ -558,17 +568,27 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) withCORS(h http.HandlerFunc) http.HandlerFunc {
+// api wraps an API handler. Anything other than GET or HEAD must be sent
+// as application/json. A browser can't send that cross-origin without a
+// CORS preflight, which this server never answers, so other sites can't
+// drive the API from a visitor's browser.
+func (s *Server) api(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		if r.Method == http.MethodOptions {
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-			w.WriteHeader(http.StatusNoContent)
-			return
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+			if err != nil || mt != "application/json" {
+				http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+				return
+			}
 		}
 		h(w, r)
 	}
+}
+
+// secretGiven reports whether a client sent a real secret rather than
+// nothing or the redacted placeholder it was served.
+func secretGiven(secret string) bool {
+	return secret != "" && secret != config.RedactedSecret
 }
 
 func clientForTailnet(tc config.TailnetConfig) *tsclient.Client {
@@ -576,10 +596,16 @@ func clientForTailnet(tc config.TailnetConfig) *tsclient.Client {
 	if tailnet == "" {
 		tailnet = "-"
 	}
-	return &tsclient.Client{
+	c := &tsclient.Client{
 		Tailnet: tailnet,
 		Auth:    &tsclient.OAuth{ClientID: tc.OAuth.ClientID, ClientSecret: tc.OAuth.ClientSecret},
 	}
+	if tc.APIBaseURL != "" {
+		if u, err := url.Parse(tc.APIBaseURL); err == nil {
+			c.BaseURL = u
+		}
+	}
+	return c
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

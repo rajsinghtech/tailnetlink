@@ -16,6 +16,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -678,43 +679,69 @@ func TestRealRestartReusesNode(t *testing.T) {
 	}
 }
 
-// TestKnownBad_RealSecretsOverHTTP pins problem 4: the UI published as
-// svc:tailnetlink in dst hands out OAuth client secrets to any peer that can
-// reach it, with CORS open to every origin. PR 7 flips this: no secret may
-// appear in any response or SSE event.
-func TestKnownBad_RealSecretsOverHTTP(t *testing.T) {
+// TestRealNoSecretsOverHTTP (problem 4, fixed by PR 7): neither the local
+// UI nor svc:tailnetlink reached from a client in dst hands out an OAuth
+// client secret, in any route, the SSE stream or a CORS header.
+func TestRealNoSecretsOverHTTP(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 	l := startLink(t, ctx, linkOpts{webUI: true})
-	t.Cleanup(func() { _ = l.dst.client().VIPServices().Delete(context.Background(), "svc:tailnetlink") })
 
 	vip := l.waitService(t, ctx, "svc:tailnetlink")
-	hc := &http.Client{
+	viaVIP := &http.Client{
 		Timeout: 30 * time.Second,
 		Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return l.client.srv.Dial(ctx, "tcp", netip.AddrPortFrom(vip, 80).String())
 		}},
 	}
-	var body []byte
-	var cors string
-	waitFor(t, 3*time.Minute, "GET /api/config through svc:tailnetlink", func() bool {
-		resp, err := hc.Get("http://tailnetlink/api/config")
-		if err != nil {
-			return false
+	for where, c := range map[string]struct {
+		hc   *http.Client
+		base string
+	}{
+		"local": {&http.Client{Timeout: 30 * time.Second}, "http://" + l.webAddr},
+		"vip":   {viaVIP, "http://tailnetlink"},
+	} {
+		var all strings.Builder
+		waitFor(t, 3*time.Minute, where+" UI reachable", func() bool {
+			resp, err := c.hc.Get(c.base + "/api/status")
+			if err != nil {
+				return false
+			}
+			resp.Body.Close()
+			return resp.StatusCode == http.StatusOK
+		})
+		for _, p := range []string{"/", "/api/status", "/api/bridges", "/api/connections", "/api/logs", "/api/config",
+			"/api/tailnets/src-" + l.sfx + "/devices", "/api/tailnets/dst-" + l.sfx + "/services"} {
+			resp, err := c.hc.Get(c.base + p)
+			if err != nil {
+				t.Errorf("%s GET %s: %v", where, p, err)
+				continue
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			_ = resp.Header.Write(&all)
+			all.Write(body)
+			if v := resp.Header.Get("Access-Control-Allow-Origin"); v != "" {
+				t.Errorf("%s GET %s: Access-Control-Allow-Origin = %q", where, p, v)
+			}
 		}
-		defer resp.Body.Close()
-		body, _ = io.ReadAll(resp.Body)
-		cors = resp.Header.Get("Access-Control-Allow-Origin")
-		return resp.StatusCode == http.StatusOK
-	})
-	leaked := 0
-	for _, s := range l.secrets {
-		if strings.Contains(string(body), s) {
-			leaked++
+		sctx, scancel := context.WithTimeout(ctx, 2*time.Second)
+		req, _ := http.NewRequestWithContext(sctx, http.MethodGet, c.base+"/api/events", nil)
+		if resp, err := c.hc.Do(req); err == nil {
+			sse, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			all.Write(sse)
+		}
+		scancel()
+		for _, sec := range l.secrets {
+			for _, form := range []string{sec, base64.StdEncoding.EncodeToString([]byte(sec)), base64.URLEncoding.EncodeToString([]byte(sec))} {
+				if strings.Contains(all.String(), form) {
+					t.Errorf("%s: an OAuth client secret leaked over HTTP", where)
+				}
+			}
+		}
+		if !strings.Contains(all.String(), config.RedactedSecret) {
+			t.Errorf("%s: no redacted config served", where)
 		}
 	}
-	if leaked == 0 {
-		t.Fatalf("no secret in /api/config; if PR 7 has landed, flip this test")
-	}
-	t.Logf("known bad (fixed by PR 7): /api/config served %d OAuth secrets to a peer in dst; CORS %q", leaked, cors)
 }

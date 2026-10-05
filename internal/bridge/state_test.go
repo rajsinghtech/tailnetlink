@@ -155,3 +155,20 @@ func TestRemoveTailnetLeavesForeignUIService(t *testing.T) {
 		t.Errorf("persistent dir removed: %v", err)
 	}
 }
+
+func TestUIDialAddr(t *testing.T) {
+	for in, want := range map[string]string{
+		"127.0.0.1:8888": "127.0.0.1:8888",
+		":9000":          "127.0.0.1:9000",
+		"0.0.0.0:80":     "127.0.0.1:80",
+		"[::]:80":        "127.0.0.1:80",
+		"10.1.2.3:8080":  "10.1.2.3:8080",
+		"[fd00::1]:8080": "[fd00::1]:8080",
+		"localhost:1234": "127.0.0.1:1234",
+		"":               "127.0.0.1:8888",
+	} {
+		if got := uiDialAddr(in); got != want {
+			t.Errorf("uiDialAddr(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

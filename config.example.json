@@ -36,5 +36,5 @@
   ],
   "poll_interval": "30s",
   "dial_timeout": "10s",
-  "listen_addr": ":8888"
+  "listen_addr": "127.0.0.1:8888"
 }

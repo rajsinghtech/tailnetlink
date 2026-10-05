@@ -39,7 +39,7 @@ func run(args []string, stdout io.Writer, sig <-chan os.Signal) int {
 	fs.SetOutput(stdout)
 	var (
 		dataFile        = fs.String("data", "tailnetlink.json", "path to config/state JSON file")
-		listenAddr      = fs.String("listen", "", "web UI listen address (default :8888)")
+		listenAddr      = fs.String("listen", "", "web UI listen address (default 127.0.0.1:8888)")
 		logLevel        = fs.String("log-level", "info", "log level: debug, info, warn, error")
 		shutdownTimeout = fs.Duration("shutdown-timeout", 20*time.Second, "how long to wait for a clean shutdown before giving up")
 	)

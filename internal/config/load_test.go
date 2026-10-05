@@ -34,7 +34,7 @@ func TestLoadMissingFileGivesDefaults(t *testing.T) {
 	if cfg.DialTimeout.Duration != 10*time.Second {
 		t.Errorf("dial_timeout = %v", cfg.DialTimeout)
 	}
-	if cfg.ListenAddr != ":8888" {
+	if cfg.ListenAddr != "127.0.0.1:8888" {
 		t.Errorf("listen_addr = %q", cfg.ListenAddr)
 	}
 	if cfg.Tailnets == nil || cfg.Bridges == nil || len(cfg.Tailnets) != 0 || len(cfg.Bridges) != 0 {
@@ -50,7 +50,7 @@ func TestLoadPartialFileKeepsDefaults(t *testing.T) {
 	if cfg.DialTimeout.Duration != 3*time.Second {
 		t.Errorf("dial_timeout = %v", cfg.DialTimeout)
 	}
-	if cfg.PollInterval.Duration != 30*time.Second || cfg.ListenAddr != ":8888" {
+	if cfg.PollInterval.Duration != 30*time.Second || cfg.ListenAddr != "127.0.0.1:8888" {
 		t.Errorf("defaults lost: %+v", cfg)
 	}
 }
@@ -187,17 +187,33 @@ func TestKnownBad_SnapshotsShareState(t *testing.T) {
 	}
 }
 
-// KNOWN-BAD: RawJSON, which backs GET /api/config and the SSE init event,
-// includes OAuth client secrets. Flip in roadmap PR 7 (redact).
-func TestKnownBad_RawJSONIncludesSecrets(t *testing.T) {
+// RedactedJSON, which backs GET /api/config and the SSE init event, never
+// carries a client secret. Flipped from TestKnownBad_RawJSONIncludesSecrets.
+func TestRedactedJSONHidesSecrets(t *testing.T) {
 	s, _ := config.NewStore(filepath.Join(t.TempDir(), "config.json"))
 	_ = s.Update(func(c *config.Config) error {
 		c.InstanceID = "test"
 		c.Tailnets["a"] = config.TailnetConfig{OAuth: config.OAuthCreds{ClientID: "id", ClientSecret: "very-secret"}}
+		c.Tailnets["b"] = config.TailnetConfig{OAuth: config.OAuthCreds{ClientID: "id2"}}
 		return nil
 	})
-	if !strings.Contains(string(s.RawJSON()), "very-secret") {
-		t.Error("expected the secret in RawJSON today")
+	out := string(s.RedactedJSON())
+	if strings.Contains(out, "very-secret") {
+		t.Errorf("secret in RedactedJSON:\n%s", out)
+	}
+	var got config.Config
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Tailnets["a"].OAuth.ClientSecret != config.RedactedSecret || got.Tailnets["a"].OAuth.ClientID != "id" {
+		t.Errorf("a = %+v", got.Tailnets["a"].OAuth)
+	}
+	if got.Tailnets["b"].OAuth.ClientSecret != "" {
+		t.Errorf("an unset secret should stay empty, got %q", got.Tailnets["b"].OAuth.ClientSecret)
+	}
+	// The live config keeps the real secret.
+	if s.Get().Tailnets["a"].OAuth.ClientSecret != "very-secret" {
+		t.Error("redaction changed the stored config")
 	}
 }
 

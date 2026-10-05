@@ -979,11 +979,7 @@ func (m *Manager) serveWebUI(ctx context.Context, tailnetName string, srv *tsnet
 	m.webListeners[tailnetName] = ln
 	m.mu.Unlock()
 
-	_, port, _ := net.SplitHostPort(m.webAddr)
-	if port == "" {
-		port = "8888"
-	}
-	localAddr := "127.0.0.1:" + port
+	localAddr := uiDialAddr(m.webAddr)
 
 	m.logger.Info("web UI VIP service active", "tailnet", tailnetName, "service", svcName, "local", localAddr)
 	m.store.Log("info", fmt.Sprintf("[%s] web UI: %s → %s", tailnetName, svcName, localAddr), nil)
@@ -1000,6 +996,19 @@ func (m *Manager) serveWebUI(ctx context.Context, tailnetName string, srv *tsnet
 		}
 		go proxyToLocal(conn, localAddr)
 	}
+}
+
+// uiDialAddr is where the UI VIP forwards to: the local listener, through
+// loopback unless it is bound to one specific address.
+func uiDialAddr(webAddr string) string {
+	host, port, _ := net.SplitHostPort(webAddr)
+	if port == "" {
+		port = "8888"
+	}
+	if ip, err := netip.ParseAddr(host); host == "" || err != nil || ip.IsUnspecified() {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
 }
 
 func proxyToLocal(client net.Conn, localAddr string) {
