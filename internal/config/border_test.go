@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,6 +94,37 @@ func TestBorderEverySetting(t *testing.T) {
 	}
 }
 
+func TestCompileEmptyLinks(t *testing.T) {
+	omitted := strings.Replace(borderJSON(""), `,
+`+`"links": [{"name": "web", "tag": "tag:web", "ports": [80]}]`, "", 1)
+	for _, body := range []string{borderJSON(`"links": []`), omitted} {
+		var b config.Border
+		if err := json.Unmarshal([]byte(body), &b); err != nil {
+			t.Fatal(err)
+		}
+		if len(b.Links) != 0 {
+			t.Fatalf("links = %+v", b.Links)
+		}
+		cfg, err := b.Compile()
+		if err != nil {
+			t.Fatalf("Compile: %v\n%s", err, body)
+		}
+		if len(cfg.Bridges) != 0 {
+			t.Fatalf("bridges = %+v", cfg.Bridges)
+		}
+		if len(cfg.Tailnets) != 2 || cfg.InstanceID != "test" || !cfg.Tailnets["test-src"].HasAuth() || !cfg.Tailnets["test-dst"].HasAuth() {
+			t.Fatalf("tailnets = %+v", cfg.Tailnets)
+		}
+		parsed, err := config.Parse([]byte(body))
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if len(parsed.Bridges) != 0 || len(parsed.Tailnets) != 2 {
+			t.Fatalf("parsed = %+v", parsed)
+		}
+	}
+}
+
 func TestBorderIDToken(t *testing.T) {
 	body := borderJSON("")
 	body = strings.Replace(body, `"client_secret_file": "/run/a"`, `"id_token_file": "/var/run/id-token"`, 1)
@@ -127,7 +159,6 @@ func TestBorderErrors(t *testing.T) {
 		"secret and jwt": {strings.Replace(base, `"client_secret_env": "B"`, `"client_secret_env": "B", "id_token_file": "/run/jwt"`, 1), "only one of"},
 		"both id tokens": {strings.Replace(base, `"client_secret_env": "B"`, `"id_token_file": "/run/jwt", "id_token_env": "J"`, 1), "only one of"},
 		"no tags":        {strings.Replace(base, `"tags": ["tag:tailnetlink"]}`+",\n"+`"dest"`, `"tags": []}`+",\n"+`"dest"`, 1), "source: tags is required"},
-		"no links":       {borderJSON(`"links": []`), "at least one link"},
 		"link no name":   {borderJSON(`"links": [{"tag": "tag:x", "ports": [1]}]`), "links[0]: name is required"},
 		"no selector":    {borderJSON(`"links": [{"name": "x", "ports": [1]}]`), "needs one of"},
 		"two selectors":  {borderJSON(`"links": [{"name": "x", "tag": "tag:x", "services": [{"name": "svc:a"}], "ports": [1]}]`), "only one of"},

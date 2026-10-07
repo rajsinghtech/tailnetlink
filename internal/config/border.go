@@ -186,9 +186,8 @@ func (b *Border) Compile() (*Config, error) {
 			return nil, fmt.Errorf("%s: %w", role, err)
 		}
 	}
-	if len(b.Links) == 0 {
-		return nil, errors.New("links: at least one link is required")
-	}
+	// links may be empty. The process still joins both tailnets; add a
+	// link later and the file watch picks it up.
 	if err := b.Authz.validate(); err != nil {
 		return nil, err
 	}
