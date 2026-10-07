@@ -50,8 +50,11 @@ func TestHasAuth(t *testing.T) {
 	}{
 		{config.OAuthCreds{ClientID: "id", ClientSecretFile: "/run/s"}, true},
 		{config.OAuthCreds{ClientID: "id", ClientSecretEnv: "S"}, true},
+		{config.OAuthCreds{ClientID: "id", IDTokenFile: "/run/t"}, true},
+		{config.OAuthCreds{ClientID: "id", IDTokenEnv: "T"}, true},
 		{config.OAuthCreds{ClientID: "id"}, false},
 		{config.OAuthCreds{ClientSecretFile: "/run/s"}, false},
+		{config.OAuthCreds{IDTokenFile: "/run/t"}, false},
 	}
 	for _, c := range cases {
 		if got := (config.TailnetConfig{OAuth: c.oauth}).HasAuth(); got != c.want {
@@ -182,10 +185,10 @@ func TestUIEnabled(t *testing.T) {
 // The public view the UI shows has no oauth block at all.
 func TestPublicJSON(t *testing.T) {
 	c := &config.Config{InstanceID: "x", Tailnets: map[string]config.TailnetConfig{
-		"a": {Tailnet: "a.example", Tags: []string{"tag:t"}, OAuth: config.OAuthCreds{ClientID: "cid-123", ClientSecretFile: "/run/secret-path"}},
+		"a": {Tailnet: "a.example", Tags: []string{"tag:t"}, OAuth: config.OAuthCreds{ClientID: "cid-123", ClientSecretFile: "/run/secret-path", IDTokenFile: "/run/id-token"}},
 	}}
 	out := string(c.PublicJSON())
-	for _, bad := range []string{"oauth", "cid-123", "/run/secret-path"} {
+	for _, bad := range []string{"oauth", "cid-123", "/run/secret-path", "/run/id-token"} {
 		if strings.Contains(out, bad) {
 			t.Errorf("public JSON has %q:\n%s", bad, out)
 		}
@@ -227,6 +230,45 @@ func TestSecret(t *testing.T) {
 			if c.wantErr == "" {
 				if err != nil || got != c.want {
 					t.Errorf("Secret() = %q, %v; want %q", got, err, c.want)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("err = %v, want it to mention %q", err, c.wantErr)
+			}
+		})
+	}
+}
+
+func TestIDToken(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good")
+	_ = os.WriteFile(good, []byte("  jwt-a\n"), 0o600)
+	empty := filepath.Join(dir, "empty")
+	_ = os.WriteFile(empty, []byte(" \n"), 0o600)
+	t.Setenv("TNL_TEST_ID_TOKEN", "jwt-env")
+	t.Setenv("TNL_TEST_ID_EMPTY", "")
+
+	cases := []struct {
+		name    string
+		creds   config.OAuthCreds
+		want    string
+		wantErr string
+	}{
+		{"file", config.OAuthCreds{IDTokenFile: good}, "jwt-a", ""},
+		{"env", config.OAuthCreds{IDTokenEnv: "TNL_TEST_ID_TOKEN"}, "jwt-env", ""},
+		{"missing file", config.OAuthCreds{IDTokenFile: filepath.Join(dir, "nope")}, "", "id_token_file"},
+		{"empty file", config.OAuthCreds{IDTokenFile: empty}, "", "is empty"},
+		{"unset env", config.OAuthCreds{IDTokenEnv: "TNL_TEST_ID_UNSET"}, "", "$TNL_TEST_ID_UNSET is not set"},
+		{"empty env", config.OAuthCreds{IDTokenEnv: "TNL_TEST_ID_EMPTY"}, "", "is not set"},
+		{"neither", config.OAuthCreds{ClientID: "id"}, "", "oauth.id_token_file or oauth.id_token_env"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := c.creds.IDToken()
+			if c.wantErr == "" {
+				if err != nil || got != c.want {
+					t.Errorf("IDToken() = %q, %v; want %q", got, err, c.want)
 				}
 				return
 			}

@@ -325,6 +325,9 @@ type linkOpts struct {
 	persistent bool   // keep node state across restarts; default ephemeral
 	linkName   string // bridge rule name; default "echo"
 	authz      config.AuthzConfig
+	// creds, when set, supplies the oauth block for a side instead of
+	// creating an OAuth client in that tailnet.
+	creds func(t *testing.T, s *side) config.OAuthCreds
 }
 
 // startLink joins a backend in src and a client in dst, gives tailnetlink a
@@ -359,20 +362,26 @@ func startBorder(t *testing.T, ctx context.Context, src, dst *side, o linkOpts) 
 	l.client = join(t, ctx, dst, "e2e-client-"+l.sfx, "tag:e2e-client")
 	acceptRoutes(t, ctx, l.client)
 
-	// tailnetlink gets the secrets only through 0600 files.
+	// tailnetlink gets secrets and JWTs only through 0600 files.
 	creds := map[string]config.OAuthCreds{}
-	secretDir := t.TempDir()
-	for _, s := range []*side{src, dst} {
-		id, secret, err := api.CreateOAuthClient(ctx, s.tok, s.id, "tailnetlink e2e "+l.sfx, appScopes, []string{linkTag})
-		if err != nil {
-			t.Fatalf("oauth client for tailnetlink in %s: %v", s.role, err)
+	if o.creds != nil {
+		for _, s := range []*side{src, dst} {
+			creds[s.role] = o.creds(t, s)
 		}
-		f := filepath.Join(secretDir, s.role+"-secret")
-		if err := os.WriteFile(f, []byte(secret), 0o600); err != nil {
-			t.Fatal(err)
+	} else {
+		secretDir := t.TempDir()
+		for _, s := range []*side{src, dst} {
+			id, secret, err := api.CreateOAuthClient(ctx, s.tok, s.id, "tailnetlink e2e "+l.sfx, appScopes, []string{linkTag})
+			if err != nil {
+				t.Fatalf("oauth client for tailnetlink in %s: %v", s.role, err)
+			}
+			f := filepath.Join(secretDir, s.role+"-secret")
+			if err := os.WriteFile(f, []byte(secret), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			creds[s.role] = config.OAuthCreds{ClientID: id, ClientSecretFile: f}
+			l.secrets = append(l.secrets, secret)
 		}
-		creds[s.role] = config.OAuthCreds{ClientID: id, ClientSecretFile: f}
-		l.secrets = append(l.secrets, secret)
 	}
 	name := "e2e-" + l.sfx
 	stateDir := t.TempDir()
@@ -526,6 +535,59 @@ func echo(t *testing.T, conn net.Conn, msg string) {
 	if want := "echo: " + msg + "\n"; got != want {
 		t.Fatalf("reply = %q, want %q", got, want)
 	}
+}
+
+// TestRealWorkloadIdentity runs one border with client_id and id_token_file
+// on both sides. The federated identity is the one the workflow already
+// created in each tailnet. This test only writes a GitHub Actions OIDC token
+// (audience from that identity) to a file and checks that tailnetlink can
+// mint node auth keys and serve traffic through the API token it exchanges.
+func TestRealWorkloadIdentity(t *testing.T) {
+	oidc, ok := tailnet.GitHubOIDCFromEnv(os.Getenv)
+	if !ok || os.Getenv("E2E_SRC_FED_CLIENT_ID") == "" || os.Getenv("E2E_DST_FED_CLIENT_ID") == "" {
+		t.Skip("needs GitHub Actions OIDC and the workflow's per-tailnet federated identity")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	src, dst := tailnets(t)
+	dir := t.TempDir()
+	write := func(ctx context.Context, s *side) error {
+		id := os.Getenv("E2E_" + strings.ToUpper(s.role) + "_FED_CLIENT_ID")
+		aud := os.Getenv("E2E_" + strings.ToUpper(s.role) + "_FED_AUDIENCE")
+		if aud == "" {
+			aud = tailnet.AudienceFor(id)
+		}
+		jwt, err := oidc.JWT(ctx, aud)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(dir, s.role+"-id-token"), []byte(jwt), 0o600)
+	}
+	l := startBorder(t, ctx, src, dst, linkOpts{
+		creds: func(t *testing.T, s *side) config.OAuthCreds {
+			t.Helper()
+			if err := write(ctx, s); err != nil {
+				t.Fatal(err)
+			}
+			return config.OAuthCreds{
+				ClientID:    os.Getenv("E2E_" + strings.ToUpper(s.role) + "_FED_CLIENT_ID"),
+				IDTokenFile: filepath.Join(dir, s.role+"-id-token"),
+			}
+		},
+	})
+	// GitHub's OIDC tokens are short. Refresh the files before prune, which
+	// exchanges again from the same paths. Registered last so it runs first.
+	t.Cleanup(func() {
+		rctx, rcancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer rcancel()
+		for _, s := range []*side{src, dst} {
+			if err := write(rctx, s); err != nil {
+				t.Logf("refresh id token for %s: %v", s.role, err)
+			}
+		}
+	})
+	vip := l.waitService(t, ctx, l.svc)
+	echo(t, l.dialVIP(t, ctx, vip, l.echoPort), "wif "+l.sfx)
 }
 
 // TestRealTrafficAcrossBorder: a client in dst reaches a backend in src

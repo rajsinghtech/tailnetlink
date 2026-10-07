@@ -15,7 +15,7 @@ source tailnet                         dest tailnet
 
 ## How it works
 
-1. Authenticates to each tailnet with OAuth credentials (scopes: `devices:core:read`, `auth_keys`, `services` / `vip-services`, `dns`).
+1. Authenticates to each tailnet with an OAuth client secret or a workload identity token (scopes: `devices:core:read`, `auth_keys`, `services`, `dns`).
 2. Spins up a [tsnet](https://pkg.go.dev/tailscale.com/tsnet) node in each tailnet.
 3. Polls the Tailscale API for devices matching the configured tag or FQDN list.
 4. Creates a Tailscale VIP service in the destination tailnet for each discovered device.
@@ -28,7 +28,7 @@ No static auth keys are stored. The first start mints an auth key through the OA
 
 ```bash
 cp config.example.json tailnetlink.json
-# edit: OAuth client ids, and where to read each client secret
+# edit: client ids, and where to read each client secret or id token
 go run ./cmd/tailnetlink -data tailnetlink.json
 # web UI: http://127.0.0.1:8888   metrics: http://127.0.0.1:9090/healthz
 ```
@@ -164,22 +164,37 @@ Grant example (destination policy):
 
 With DNS on (the default), when an entry sets `dns_name` (or a device has a real FQDN), tailnetlink runs a small authoritative DNS server for the parent zone on a shared VIP, `svc:tnl-dns-<zone>-dns`, in the destination and points split DNS for that zone at it. The server answers over TCP only: a tsnet node does not receive UDP sent to a VIP service address. Clients fall back to TCP after the UDP attempt times out.
 
-### OAuth client secrets
+### OAuth and workload identity
 
-Client secrets never go in the config file. Each side's `oauth` block names where to read its secret from, with exactly one of:
+Client secrets and OIDC tokens never go in the config file. Each side's `oauth` block has a `client_id` and exactly one of:
 
 | Field | Description |
 |---|---|
-| `client_secret_file` | Path to a file holding the secret (surrounding whitespace is ignored). Works with Docker and Kubernetes secrets. |
-| `client_secret_env` | Name of an environment variable holding the secret. |
+| `client_secret_file` | Path to a file holding the OAuth client secret (surrounding whitespace is ignored). |
+| `client_secret_env` | Name of an environment variable holding the OAuth client secret. |
+| `id_token_file` | Path to a file holding an OIDC JWT for workload identity federation. |
+| `id_token_env` | Name of an environment variable holding that JWT. |
 
-The secret is read each time tailnetlink needs a new API token, so rotating the file takes effect without a restart. A config with an inline `client_secret` does not load. To move an old config over, write each secret to a file (`chmod 600`) and replace `"client_secret": "..."` with `"client_secret_file": "/path/to/file"`.
+tailnetlink reads the secret or the JWT each time it needs a new API token. It does not cache the JWT, so a sidecar or projected token can replace the file and the next exchange picks it up without a restart. A config with an inline `client_secret` does not load. To move an old config over, write each secret to a file (`chmod 600`) and replace `"client_secret": "..."` with `"client_secret_file": "/path/to/file"`.
 
-### OAuth setup (once per tailnet)
+With `id_token_file` or `id_token_env`, tailnetlink posts `client_id` and the JWT to Tailscale's token-exchange endpoint and uses the returned API token the same way as an OAuth client credential: minting auth keys, listing devices, writing VIP services and writing split DNS. The API token is cached until it expires (a few seconds early) and then exchanged again from the current file. One HTTP 401 is retried with a fresh exchange. A custom `api_base_url` is used for the exchange as well as the rest of the API.
 
-1. Go to `admin.tailscale.com/settings/oauth`
-2. Create a client with scopes: `devices:core:read`, `auth_keys`, `services` (or `vip-services`), `dns`
-3. Add the tag you specify in `tags` to your tailnet ACL as an owner tag
+```json
+"oauth": {
+  "client_id": "YOUR_FEDERATED_CLIENT_ID",
+  "id_token_file": "/var/run/tailscale/id-token"
+}
+```
+
+The issuer can be anything you have federated with Tailscale. GitHub Actions is one: request an OIDC token whose `aud` is the audience shown for that federated identity, and rewrite the file before the JWT expires (GitHub's tokens last about five minutes).
+
+### Trust credential setup (once per tailnet)
+
+1. Open the Trust credentials page in the admin console.
+2. Create an OAuth client, or an OpenID Connect federated identity.
+3. Scopes: `devices:core:read`, `auth_keys`, `services`, `dns`.
+4. `auth_keys` needs the tag from `tags` on the credential. Auth keys are limited to that tag, or to tags it owns. Add the same tag to the tailnet policy as a tag owner.
+5. For federation, put the client ID in `client_id`. The JWT's `aud` must be the audience Tailscale shows for that credential.
 
 ## CLI flags
 
@@ -197,7 +212,7 @@ The secret is read each time tailnetlink needs a new API token, so rotating the 
 
 ## Docker
 
-Images publish only on version tags (`v*.*.*`), never from `main`. The image runs as UID 65532, expects `/data/tailnetlink.json`, keeps node state under `/data/tailnetlink-state`, and listens for metrics on `:9090` so probes work inside the container.
+Images publish only on version tags (`v*.*.*`), never from `main`. The image runs as UID 65532, expects `/data/tailnetlink.json`, keeps node state under `/data/tailnetlink-state`, and listens for metrics on `:9090` so probes work inside the container. It does not open `/dev/net/tun`. Ephemeral node state stays under the state directory too, so a read-only root filesystem works when that directory is a mounted volume.
 
 ```bash
 docker pull ghcr.io/rajsinghtech/tailnetlink:vX.Y.Z
