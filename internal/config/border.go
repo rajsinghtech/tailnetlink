@@ -251,8 +251,8 @@ func (s Side) check() error {
 	if err := s.OAuth.validate(); err != nil {
 		return err
 	}
-	if s.OAuth.ClientSecretFile == "" && s.OAuth.ClientSecretEnv == "" {
-		return errors.New("oauth needs client_secret_file or client_secret_env")
+	if s.OAuth.credentialCount() == 0 {
+		return errors.New("oauth needs one of client_secret_file, client_secret_env, id_token_file or id_token_env")
 	}
 	if len(s.Tags) == 0 {
 		return errors.New("tags is required: the ACL tags tailnetlink's node and services get, e.g. [\"tag:tailnetlink\"]")

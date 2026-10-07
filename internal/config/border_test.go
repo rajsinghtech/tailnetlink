@@ -125,6 +125,23 @@ func TestCompileEmptyLinks(t *testing.T) {
 	}
 }
 
+func TestBorderIDToken(t *testing.T) {
+	body := borderJSON("")
+	body = strings.Replace(body, `"client_secret_file": "/run/a"`, `"id_token_file": "/var/run/id-token"`, 1)
+	body = strings.Replace(body, `"client_secret_env": "B"`, `"id_token_env": "DEST_ID_TOKEN"`, 1)
+	cfg, err := config.Parse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, dst := cfg.Tailnets["test-src"], cfg.Tailnets["test-dst"]
+	if !src.HasAuth() || !src.OAuth.UsesIDToken() || src.OAuth.IDTokenFile != "/var/run/id-token" {
+		t.Errorf("source oauth = %+v", src.OAuth)
+	}
+	if !dst.HasAuth() || !dst.OAuth.UsesIDToken() || dst.OAuth.IDTokenEnv != "DEST_ID_TOKEN" || dst.OAuth.ClientSecretEnv != "" {
+		t.Errorf("dest oauth = %+v", dst.OAuth)
+	}
+}
+
 func TestBorderErrors(t *testing.T) {
 	base := borderJSON("")
 	cases := map[string]struct{ body, want string }{
@@ -136,9 +153,11 @@ func TestBorderErrors(t *testing.T) {
 		"long name":      {strings.Replace(base, `"name": "test"`, `"name": "`+strings.Repeat("a", 41)+`"`, 1), "1 to 40"},
 		"no source":      {strings.Replace(base, `"tailnet": "a.ts.net"`, `"tailnet": ""`, 1), "source: tailnet is required"},
 		"no client id":   {strings.Replace(base, `"client_id": "b"`, `"client_id": ""`, 1), "dest: oauth.client_id"},
-		"no secret ref":  {strings.Replace(base, `, "client_secret_env": "B"`, ``, 1), "client_secret_file or client_secret_env"},
+		"no secret ref":  {strings.Replace(base, `, "client_secret_env": "B"`, ``, 1), "id_token_file or id_token_env"},
 		"inline secret":  {strings.Replace(base, `"client_secret_env": "B"`, `"client_secret": "hunter2"`, 1), "oauth.client_secret is not supported"},
 		"both secrets":   {strings.Replace(base, `"client_secret_env": "B"`, `"client_secret_env": "B", "client_secret_file": "/f"`, 1), "only one of"},
+		"secret and jwt": {strings.Replace(base, `"client_secret_env": "B"`, `"client_secret_env": "B", "id_token_file": "/run/jwt"`, 1), "only one of"},
+		"both id tokens": {strings.Replace(base, `"client_secret_env": "B"`, `"id_token_file": "/run/jwt", "id_token_env": "J"`, 1), "only one of"},
 		"no tags":        {strings.Replace(base, `"tags": ["tag:tailnetlink"]}`+",\n"+`"dest"`, `"tags": []}`+",\n"+`"dest"`, 1), "source: tags is required"},
 		"link no name":   {borderJSON(`"links": [{"tag": "tag:x", "ports": [1]}]`), "links[0]: name is required"},
 		"no selector":    {borderJSON(`"links": [{"name": "x", "ports": [1]}]`), "needs one of"},

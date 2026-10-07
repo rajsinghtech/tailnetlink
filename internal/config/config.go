@@ -130,17 +130,22 @@ type TailnetConfig struct {
 }
 
 func (tc TailnetConfig) HasAuth() bool {
-	return tc.OAuth.ClientID != "" && (tc.OAuth.ClientSecretFile != "" || tc.OAuth.ClientSecretEnv != "")
+	return tc.OAuth.ClientID != "" && tc.OAuth.credentialCount() > 0
 }
 
-// OAuthCreds says how to authenticate to a tailnet's admin API. The secret
-// itself is never part of the config: it is read from a file or an
-// environment variable each time a token is needed, so a rotated file is
-// picked up without a restart.
+// OAuthCreds says how to authenticate to a tailnet's admin API. The
+// credential itself is never part of the config: a client secret or an OIDC
+// JWT is read from a file or an environment variable each time a token is
+// needed, so a rotated file is picked up without a restart.
 type OAuthCreds struct {
 	ClientID         string `json:"client_id"`
 	ClientSecretFile string `json:"client_secret_file,omitempty"`
 	ClientSecretEnv  string `json:"client_secret_env,omitempty"`
+	// IDTokenFile is a path to an OIDC JWT for workload identity federation.
+	// It is re-read on every token exchange and not cached.
+	IDTokenFile string `json:"id_token_file,omitempty"`
+	// IDTokenEnv is the name of an environment variable holding that JWT.
+	IDTokenEnv string `json:"id_token_env,omitempty"`
 
 	inline bool // the JSON had a client_secret field; Validate rejects it
 }
@@ -186,12 +191,54 @@ func (o OAuthCreds) Secret() (string, error) {
 	}
 }
 
+// IDToken reads the OIDC JWT from id_token_file or id_token_env. Callers
+// must not store the result: the file is rotated externally and the next
+// exchange has to see the new contents.
+func (o OAuthCreds) IDToken() (string, error) {
+	switch {
+	case o.IDTokenFile != "":
+		b, err := os.ReadFile(o.IDTokenFile)
+		if err != nil {
+			return "", fmt.Errorf("id_token_file: %w", err)
+		}
+		s := strings.TrimSpace(string(b))
+		if s == "" {
+			return "", fmt.Errorf("id_token_file %s is empty", o.IDTokenFile)
+		}
+		return s, nil
+	case o.IDTokenEnv != "":
+		s := strings.TrimSpace(os.Getenv(o.IDTokenEnv))
+		if s == "" {
+			return "", fmt.Errorf("id_token_env: $%s is not set", o.IDTokenEnv)
+		}
+		return s, nil
+	default:
+		return "", errors.New("no id token: set oauth.id_token_file or oauth.id_token_env")
+	}
+}
+
+// UsesIDToken reports whether this side authenticates by exchanging an OIDC
+// JWT instead of an OAuth client secret.
+func (o OAuthCreds) UsesIDToken() bool {
+	return o.IDTokenFile != "" || o.IDTokenEnv != ""
+}
+
+func (o OAuthCreds) credentialCount() int {
+	n := 0
+	for _, s := range []string{o.ClientSecretFile, o.ClientSecretEnv, o.IDTokenFile, o.IDTokenEnv} {
+		if s != "" {
+			n++
+		}
+	}
+	return n
+}
+
 func (o OAuthCreds) validate() error {
 	if o.inline {
 		return errors.New("oauth.client_secret is not supported: put the secret in a file and set oauth.client_secret_file, or in an environment variable and set oauth.client_secret_env")
 	}
-	if o.ClientSecretFile != "" && o.ClientSecretEnv != "" {
-		return errors.New("set only one of oauth.client_secret_file and oauth.client_secret_env")
+	if o.credentialCount() > 1 {
+		return errors.New("set only one of oauth.client_secret_file, oauth.client_secret_env, oauth.id_token_file and oauth.id_token_env")
 	}
 	return nil
 }

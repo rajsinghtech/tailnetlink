@@ -164,8 +164,9 @@ func TestManagerRemoveLinkDeletesOnlyItsServices(t *testing.T) {
 	echoVia(t, ctx, cl, netip.AddrPortFrom(vip1, 7001), "still bridged")
 }
 
-// With ephemeral set, nothing is saved under state_dir and every start
-// registers a new node.
+// With ephemeral set, node state lives under state_dir in a fresh directory
+// for that start and is removed on stop, so the next start registers a new
+// node. It does not use the stable directory a persistent node would reuse.
 func TestManagerEphemeralNodes(t *testing.T) {
 	ctx := e2eSetup(t)
 	b := newBorder(t)
@@ -179,10 +180,22 @@ func TestManagerEphemeralNodes(t *testing.T) {
 
 	r := startManager(t, cfg, "")
 	waitVIP(t, b.dstAPI, svc)
-	if entries, _ := os.ReadDir(b.stateDir); len(entries) != 0 {
-		t.Errorf("ephemeral run wrote to state_dir: %v", entries)
+	entries, err := os.ReadDir(b.stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("ephemeral node state was not under state_dir")
+	}
+	for _, e := range entries {
+		if e.Name() == b.srcName || e.Name() == b.dstName {
+			t.Errorf("ephemeral state used the persistent directory %s", e.Name())
+		}
 	}
 	r.stop(t)
+	if left, _ := os.ReadDir(b.stateDir); len(left) != 0 {
+		t.Errorf("ephemeral state left behind: %v", left)
+	}
 	dstNodes := len(b.dst.control.AllNodes())
 
 	b.dstAPI.ResetCalls()

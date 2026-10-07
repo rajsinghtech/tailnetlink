@@ -66,10 +66,26 @@ func TestNodeDirEphemeralIsFresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(a)
-	b, _ := m.nodeDir("work", config.TailnetConfig{Ephemeral: true}, base)
+	b, err := m.nodeDir("work", config.TailnetConfig{Ephemeral: true}, base)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer os.RemoveAll(b)
-	if a == b || strings.HasPrefix(a, base) {
-		t.Errorf("ephemeral dirs %q and %q should be fresh temp dirs", a, b)
+	if a == b || a == filepath.Join(base, "work") {
+		t.Errorf("ephemeral dirs %q and %q should be fresh directories under the state dir", a, b)
+	}
+	for _, dir := range []string{a, b} {
+		rel, err := filepath.Rel(base, dir)
+		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+			t.Errorf("ephemeral dir %q is outside %q", dir, base)
+		}
+		fi, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !fi.IsDir() || fi.Mode().Perm() != 0o700 {
+			t.Errorf("ephemeral dir mode = %v", fi.Mode().Perm())
+		}
 	}
 }
 
