@@ -17,6 +17,7 @@ import (
 func TestEndpoint(t *testing.T) {
 	for path, want := range map[string]string{
 		"/api/v2/oauth/token":                    "oauth",
+		"/api/v2/oauth/token-exchange":           "oauth",
 		"/api/v2/tailnet/-/devices":              "devices",
 		"/api/v2/tailnet/example.com/keys":       "keys",
 		"/api/v2/tailnet/-/vip-services/svc:foo": "services",

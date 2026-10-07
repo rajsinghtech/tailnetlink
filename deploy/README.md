@@ -6,7 +6,7 @@ probes inside the container work.
 
 ```bash
 cp ../config.example.json ./tailnetlink.json
-# fill in OAuth client ids and secret paths under ./secrets/
+# fill in client ids and secret or id-token paths under ./secrets/
 docker compose up -d
 curl -sf http://127.0.0.1:9090/healthz
 ```

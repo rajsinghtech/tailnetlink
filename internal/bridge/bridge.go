@@ -407,11 +407,9 @@ var reuseTimeout = time.Minute
 
 // nodeDir returns the state directory for a tailnet's node, creating it.
 // Persistent nodes live under state_dir and keep their identity across
-// restarts. Ephemeral nodes get a fresh directory every start.
+// restarts. Ephemeral nodes get a fresh directory under the same state_dir
+// on every start, so a read-only root filesystem only needs that mount.
 func (m *Manager) nodeDir(name string, tc config.TailnetConfig, stateDir string) (string, error) {
-	if tc.Ephemeral {
-		return os.MkdirTemp("", "tailnetlink-"+sanitize(name)+"-")
-	}
 	if stateDir == "" {
 		m.mu.Lock()
 		stateDir = m.defaultStateDir
@@ -419,6 +417,16 @@ func (m *Manager) nodeDir(name string, tc config.TailnetConfig, stateDir string)
 	}
 	if stateDir == "" {
 		stateDir = "tailnetlink-state"
+	}
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return "", fmt.Errorf("state dir: %w", err)
+	}
+	if tc.Ephemeral {
+		dir, err := os.MkdirTemp(stateDir, sanitize(name)+"-")
+		if err != nil {
+			return "", fmt.Errorf("state dir: %w", err)
+		}
+		return dir, nil
 	}
 	dir := filepath.Join(stateDir, sanitize(name))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
