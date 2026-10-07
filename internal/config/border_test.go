@@ -93,6 +93,23 @@ func TestBorderEverySetting(t *testing.T) {
 	}
 }
 
+func TestBorderNoLinks(t *testing.T) {
+	omitted := strings.Replace(borderJSON(""), `,
+`+`"links": [{"name": "web", "tag": "tag:web", "ports": [80]}]`, "", 1)
+	for _, body := range []string{borderJSON(`"links": []`), omitted} {
+		cfg, err := config.Parse([]byte(body))
+		if err != nil {
+			t.Fatalf("parse: %v\n%s", err, body)
+		}
+		if len(cfg.Bridges) != 0 {
+			t.Fatalf("bridges = %+v", cfg.Bridges)
+		}
+		if len(cfg.Tailnets) != 2 || cfg.InstanceID != "test" || !cfg.Tailnets["test-src"].HasAuth() || !cfg.Tailnets["test-dst"].HasAuth() {
+			t.Fatalf("tailnets = %+v", cfg.Tailnets)
+		}
+	}
+}
+
 func TestBorderErrors(t *testing.T) {
 	base := borderJSON("")
 	cases := map[string]struct{ body, want string }{
@@ -108,7 +125,6 @@ func TestBorderErrors(t *testing.T) {
 		"inline secret":  {strings.Replace(base, `"client_secret_env": "B"`, `"client_secret": "hunter2"`, 1), "oauth.client_secret is not supported"},
 		"both secrets":   {strings.Replace(base, `"client_secret_env": "B"`, `"client_secret_env": "B", "client_secret_file": "/f"`, 1), "only one of"},
 		"no tags":        {strings.Replace(base, `"tags": ["tag:tailnetlink"]}`+",\n"+`"dest"`, `"tags": []}`+",\n"+`"dest"`, 1), "source: tags is required"},
-		"no links":       {borderJSON(`"links": []`), "at least one link"},
 		"link no name":   {borderJSON(`"links": [{"tag": "tag:x", "ports": [1]}]`), "links[0]: name is required"},
 		"no selector":    {borderJSON(`"links": [{"name": "x", "ports": [1]}]`), "needs one of"},
 		"two selectors":  {borderJSON(`"links": [{"name": "x", "tag": "tag:x", "services": [{"name": "svc:a"}], "ports": [1]}]`), "only one of"},

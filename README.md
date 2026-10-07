@@ -91,6 +91,8 @@ tailnetlink prune -data data.json
 
 ### Link fields
 
+`links` can be empty or left out. The process still joins both tailnets, and a later edit that adds a link is picked up without a restart.
+
 A link has a `name` and exactly one of `tag`, `devices`, `services` or `local`, plus `ports` (not for local).
 
 | Field | Description |
