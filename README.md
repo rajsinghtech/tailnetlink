@@ -197,7 +197,7 @@ The secret is read each time tailnetlink needs a new API token, so rotating the 
 
 ## Docker
 
-Images publish only on version tags (`v*.*.*`), never from `main`. The image runs as UID 65532, expects `/data/tailnetlink.json`, keeps node state under `/data/tailnetlink-state`, and listens for metrics on `:9090` so probes work inside the container.
+Version tags (`v*.*.*`) publish release images. Every push to `main` also publishes `:main` and `:sha-<short>`; pin those by digest. The image runs as UID 65532, expects `/data/tailnetlink.json`, keeps node state under `/data/tailnetlink-state`, and listens for metrics on `:9090` so probes work inside the container.
 
 ```bash
 docker pull ghcr.io/rajsinghtech/tailnetlink:vX.Y.Z
