@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,19 +94,33 @@ func TestBorderEverySetting(t *testing.T) {
 	}
 }
 
-func TestBorderNoLinks(t *testing.T) {
+func TestCompileEmptyLinks(t *testing.T) {
 	omitted := strings.Replace(borderJSON(""), `,
 `+`"links": [{"name": "web", "tag": "tag:web", "ports": [80]}]`, "", 1)
 	for _, body := range []string{borderJSON(`"links": []`), omitted} {
-		cfg, err := config.Parse([]byte(body))
+		var b config.Border
+		if err := json.Unmarshal([]byte(body), &b); err != nil {
+			t.Fatal(err)
+		}
+		if len(b.Links) != 0 {
+			t.Fatalf("links = %+v", b.Links)
+		}
+		cfg, err := b.Compile()
 		if err != nil {
-			t.Fatalf("parse: %v\n%s", err, body)
+			t.Fatalf("Compile: %v\n%s", err, body)
 		}
 		if len(cfg.Bridges) != 0 {
 			t.Fatalf("bridges = %+v", cfg.Bridges)
 		}
 		if len(cfg.Tailnets) != 2 || cfg.InstanceID != "test" || !cfg.Tailnets["test-src"].HasAuth() || !cfg.Tailnets["test-dst"].HasAuth() {
 			t.Fatalf("tailnets = %+v", cfg.Tailnets)
+		}
+		parsed, err := config.Parse([]byte(body))
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if len(parsed.Bridges) != 0 || len(parsed.Tailnets) != 2 {
+			t.Fatalf("parsed = %+v", parsed)
 		}
 	}
 }

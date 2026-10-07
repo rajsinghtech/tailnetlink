@@ -70,6 +70,8 @@ Older multi-tailnet configs (`tailnets` / `bridges` / `instance_id`) are no long
 }
 ```
 
+`links` can start empty (`[]` or left out). tailnetlink still logs both nodes in and reports ready once they are up. It creates no VIP services until a link is added. A later edit to the file is picked up without a restart.
+
 ### Ownership
 
 `name` is required. It is the owner written to every VIP service this process creates (`tailnetlink/owner=<name>`), and part of its node hostnames (`tailnetlink-<name>-src`, `tailnetlink-<name>-dst`). 1 to 40 lowercase letters, digits or dashes. Two borders that share a tailnet need different names, and one of them should set `"ui": {"service_name": "svc:..."}` so their UI services don't collide.
