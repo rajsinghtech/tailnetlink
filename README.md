@@ -212,7 +212,7 @@ The issuer can be anything you have federated with Tailscale. GitHub Actions is 
 
 ## Docker
 
-Images publish only on version tags (`v*.*.*`), never from `main`. The image runs as UID 65532, expects `/data/tailnetlink.json`, keeps node state under `/data/tailnetlink-state`, and listens for metrics on `:9090` so probes work inside the container. It does not open `/dev/net/tun`. Ephemeral node state stays under the state directory too, so a read-only root filesystem works when that directory is a mounted volume.
+Version tags (`v*.*.*`) publish release images. Every push to `main` also publishes `:main` and `:sha-<short>`; pin those by digest. The image runs as UID 65532, expects `/data/tailnetlink.json`, keeps node state under `/data/tailnetlink-state`, and listens for metrics on `:9090` so probes work inside the container. It does not open `/dev/net/tun`. Ephemeral node state stays under the state directory too, so a read-only root filesystem works when that directory is a mounted volume.
 
 ```bash
 docker pull ghcr.io/rajsinghtech/tailnetlink:vX.Y.Z

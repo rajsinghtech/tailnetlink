@@ -11,4 +11,4 @@ docker compose up -d
 curl -sf http://127.0.0.1:9090/healthz
 ```
 
-Images are published only for version tags (`v*.*.*`), never from `main`.
+Version tags (`v*.*.*`) publish release images. Pushes to `main` publish `:main` and `:sha-<short>`; pin by digest.
