@@ -135,28 +135,53 @@ func checkDNSZone(name, zone, where string) error {
 
 func validateLocalSources(sources []LocalSourceSpec) error {
 	for i, src := range sources {
-		host, portStr, err := net.SplitHostPort(src.Addr)
+		host, _, err := src.Forwards()
 		if err != nil {
-			return fmt.Errorf("local_sources[%d].addr %q is invalid: %w", i, src.Addr, err)
-		}
-		if host == "" {
-			return fmt.Errorf("local_sources[%d].addr %q has no host", i, src.Addr)
-		}
-		p, err := strconv.Atoi(portStr)
-		if err != nil || p <= 0 || p > 65535 {
-			return fmt.Errorf("local_sources[%d].addr %q has invalid port", i, src.Addr)
-		}
-		if src.ExposePort < 0 || src.ExposePort > 65535 {
-			return fmt.Errorf("local_sources[%d].expose_port %d is out of range", i, src.ExposePort)
+			return fmt.Errorf("local_sources[%d]: %w", i, err)
 		}
 		if isLocalOrIP(host) && src.DNSName == "" {
-			return fmt.Errorf("local_sources[%d].addr %q requires dns_name (cannot derive from localhost/IP)", i, src.Addr)
+			return fmt.Errorf("local_sources[%d]: addr %q requires dns_name (cannot derive from localhost/IP)", i, src.Addr)
 		}
 		if err := checkDNSZone(src.DNSName, src.DNSZone, fmt.Sprintf("local_sources[%d]", i)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// splitLocalAddr parses a classic "host:port" addr. hasPort is true when
+// addr has a port separator, even if that port is not a valid number.
+func splitLocalAddr(addr string) (host string, port int, hasPort bool, err error) {
+	h, p, splitErr := net.SplitHostPort(addr)
+	if splitErr != nil {
+		return "", 0, false, splitErr
+	}
+	n, convErr := strconv.Atoi(p)
+	if convErr != nil || n <= 0 || n > 65535 {
+		return h, 0, true, fmt.Errorf("addr %q has invalid port", addr)
+	}
+	return h, n, true, nil
+}
+
+// hostOnly accepts an addr with no port: a hostname, an IP, or a bracketed IP.
+func hostOnly(addr string) (string, error) {
+	host := addr
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) >= 2 {
+		inner := host[1 : len(host)-1]
+		if _, err := netip.ParseAddr(inner); err != nil {
+			return "", fmt.Errorf("missing port in address %s", addr)
+		}
+		host = inner
+	}
+	if strings.TrimSpace(host) == "" || strings.ContainsAny(host, " \t") {
+		return "", fmt.Errorf("missing host")
+	}
+	if strings.Contains(host, ":") {
+		if _, err := netip.ParseAddr(host); err != nil {
+			return "", fmt.Errorf("missing port in address %s", addr)
+		}
+	}
+	return host, nil
 }
 
 // isLocalOrIP reports whether host is localhost or a bare IP, which can't
@@ -177,9 +202,9 @@ func (l LocalSourceSpec) EffectiveDNSName() (string, error) {
 	if l.DNSName != "" {
 		return l.DNSName, nil
 	}
-	host, _, err := net.SplitHostPort(l.Addr)
+	host, _, err := l.Forwards()
 	if err != nil {
-		return "", fmt.Errorf("invalid addr %q: %w", l.Addr, err)
+		return "", err
 	}
 	if isLocalOrIP(host) {
 		return "", fmt.Errorf("addr %q requires dns_name (cannot derive from localhost/IP)", l.Addr)
@@ -204,21 +229,63 @@ func (l LocalSourceSpec) EffectiveShortName() string {
 }
 
 // EffectivePort is the port the service listens on in the destination
-// tailnet: expose_port, or else the port in addr.
+// tailnet when the target exposes exactly one port: expose_port, or else
+// the port in addr.
 func (l LocalSourceSpec) EffectivePort() (int, error) {
-	if l.ExposePort < 0 || l.ExposePort > 65535 {
-		return 0, fmt.Errorf("expose_port %d out of range", l.ExposePort)
-	}
-	if l.ExposePort > 0 {
-		return l.ExposePort, nil
-	}
-	_, portStr, err := net.SplitHostPort(l.Addr)
+	_, fw, err := l.Forwards()
 	if err != nil {
-		return 0, fmt.Errorf("invalid addr %q: %w", l.Addr, err)
+		return 0, err
 	}
-	p, err := strconv.Atoi(portStr)
-	if err != nil || p <= 0 || p > 65535 {
-		return 0, fmt.Errorf("invalid port in addr %q", l.Addr)
+	if len(fw) != 1 {
+		return 0, fmt.Errorf("addr %q exposes %d ports", l.Addr, len(fw))
 	}
-	return p, nil
+	return fw[0].Expose, nil
+}
+
+// Forwards is the host to dial and each exposed VIP port with its backend
+// port. A host:port addr yields one pair. A host plus ports yields one pair
+// per configured port. expose_port, when set, is the single VIP port and the
+// backend stays the port in addr.
+func (l LocalSourceSpec) Forwards() (string, []LocalForward, error) {
+	host, port, hasPort, splitErr := splitLocalAddr(l.Addr)
+	if l.Ports.Configured() {
+		fw, err := l.Ports.validated()
+		if err != nil {
+			return "", nil, err
+		}
+		if l.ExposePort != 0 {
+			return "", nil, fmt.Errorf("expose_port cannot be combined with ports")
+		}
+		if hasPort {
+			return "", nil, fmt.Errorf("addr %q has a port and also sets ports", l.Addr)
+		}
+		if splitErr != nil {
+			var herr error
+			host, herr = hostOnly(l.Addr)
+			if herr != nil {
+				return "", nil, fmt.Errorf("addr %q is invalid: %w", l.Addr, herr)
+			}
+		}
+		if host == "" {
+			return "", nil, fmt.Errorf("addr %q has no host", l.Addr)
+		}
+		return host, fw, nil
+	}
+	if splitErr != nil {
+		if !hasPort {
+			return "", nil, fmt.Errorf("addr %q is invalid: %w", l.Addr, splitErr)
+		}
+		return "", nil, splitErr
+	}
+	if host == "" {
+		return "", nil, fmt.Errorf("addr %q has no host", l.Addr)
+	}
+	if l.ExposePort < 0 || l.ExposePort > 65535 {
+		return "", nil, fmt.Errorf("expose_port %d is out of range", l.ExposePort)
+	}
+	expose := port
+	if l.ExposePort > 0 {
+		expose = l.ExposePort
+	}
+	return host, []LocalForward{{Expose: expose, Backend: port}}, nil
 }

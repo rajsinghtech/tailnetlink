@@ -71,6 +71,16 @@ func TestValidateBridges(t *testing.T) {
 		{"local negative expose", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "h:80", ExposePort: -1})}, "expose_port"},
 		{"local ip needs dns", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "10.0.0.1:80"})}, "requires dns_name"},
 		{"localhost needs dns", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "localhost:80"})}, "requires dns_name"},
+		{"local multi port", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "10.0.0.1", DNSName: "app.example.com", ShortName: "app", Ports: config.LocalPortList(80, 443)})}, ""},
+		{"local port map", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "db.lan", Ports: config.LocalPortMap(map[int]int{80: 8080})})}, ""},
+		{"local empty ports", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "10.0.0.1", DNSName: "app.example.com", Ports: config.LocalPortList()})}, "ports is empty"},
+		{"local duplicate port", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "10.0.0.1", DNSName: "app.example.com", Ports: config.LocalPortList(80, 80)})}, "duplicate exposed port"},
+		{"local port zero", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "10.0.0.1", DNSName: "app.example.com", Ports: config.LocalPortList(0)})}, "out of range"},
+		{"local port too big", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "10.0.0.1", DNSName: "app.example.com", Ports: config.LocalPortList(65536)})}, "out of range"},
+		{"local backend port out of range", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "10.0.0.1", DNSName: "app.example.com", Ports: config.LocalPortMap(map[int]int{80: 0})})}, "backend port"},
+		{"local addr port with ports", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "10.0.0.1:80", DNSName: "app.example.com", Ports: config.LocalPortList(80)})}, "also sets ports"},
+		{"local expose with ports", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "10.0.0.1", DNSName: "app.example.com", ExposePort: 80, Ports: config.LocalPortList(80)})}, "expose_port cannot be combined"},
+		{"local host-only needs ports", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "10.0.0.1", DNSName: "app.example.com"})}, "is invalid"},
 		{"exact zone", []config.BridgeRule{tag("r", func(r *config.BridgeRule) {
 			r.SourceTag = ""
 			r.SourceDevices = []config.DeviceSpec{{FQDN: "app.example.ts.net", DNSName: "app.corp.example.com", DNSZone: "app.corp.example.com"}}

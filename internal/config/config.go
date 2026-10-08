@@ -269,15 +269,21 @@ type ServiceSpec struct {
 }
 
 // LocalSourceSpec identifies a service on the local machine (or host-reachable network)
-// to proxy into a destination tailnet. Addr is "host:port" dialed directly via net.DialContext.
-// ExposePort is the VIP-side listen port (defaults to addr's port if zero). DNSName is required
-// when host is localhost or a bare IP; auto-derived from addr hostname otherwise.
+// to proxy into a destination tailnet. One spec is one VIP service: one DNS name
+// and one short name.
+//
+// Addr is either "host:port" or a host with no port. The host:port form dials
+// that address; ExposePort is the VIP listen port and defaults to addr's port.
+// A host with no port uses Ports: a list (exposed port equals backend port) or
+// a map of exposed port to backend port. DNSName is required when host is
+// localhost or a bare IP; it is taken from the addr hostname otherwise.
 type LocalSourceSpec struct {
-	Addr       string `json:"addr"`
-	ExposePort int    `json:"expose_port,omitempty"`
-	DNSName    string `json:"dns_name,omitempty"`
-	DNSZone    string `json:"dns_zone,omitempty"` // split-DNS zone; empty means the parent of dns_name
-	ShortName  string `json:"short_name,omitempty"`
+	Addr       string     `json:"addr"`
+	ExposePort int        `json:"expose_port,omitempty"`
+	Ports      LocalPorts `json:"ports,omitzero"`
+	DNSName    string     `json:"dns_name,omitempty"`
+	DNSZone    string     `json:"dns_zone,omitempty"` // split-DNS zone; empty means the parent of dns_name
+	ShortName  string     `json:"short_name,omitempty"`
 }
 
 type BridgeRule struct {
@@ -290,6 +296,38 @@ type BridgeRule struct {
 	LocalSources   []LocalSourceSpec `json:"local_sources,omitempty"`
 	Ports          []int             `json:"ports,omitempty"`
 	Authz          AuthzConfig       `json:"authz,omitzero"`
+	// From is the tailnet key this rule leaves. Border compile sets it on
+	// local links. Mesh compile sets it on every rule to the bridge's from
+	// key. Non-local border rules leave it empty and use SourceTailnet.
+	From string `json:"from,omitempty"`
+	// Link is the link name inside a mesh bridge. The rule Name there is
+	// from/link, so Link keeps the short name for the ownership id. A
+	// border leaves it empty and BridgeRef uses Name.
+	Link string `json:"link,omitempty"`
+}
+
+// FromTailnet is the tailnet key this rule leaves: From, or else
+// SourceTailnet. Local border links have From set to the source key.
+func (r BridgeRule) FromTailnet() string {
+	if r.From != "" {
+		return r.From
+	}
+	return r.SourceTailnet
+}
+
+// BridgeRef identifies the bridge that owns VIP services this rule publishes
+// into dest. It is from/dest/link, so two bridges that want the same name
+// in one tailnet conflict instead of overwriting each other.
+func (r BridgeRule) BridgeRef(dest string) string {
+	from := r.FromTailnet()
+	if from == "" {
+		from = "local"
+	}
+	link := r.Link
+	if link == "" {
+		link = r.Name
+	}
+	return from + "/" + dest + "/" + link
 }
 
 // DefaultListenAddr is where the web UI listens unless the config or
@@ -433,6 +471,8 @@ func (c *Config) Clone() *Config {
 		cp.Tailnets = make(map[string]TailnetConfig, len(c.Tailnets))
 		for k, tc := range c.Tailnets {
 			tc.Tags = slices.Clone(tc.Tags)
+			tc.Authz.AllowLogins = slices.Clone(tc.Authz.AllowLogins)
+			tc.Authz.AllowTags = slices.Clone(tc.Authz.AllowTags)
 			cp.Tailnets[k] = tc
 		}
 	}
@@ -443,6 +483,9 @@ func (c *Config) Clone() *Config {
 			b.SourceDevices = slices.Clone(b.SourceDevices)
 			b.SourceServices = slices.Clone(b.SourceServices)
 			b.LocalSources = slices.Clone(b.LocalSources)
+			for i := range b.LocalSources {
+				b.LocalSources[i].Ports.entries = slices.Clone(b.LocalSources[i].Ports.entries)
+			}
 			b.Ports = slices.Clone(b.Ports)
 			b.Authz.AllowLogins = slices.Clone(b.Authz.AllowLogins)
 			b.Authz.AllowTags = slices.Clone(b.Authz.AllowTags)

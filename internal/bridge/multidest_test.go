@@ -376,8 +376,13 @@ func TestLocalRuleSkipsDownDest(t *testing.T) {
 		}
 		return false
 	})
-	if names := good.ServiceNames(); len(names) != 1 {
+	names := good.ServiceNames()
+	if len(names) != 1 {
 		t.Fatalf("services = %v", names)
+	}
+	svc, ok := good.Service(names[0])
+	if !ok || svc.Annotations[annotationBridge] != rule.BridgeRef(goodKey) {
+		t.Fatalf("bridge annotation = %v, want %s", svc.Annotations, rule.BridgeRef(goodKey))
 	}
 	for _, b := range m.store.GetBridges() {
 		if strings.Contains(b.ID, badKey) {

@@ -1,6 +1,9 @@
 package config_test
 
 import (
+	"encoding/json"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/rajsinghtech/tailnetlink/internal/config"
@@ -75,5 +78,101 @@ func TestLocalSourceDerivedShortNameConflict(t *testing.T) {
 	cfg.Bridges[0].LocalSources[1].Addr = ":5432"
 	if err := cfg.Validate(); err == nil {
 		t.Error("addr with no host: want an error")
+	}
+}
+
+func TestLocalForwards(t *testing.T) {
+	cases := []struct {
+		name string
+		spec config.LocalSourceSpec
+		host string
+		want []config.LocalForward
+	}{
+		{"host port", config.LocalSourceSpec{Addr: "db.lan:5432"}, "db.lan", []config.LocalForward{{Expose: 5432, Backend: 5432}}},
+		{"expose port", config.LocalSourceSpec{Addr: "db.lan:8080", ExposePort: 80}, "db.lan", []config.LocalForward{{Expose: 80, Backend: 8080}}},
+		{"ipv6", config.LocalSourceSpec{Addr: "[::1]:8080", DNSName: "app.example.com"}, "::1", []config.LocalForward{{Expose: 8080, Backend: 8080}}},
+		{"list keeps order", config.LocalSourceSpec{Addr: "10.0.0.1", DNSName: "app.example.com", Ports: config.LocalPortList(443, 80)}, "10.0.0.1", []config.LocalForward{{Expose: 443, Backend: 443}, {Expose: 80, Backend: 80}}},
+		{"map sorts keys", config.LocalSourceSpec{Addr: "[::1]", DNSName: "app.example.com", Ports: config.LocalPortMap(map[int]int{443: 8443, 80: 8080})}, "::1", []config.LocalForward{{Expose: 80, Backend: 8080}, {Expose: 443, Backend: 8443}}},
+		{"named host list", config.LocalSourceSpec{Addr: "db.lan", Ports: config.LocalPortList(5432)}, "db.lan", []config.LocalForward{{Expose: 5432, Backend: 5432}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			host, got, err := c.spec.Forwards()
+			if err != nil {
+				t.Fatalf("Forwards: %v", err)
+			}
+			if host != c.host || !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("Forwards = %s, %#v; want %s, %#v", host, got, c.host, c.want)
+			}
+		})
+	}
+	spec := config.LocalSourceSpec{Addr: "10.0.0.1", DNSName: "app.example.com", Ports: config.LocalPortList(80, 443)}
+	if _, err := spec.EffectivePort(); err == nil {
+		t.Fatal("EffectivePort on a multi-port target: want an error")
+	}
+	if name, err := spec.EffectiveDNSName(); err != nil || name != "app.example.com" {
+		t.Fatalf("DNS name = %q, %v", name, err)
+	}
+	if spec.EffectiveShortName() != "app" {
+		t.Fatalf("short name = %q", spec.EffectiveShortName())
+	}
+}
+
+func TestLocalPortsJSON(t *testing.T) {
+	raw := `{
+		"name": "app",
+		"dest_tailnets": ["b"],
+		"local_sources": [{
+			"addr": "10.0.0.1",
+			"dns_name": "app.example.com",
+			"short_name": "app",
+			"ports": {"443": 8443, "80": 8080}
+		}]
+	}`
+	var rule config.BridgeRule
+	if err := json.Unmarshal([]byte(raw), &rule); err != nil {
+		t.Fatal(err)
+	}
+	host, fw, err := rule.LocalSources[0].Forwards()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []config.LocalForward{{Expose: 80, Backend: 8080}, {Expose: 443, Backend: 8443}}
+	if host != "10.0.0.1" || !reflect.DeepEqual(fw, want) {
+		t.Fatalf("Forwards = %s %#v", host, fw)
+	}
+	out, err := json.Marshal(rule.LocalSources[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"80":8080`) || strings.Contains(string(out), "expose_port") {
+		t.Fatalf("marshal = %s", out)
+	}
+
+	var list config.LocalSourceSpec
+	if err := json.Unmarshal([]byte(`{"addr":"10.0.0.1","ports":[80,443]}`), &list); err != nil {
+		t.Fatal(err)
+	}
+	again, err := json.Marshal(list.Ports)
+	if err != nil || string(again) != "[80,443]" {
+		t.Fatalf("list marshal = %s, %v", again, err)
+	}
+
+	for _, bad := range []string{
+		`{"addr":"10.0.0.1","ports":[]}`,
+		`{"addr":"10.0.0.1","ports":{}}`,
+		`{"addr":"10.0.0.1","ports":{"080":1}}`,
+		`{"addr":"10.0.0.1","ports":"80"}`,
+		`{"addr":"10.0.0.1","ports":[80,80]}`,
+		`{"addr":"10.0.0.1:80","ports":[80]}`,
+	} {
+		var spec config.LocalSourceSpec
+		err := json.Unmarshal([]byte(bad), &spec)
+		if err != nil {
+			continue
+		}
+		if _, _, err := spec.Forwards(); err == nil {
+			t.Errorf("%s: want an error", bad)
+		}
 	}
 }

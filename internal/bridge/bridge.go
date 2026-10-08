@@ -884,6 +884,7 @@ func (m *Manager) runRule(ctx context.Context, rule config.BridgeRule, pollInter
 		}
 
 		rec := NewReconciler(destClient, rule.Ports, destTags, m.ownerID(), m.logger)
+		rec.bridge = rule.BridgeRef(destName)
 		dests = append(dests, destCtx{name: destName, srv: destSrv, client: destClient, tags: destTags, rec: rec})
 	}
 	if len(dests) == 0 {

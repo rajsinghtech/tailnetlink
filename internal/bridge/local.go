@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
+	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -12,8 +15,9 @@ import (
 	"tailscale.com/tsnet"
 )
 
-// newLocalForwarder constructs a Forwarder that dials localAddr directly via net.DialContext.
-// dialSrv is nil; localAddr is used instead in handle().
+// newLocalForwarder constructs a Forwarder that dials on the host network.
+// dialSrv stays nil. Set localAddr to dial one address for every listen port,
+// or localTargets to choose the backend address per listen port.
 func newLocalForwarder(
 	listenSrv *tsnet.Server,
 	localAddr string,
@@ -32,6 +36,17 @@ func newLocalForwarder(
 		store:     store,
 		logger:    logger,
 	}
+}
+
+// localBridgeID keys one local target in one destination. The classic
+// host:port form keeps the historical id. A host with no port would otherwise
+// collide when two targets share that host, so the short name is part of the id.
+func localBridgeID(rule, dest, addr, shortName string) string {
+	id := rule + "/local/" + dest + "/" + addr
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		id += "/" + shortName
+	}
+	return id
 }
 
 type localBridgeInfo struct {
@@ -77,11 +92,17 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 			m.store.Log("error", fmt.Sprintf("[%s] skipping %s: %v", rule.Name, src.Addr, err), nil)
 			continue
 		}
-		exposePort, err := src.EffectivePort()
+		host, forwards, err := src.Forwards()
 		if err != nil {
-			m.logger.Error("local rule: invalid expose port", "rule", rule.Name, "addr", src.Addr, "err", err)
+			m.logger.Error("local rule: invalid ports", "rule", rule.Name, "addr", src.Addr, "err", err)
 			m.store.Log("error", fmt.Sprintf("[%s] skipping %s: %v", rule.Name, src.Addr, err), nil)
 			continue
+		}
+		exposePorts := make([]int, len(forwards))
+		targets := make(map[int]string, len(forwards))
+		for i, fw := range forwards {
+			exposePorts[i] = fw.Expose
+			targets[fw.Expose] = net.JoinHostPort(host, strconv.Itoa(fw.Backend))
 		}
 
 		shortName := src.EffectiveShortName()
@@ -90,14 +111,15 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 		createdAt := time.Now()
 
 		for _, dest := range dests {
-			bridgeID := rule.Name + "/local/" + dest.name + "/" + src.Addr
-			srcRec := NewReconciler(dest.client, []int{exposePort}, dest.tags, m.ownerID(), m.logger)
+			bridgeID := localBridgeID(rule.Name, dest.name, src.Addr, shortName)
+			srcRec := NewReconciler(dest.client, exposePorts, dest.tags, m.ownerID(), m.logger)
+			srcRec.bridge = rule.BridgeRef(dest.name)
 
 			m.store.UpsertBridge(state.BridgeEntry{
 				ID: bridgeID, RuleName: rule.Name, DestTailnet: m.tailnetLabel(dest.name),
 				ServiceName: svcName,
 				SourceHost:  src.Addr, SourceIP: src.Addr,
-				Ports: []int{exposePort}, Status: state.BridgeStatusPending, CreatedAt: createdAt,
+				Ports: slices.Clone(exposePorts), Status: state.BridgeStatusPending, CreatedAt: createdAt,
 			})
 
 			vip, err := srcRec.Ensure(ctx, "local", syntheticDev, shortName)
@@ -108,13 +130,14 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 					ID: bridgeID, RuleName: rule.Name, DestTailnet: m.tailnetLabel(dest.name),
 					ServiceName: svcName,
 					SourceHost:  src.Addr, SourceIP: src.Addr,
-					Ports: []int{exposePort}, Status: state.BridgeStatusError, Error: err.Error(), CreatedAt: createdAt,
+					Ports: slices.Clone(exposePorts), Status: state.BridgeStatusError, Error: err.Error(), CreatedAt: createdAt,
 				})
 				m.store.Log("error", fmt.Sprintf("[%s] VIP failed for %s→%s: %v", rule.Name, src.Addr, dest.name, err), nil)
 				continue
 			}
 
-			fwd := newLocalForwarder(dest.srv, src.Addr, vip, bridgeID, dialTimeout, m.store, m.logger)
+			fwd := newLocalForwarder(dest.srv, "", vip, bridgeID, dialTimeout, m.store, m.logger)
+			fwd.localTargets = targets
 			fwd.rule, fwd.metrics, fwd.authz = rule.Name, m.metricsRef(), m.authzFor(rule, dest.name)
 			if err := startForwarder(fwd, ctx); err != nil {
 				m.logger.Error("local rule: forwarder start failed", "rule", rule.Name, "dest", dest.name, "addr", src.Addr, "err", err)
@@ -126,10 +149,10 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 			m.store.UpsertBridge(state.BridgeEntry{
 				ID: bridgeID, RuleName: rule.Name, DestTailnet: m.tailnetLabel(dest.name),
 				ServiceName: vip.ServiceName, SourceHost: src.Addr, SourceIP: src.Addr,
-				DestVIP: vip.VIP.String(), Ports: []int{exposePort},
+				DestVIP: vip.VIP.String(), Ports: slices.Clone(exposePorts),
 				Status: state.BridgeStatusActive, CreatedAt: createdAt,
 			})
-			m.store.Log("info", fmt.Sprintf("[%s] local bridge active: %s → %s (%s)", rule.Name, src.Addr, vip.VIP, dest.name), nil)
+			m.store.Log("info", fmt.Sprintf("[%s] local bridge active: %s → %s (%s) ports %v", rule.Name, src.Addr, vip.VIP, dest.name, exposePorts), nil)
 
 			m.mu.Lock()
 			m.forwarders[bridgeID] = fwd

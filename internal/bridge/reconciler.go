@@ -27,6 +27,7 @@ type Reconciler struct {
 	ports  []int
 	tags   []string // ACL tags applied to the VIP service (must match dest tsnet node tags)
 	owner  string   // instance id written to and checked against tailnetlink/owner
+	bridge string   // from/dest/link; empty keeps the owner-only annotation
 	logger *slog.Logger
 
 	mu       sync.RWMutex
@@ -62,14 +63,18 @@ func (r *Reconciler) Ensure(ctx context.Context, srcTailnet string, dev Device, 
 		portStrings = append(portStrings, "tcp:"+strconv.Itoa(p))
 	}
 
+	annotations := map[string]string{
+		"tailnetlink/source": srcTailnet,
+	}
+	if r.bridge != "" {
+		annotations[annotationBridge] = r.bridge
+	}
 	created, err := ensureVIPService(ctx, r.client, r.owner, tsclient.VIPService{
-		Name:    svcName,
-		Ports:   portStrings,
-		Tags:    r.tags,
-		Comment: fmt.Sprintf("managed by tailnetlink (source: %s → %s)", srcTailnet, dev.FQDN),
-		Annotations: map[string]string{
-			"tailnetlink/source": srcTailnet,
-		},
+		Name:        svcName,
+		Ports:       portStrings,
+		Tags:        r.tags,
+		Comment:     fmt.Sprintf("managed by tailnetlink (source: %s → %s)", srcTailnet, dev.FQDN),
+		Annotations: annotations,
 	})
 	if err != nil {
 		return nil, err

@@ -273,6 +273,13 @@ func (b *Border) Compile() (*Config, error) {
 			}
 			return nil, fmt.Errorf("link %q: %w", l.Name, err)
 		}
+		if len(l.Local) > 0 {
+			// From is the tailnet key this link leaves. A border's key is
+			// the source tailnet. The shared-node mesh passes the bridge's
+			// from key into rule the same way, and the VIP annotation is
+			// from/dest/link.
+			rule.From = src
+		}
 		cfg.Bridges = append(cfg.Bridges, rule)
 	}
 	if err := cfg.Validate(); err != nil {
@@ -368,7 +375,7 @@ func (l Link) rule(src string, dsts []string, borderAuthz AuthzConfig) (BridgeRu
 	r := BridgeRule{Name: l.Name, DestTailnets: append([]string(nil), dsts...), Authz: l.Authz.Effective(borderAuthz)}
 	if len(l.Local) > 0 {
 		if len(l.Ports) > 0 {
-			return BridgeRule{}, errors.New("ports doesn't apply to a local link; set addr (and expose_port) on each target")
+			return BridgeRule{}, errors.New("ports doesn't apply to a local link; set addr and ports on each target")
 		}
 		r.LocalSources = append([]LocalSourceSpec(nil), l.Local...)
 		return r, nil
