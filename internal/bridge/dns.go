@@ -86,7 +86,7 @@ func (d *DNSServer) Start(ctx context.Context) (netip.Addr, error) {
 		return netip.Addr{}, fmt.Errorf("DNS VIP service %q has no assigned IP address", d.svcName)
 	}
 
-	ln, err := listenServiceWithRetry(d.srv, d.svcName, tsnet.ServiceModeTCP{Port: 53})
+	ln, err := listenService(d.srv, d.svcName, tsnet.ServiceModeTCP{Port: 53})
 	if err != nil {
 		return netip.Addr{}, fmt.Errorf("dns listen service tcp: %w", err)
 	}

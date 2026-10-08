@@ -53,6 +53,10 @@ func sanitize(s string) string {
 	return s
 }
 
+// listenService is ListenService with retries. Tests replace it so DNS setup
+// can run against the fake control API without a live tsnet node.
+var listenService = listenServiceWithRetry
+
 // listenServiceWithRetry calls srv.ListenService, retrying up to 8 times on
 // etag-mismatch races that occur when concurrent goroutines update the serve config.
 func listenServiceWithRetry(srv *tsnet.Server, svcName string, mode tsnet.ServiceMode) (net.Listener, error) {

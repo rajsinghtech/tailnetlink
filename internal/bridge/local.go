@@ -130,7 +130,7 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 			m.mu.Unlock()
 
 			if vip.VIP.IsValid() {
-				m.startDeviceDNS(ctx, bridgeID, rule.Name, "", dnsName, "", vip.VIP, dest)
+				m.startDeviceDNS(ctx, bridgeID, rule.Name, "", dnsName, src.DNSZone, "", "", vip.VIP, dest)
 			}
 
 			bridges = append(bridges, localBridgeInfo{

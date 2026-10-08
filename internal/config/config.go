@@ -247,6 +247,7 @@ func (o OAuthCreds) validate() error {
 type DeviceSpec struct {
 	FQDN      string `json:"fqdn"`
 	DNSName   string `json:"dns_name,omitempty"`   // full desired hostname, e.g. "ai.example.ts.net"
+	DNSZone   string `json:"dns_zone,omitempty"`   // split-DNS zone; empty means the parent of dns_name
 	ShortName string `json:"short_name,omitempty"` // bare VIP service name, e.g. "ai" → svc:ai
 }
 
@@ -254,6 +255,7 @@ type DeviceSpec struct {
 type ServiceSpec struct {
 	Name      string `json:"name"`
 	DNSName   string `json:"dns_name,omitempty"`   // full desired hostname
+	DNSZone   string `json:"dns_zone,omitempty"`   // split-DNS zone; empty means the parent of dns_name
 	ShortName string `json:"short_name,omitempty"` // bare VIP service name → svc:shortName
 }
 
@@ -265,6 +267,7 @@ type LocalSourceSpec struct {
 	Addr       string `json:"addr"`
 	ExposePort int    `json:"expose_port,omitempty"`
 	DNSName    string `json:"dns_name,omitempty"`
+	DNSZone    string `json:"dns_zone,omitempty"` // split-DNS zone; empty means the parent of dns_name
 	ShortName  string `json:"short_name,omitempty"`
 }
 
