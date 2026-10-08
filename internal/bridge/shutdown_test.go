@@ -24,7 +24,11 @@ func stubForwarders(t *testing.T) {
 	startForwarder = func(*Forwarder, context.Context) error { return nil }
 	origClose := closeServer
 	closeServer = func(*tsnet.Server) error { return nil }
-	t.Cleanup(func() { startForwarder, closeServer = orig, origClose })
+	origJitter := startJitter
+	startJitter = func(time.Duration) time.Duration { return 0 }
+	t.Cleanup(func() {
+		startForwarder, closeServer, startJitter = orig, origClose, origJitter
+	})
 }
 
 type testManager struct {

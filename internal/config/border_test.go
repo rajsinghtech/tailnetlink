@@ -1,7 +1,10 @@
 package config_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -280,6 +283,183 @@ func TestParseLocalMultiPort(t *testing.T) {
 	bad := borderJSON(`"links": [{"name": "app", "local": [{"addr": "10.0.0.1", "dns_name": "app.example.com", "port_map": {"80": 8080}}]}]`)
 	if _, err := config.Parse([]byte(bad)); err == nil {
 		t.Fatal("port_map is not a field; want an unknown-field error")
+	}
+}
+
+func sideJSON(tailnet, id string, extra string) string {
+	s := fmt.Sprintf(`"tailnet": %q, "oauth": {"client_id": %q, "client_secret_file": "/run/s"}, "tags": ["tag:tailnetlink"]`, tailnet, id)
+	if extra != "" {
+		s += ", " + extra
+	}
+	return "{" + s + "}"
+}
+
+func multiBorder(dests string) string {
+	return `{
+		"name": "edge",
+		"source": ` + sideJSON("keiretsu.ts.net", "src", "") + `,
+		"dests": [` + dests + `],
+		"links": [{"name": "web", "tag": "tag:web", "ports": [80], "authz": {"mode": "off"}}]
+	}`
+}
+
+func TestMultiDestValidation(t *testing.T) {
+	both := borderJSON(`"dests": [` + sideJSON("c.ts.net", "c", "") + `]`)
+	if _, err := config.Parse([]byte(both)); err == nil || !strings.Contains(err.Error(), "not both") {
+		t.Fatalf("both set: %v", err)
+	}
+	empty := `{
+		"name": "edge",
+		"source": ` + sideJSON("keiretsu.ts.net", "src", "") + `,
+		"dests": [],
+		"links": []
+	}`
+	if _, err := config.Parse([]byte(empty)); err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("empty dests: %v", err)
+	}
+	missing := `{
+		"name": "edge",
+		"source": ` + sideJSON("keiretsu.ts.net", "src", "") + `,
+		"links": []
+	}`
+	if _, err := config.Parse([]byte(missing)); err == nil || !strings.Contains(err.Error(), "required") {
+		t.Fatalf("no dest: %v", err)
+	}
+	badSide := multiBorder(`{"tailnet": "example.ts.net"}`)
+	if _, err := config.Parse([]byte(badSide)); err == nil || !strings.Contains(err.Error(), "dests[0]") {
+		t.Fatalf("bad dest: %v", err)
+	}
+	badAuthz := multiBorder(sideJSON("example.ts.net", "a", `"authz": {"mode": "allow_logins"}`))
+	if _, err := config.Parse([]byte(badAuthz)); err == nil || !strings.Contains(err.Error(), "allow_logins") {
+		t.Fatalf("bad dest authz: %v", err)
+	}
+	dup := multiBorder(sideJSON("Example.ts.net", "a", "") + "," + sideJSON("example.ts.net", "b", ""))
+	if _, err := config.Parse([]byte(dup)); err == nil || !strings.Contains(err.Error(), "duplicated") {
+		t.Fatalf("duplicate: %v", err)
+	}
+
+	// Two tailnet names whose state keys would collide are rejected.
+	seen := map[string]string{}
+	var a, b string
+	for i := 0; i < 100000 && a == ""; i++ {
+		name := fmt.Sprintf("n%d.ts.net", i)
+		sum := sha256.Sum256([]byte(name))
+		suf := hex.EncodeToString(sum[:2])
+		if other, ok := seen[suf]; ok {
+			a, b = other, name
+			break
+		}
+		seen[suf] = name
+	}
+	if a == "" {
+		t.Fatal("no hash collision found")
+	}
+	clash := multiBorder(sideJSON(a, "a", "") + "," + sideJSON(b, "b", ""))
+	if _, err := config.Parse([]byte(clash)); err == nil || !strings.Contains(err.Error(), "share node state") {
+		t.Fatalf("collision: %v", err)
+	}
+}
+
+func TestMultiDestCompile(t *testing.T) {
+	single, err := config.Parse([]byte(borderJSON("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := single.Tailnets["test-dst"]; !ok || single.Tailnets["test-dst"].Role != "dest" {
+		t.Fatalf("single dest key = %+v", single.Tailnets)
+	}
+
+	one := multiBorder(sideJSON("example.ts.net", "one", ""))
+	cfg, err := config.Parse([]byte(one))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cfg.Tailnets["edge-dst"]; ok {
+		t.Fatal("one-element dests reused the single-dest state key")
+	}
+	var oneKey string
+	for k, tc := range cfg.Tailnets {
+		if tc.Role == "dest" {
+			oneKey = k
+		}
+	}
+	sum := sha256.Sum256([]byte("example.ts.net"))
+	want := "edge-dst-" + hex.EncodeToString(sum[:2])
+	if oneKey != want {
+		t.Fatalf("one-element key = %q, want %q", oneKey, want)
+	}
+
+	body := multiBorder(sideJSON("example.ts.net", "ex", `"authz": {"mode": "allow_logins", "allow_logins": ["alice@example.com"]}`) + "," +
+		sideJSON("partner.example.com", "pa", `"dns": {"enabled": false}, "authz": {"mode": "allow_tags", "allow_tags": ["tag:eng"]}`))
+	cfg, err = config.Parse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := config.Parse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Bridges) != 1 {
+		t.Fatalf("rules = %d", len(cfg.Bridges))
+	}
+	var destKeys []string
+	for k, tc := range cfg.Tailnets {
+		if tc.Role != "dest" {
+			if tc.Role != "source" || k != "edge-src" {
+				t.Errorf("source = %s %+v", k, tc)
+			}
+			continue
+		}
+		destKeys = append(destKeys, k)
+		if !strings.HasPrefix(k, "edge-dst-") || len(k) != len("edge-dst-")+4 {
+			t.Errorf("dest key %q", k)
+		}
+		if len("tailnetlink-"+k) > 63 {
+			t.Errorf("hostname too long: tailnetlink-%s", k)
+		}
+		other, ok := again.Tailnets[k]
+		if !ok || other.Tailnet != tc.Tailnet {
+			t.Errorf("key %s not stable", k)
+		}
+		switch tc.Tailnet {
+		case "example.ts.net":
+			if tc.Authz.Mode != config.AuthzAllowLogins || tc.DNSDisabled {
+				t.Errorf("example authz/dns = %+v dns=%v", tc.Authz, tc.DNSDisabled)
+			}
+		case "partner.example.com":
+			if tc.Authz.Mode != config.AuthzAllowTags || !tc.DNSDisabled {
+				t.Errorf("partner authz/dns = %+v dns=%v", tc.Authz, tc.DNSDisabled)
+			}
+		default:
+			t.Errorf("unexpected dest %q", tc.Tailnet)
+		}
+	}
+	if len(destKeys) != 2 {
+		t.Fatalf("dest keys = %v", destKeys)
+	}
+	got := append([]string(nil), cfg.Bridges[0].DestTailnets...)
+	if len(got) != 2 || (got[0] != destKeys[0] && got[0] != destKeys[1]) || got[0] == got[1] {
+		t.Fatalf("rule dests = %v, keys = %v", got, destKeys)
+	}
+	if cfg.Bridges[0].Authz.Mode != config.AuthzOff {
+		t.Errorf("link authz = %+v", cfg.Bridges[0].Authz)
+	}
+
+	off := `{
+		"name": "edge",
+		"source": ` + sideJSON("keiretsu.ts.net", "src", "") + `,
+		"dests": [` + sideJSON("example.ts.net", "ex", `"dns": {"enabled": true}`) + `],
+		"dns": {"enabled": false},
+		"links": []
+	}`
+	cfg, err = config.Parse([]byte(off))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range cfg.Tailnets {
+		if tc.Role == "dest" && !tc.DNSDisabled {
+			t.Error("border dns off did not win")
+		}
 	}
 }
 

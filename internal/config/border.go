@@ -2,15 +2,19 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 )
 
 // Border is the config file: one tailnetlink process bridging one source
-// tailnet into one destination tailnet. Run one process per border.
+// tailnet into one destination, or into several with dests. Run one process
+// per border.
 //
 // The file is parsed into a Border and then compiled into a Config, which
 // is what the rest of tailnetlink works with.
@@ -19,8 +23,9 @@ type Border struct {
 	// service the border creates, and part of its node hostnames.
 	Name string `json:"name"`
 
-	Source Side `json:"source"`
-	Dest   Side `json:"dest"`
+	Source Side   `json:"source"`
+	Dest   Side   `json:"dest"`
+	Dests  []Dest `json:"dests,omitempty"`
 
 	Node    NodeConfig    `json:"node,omitzero"`
 	DNS     DNSConfig     `json:"dns,omitzero"`
@@ -38,7 +43,15 @@ type Border struct {
 	Links []Link `json:"links"`
 }
 
-// Side is one of the border's two tailnets.
+// Dest is one destination tailnet. Authz and DNS, when set, apply only
+// there and override the border defaults.
+type Dest struct {
+	Side
+	Authz AuthzConfig `json:"authz,omitzero"`
+	DNS   *DNSConfig  `json:"dns,omitempty"`
+}
+
+// Side is one tailnet the border joins.
 type Side struct {
 	Tailnet string     `json:"tailnet"`
 	OAuth   OAuthCreds `json:"oauth"`
@@ -165,12 +178,20 @@ func Parse(data []byte) (*Config, error) {
 	return b.Compile()
 }
 
-// Tailnet keys a compiled border uses: "<name>-src" and "<name>-dst". They
-// name the node state directories and node hostnames
-// (tailnetlink-<name>-src), so two borders on one machine or in one
-// tailnet don't collide.
+// Tailnet keys a compiled border uses. The source is "<name>-src". A single
+// dest keeps "<name>-dst", so an existing state directory is reused. Every
+// entry in dests, including a list of one, is "<name>-dst-" plus a short
+// hash of the tailnet name. Those keys stay the same when destinations are
+// added or removed, and they do not collide with the single-dest path.
 func (b *Border) srcKey() string { return b.Name + "-src" }
-func (b *Border) dstKey() string { return b.Name + "-dst" }
+
+func destKey(borderName, tailnet string, fromDests bool) string {
+	if !fromDests {
+		return borderName + "-dst"
+	}
+	sum := sha256.Sum256([]byte(strings.ToLower(tailnet)))
+	return borderName + "-dst-" + hex.EncodeToString(sum[:2])
+}
 
 // Compile checks the border and turns it into a Config with defaults
 // filled in.
@@ -181,12 +202,14 @@ func (b *Border) Compile() (*Config, error) {
 	if !borderNameRe.MatchString(b.Name) {
 		return nil, fmt.Errorf("name %q must be 1 to 40 lowercase letters, digits or dashes, starting and ending with a letter or digit", b.Name)
 	}
-	for role, s := range map[string]Side{"source": b.Source, "dest": b.Dest} {
-		if err := s.check(); err != nil {
-			return nil, fmt.Errorf("%s: %w", role, err)
-		}
+	if err := b.Source.check(); err != nil {
+		return nil, fmt.Errorf("source: %w", err)
 	}
-	// links may be empty. The process still joins both tailnets; add a
+	dests, err := b.destList()
+	if err != nil {
+		return nil, err
+	}
+	// links may be empty. The process still joins the tailnets; add a
 	// link later and the file watch picks it up.
 	if err := b.Authz.validate(); err != nil {
 		return nil, err
@@ -222,11 +245,28 @@ func (b *Border) Compile() (*Config, error) {
 		*d.out = *d.in
 	}
 
-	src, dst := b.srcKey(), b.dstKey()
-	cfg.Tailnets[src] = b.Source.tailnet(b.Node.Ephemeral)
-	cfg.Tailnets[dst] = b.Dest.tailnet(b.Node.Ephemeral)
+	src := b.srcKey()
+	srcTC := b.Source.tailnet(b.Node.Ephemeral)
+	srcTC.Role = "source"
+	cfg.Tailnets[src] = srcTC
+	fromDests := b.Dests != nil
+	dstKeys := make([]string, len(dests))
+	seenKey := map[string]string{}
+	for i, d := range dests {
+		k := destKey(b.Name, d.Tailnet, fromDests)
+		if other, ok := seenKey[k]; ok {
+			return nil, fmt.Errorf("dests %q and %q would share node state %q", other, d.Tailnet, k)
+		}
+		seenKey[k] = d.Tailnet
+		dstKeys[i] = k
+		tc := d.Side.tailnet(b.Node.Ephemeral)
+		tc.Role = "dest"
+		tc.Authz = d.Authz
+		tc.DNSDisabled = cfg.DNSDisabled || (d.DNS != nil && d.DNS.Enabled != nil && !*d.DNS.Enabled)
+		cfg.Tailnets[k] = tc
+	}
 	for i, l := range b.Links {
-		rule, err := l.rule(src, []string{dst}, b.Authz)
+		rule, err := l.rule(src, dstKeys, b.Authz)
 		if err != nil {
 			if l.Name == "" {
 				return nil, fmt.Errorf("links[%d]: %w", i, err)
@@ -265,6 +305,45 @@ func (s Side) check() error {
 		return errors.New("tags is required: the ACL tags tailnetlink's node and services get, e.g. [\"tag:tailnetlink\"]")
 	}
 	return nil
+}
+
+// destList is the destinations to join. A single dest keeps the historical
+// state path. Entries in dests each get their own.
+func (b *Border) destList() ([]Dest, error) {
+	hasDest := sideConfigured(b.Dest)
+	hasDests := b.Dests != nil
+	switch {
+	case hasDest && hasDests:
+		return nil, errors.New("set dest or dests, not both")
+	case hasDests && len(b.Dests) == 0:
+		return nil, errors.New("dests is empty")
+	case !hasDest && !hasDests:
+		return nil, errors.New("dest or dests is required")
+	case hasDest:
+		if err := b.Dest.check(); err != nil {
+			return nil, fmt.Errorf("dest: %w", err)
+		}
+		return []Dest{{Side: b.Dest}}, nil
+	}
+	seen := map[string]bool{}
+	for i, d := range b.Dests {
+		if err := d.Side.check(); err != nil {
+			return nil, fmt.Errorf("dests[%d]: %w", i, err)
+		}
+		if err := d.Authz.validate(); err != nil {
+			return nil, fmt.Errorf("dests[%d]: %w", i, err)
+		}
+		key := strings.ToLower(strings.TrimSpace(d.Tailnet))
+		if seen[key] {
+			return nil, fmt.Errorf("dests[%d]: tailnet %q is duplicated", i, d.Tailnet)
+		}
+		seen[key] = true
+	}
+	return b.Dests, nil
+}
+
+func sideConfigured(s Side) bool {
+	return s.Tailnet != "" || s.OAuth.ClientID != "" || s.OAuth.credentialCount() > 0 || len(s.Tags) > 0
 }
 
 func (s Side) tailnet(ephemeral bool) TailnetConfig {

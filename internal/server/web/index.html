@@ -683,7 +683,8 @@ function connect() {
       fetch('/api/status').then(r=>r.json()).then(s=>{ state.status=s; renderNetworks(); updateStats(); });
       return;
     }
-    state.status.tailnets = (state.status.tailnets||[]).filter(x => x.role !== t.role);
+    const tid = t.id || t.role;
+    state.status.tailnets = (state.status.tailnets||[]).filter(x => (x.id || x.role) !== tid);
     state.status.tailnets.push(t);
     renderNetworks(); renderTopology(); updateStats();
   });
@@ -754,23 +755,30 @@ function updateStats() {
   setText("stat-nets", String(nets));
 }
 
+function netName(key) {
+  const tc = (state.config.tailnets || {})[key] || {};
+  return tc.tailnet || key;
+}
+
 function renderNetworks() {
   const grid = document.getElementById('networks-grid');
   const tailnets = state.config.tailnets || {};
   const liveStatus = {};
-  ((state.status && state.status.tailnets) || []).forEach(t => { liveStatus[t.role] = t; });
+  ((state.status && state.status.tailnets) || []).forEach(t => { liveStatus[t.id || t.role] = t; });
 
   const cards = Object.entries(tailnets).map(([name, tc]) => {
     const live = liveStatus[name];
     const connected = live && live.connected;
     const dotClass = connected ? 'green' : 'gray';
     const tagChips = (tc.tags || []).map(t => `<span class="tag-chip">${esc(t)}</span>`).join('');
+    const title = tc.tailnet || (live && live.name) || name;
+    const role = tc.role || (live && live.role) || '';
     return `
       <div class="network-card">
         <div class="network-card-header">
           <div>
-            <div class="network-card-name">${esc(name)}</div>
-            <div class="network-card-fqdn">${esc(tc.tailnet || '—')}</div>
+            <div class="network-card-name">${esc(title)}</div>
+            <div class="network-card-fqdn">${esc(role || name)}</div>
           </div>
         </div>
         <div class="network-card-meta">
@@ -794,7 +802,6 @@ function renderNetworks() {
 function renderTopology() {
   const grid    = document.getElementById("bridge-rules-grid");
   const rules   = state.config.bridges || [];
-  const cfgNets = state.config.tailnets || {};
 
   const byRule = {};
   state.bridges.forEach(b => { (byRule[b.rule_name] = byRule[b.rule_name] || []).push(b); });
@@ -816,8 +823,8 @@ function renderTopology() {
     const totalBytes = live.reduce((s, b) => s + (b.bytes_in || 0) + (b.bytes_out || 0), 0);
 
     const isLocalRule = rule.local_sources && rule.local_sources.length > 0;
-    const srcLabel = isLocalRule ? 'local' : ((cfgNets[rule.source_tailnet] || {}).tailnet || rule.source_tailnet || '—');
-    const dstLabels = (rule.dest_tailnets || []).map(dt => (cfgNets[dt] || {}).tailnet || dt);
+    const srcLabel = isLocalRule ? 'local' : (netName(rule.source_tailnet) || '-');
+    const dstLabels = (rule.dest_tailnets || []).map(netName);
     const ports = isLocalRule
       ? (rule.local_sources || []).flatMap(s => localPortLabels(s).map(p => ':' + p)).join(' ')
       : (rule.ports || []).map(p => `:${p}`).join(' ');
@@ -862,7 +869,7 @@ function renderTopology() {
         }).join('');
         const extra = bridges.length > maxPerDest
           ? `<div style="font-size:10px;color:var(--gray-400);padding-left:10px">+${bridges.length - maxPerDest} more</div>` : '';
-        const label = multiDest ? `<div class="brc-dest-label">${esc(dt)}</div>` : '';
+        const label = multiDest ? `<div class="brc-dest-label">${esc(netName(dt))}</div>` : '';
         return label + rows + extra;
       }).join('');
     }
@@ -902,7 +909,7 @@ function renderBridges() {
   const { col, dir } = sortState.services;
   const keyFn = (b, c) => {
     if (c === 'traffic') return (b.bytes_in||0) + (b.bytes_out||0);
-    if (c === 'route') { const r = (state.config.bridges||[]).find(x=>x.name===b.rule_name); return (r?r.source_tailnet:'') + (b.dest_tailnet||''); }
+    if (c === 'route') { const r = (state.config.bridges||[]).find(x=>x.name===b.rule_name); return (r ? netName(r.source_tailnet) : '') + netName(b.dest_tailnet||''); }
     return (b[c] ?? '').toString().toLowerCase();
   };
   const base = state.bridges.filter(b =>
@@ -928,9 +935,9 @@ function renderBridges() {
     const traffic = fmtBytes((b.bytes_in||0) + (b.bytes_out||0));
     const rule = (state.config.bridges || []).find(r => r.name === b.rule_name);
     const isLocalRule = rule && rule.local_sources && rule.local_sources.length > 0;
-    const srcLabel = isLocalRule ? 'local' : (rule ? rule.source_tailnet : '?');
+    const srcLabel = isLocalRule ? 'local' : (rule ? netName(rule.source_tailnet) : '?');
     const srcBadgeCls = isLocalRule ? 'neutral' : 'src';
-    const dstTailnet = b.dest_tailnet || '?';
+    const dstTailnet = netName(b.dest_tailnet || '');
     const route = `<span style="white-space:nowrap;font-size:12px">
       <span class="badge ${srcBadgeCls}" style="font-size:10px">${esc(srcLabel)}</span>
       <span style="color:var(--gray-400);margin:0 3px">→</span>
@@ -955,7 +962,7 @@ function renderRules() {
   const tbody = document.getElementById('rules-tbody');
   const { col, dir } = sortState.rules;
   const keyFn = (r, c) => {
-    if (c === 'dest_tailnet') return (r.dest_tailnets||[]).join(',').toLowerCase();
+    if (c === 'dest_tailnet') return (r.dest_tailnets||[]).map(netName).join(',').toLowerCase();
     return (r[c] ?? '').toString().toLowerCase();
   };
   const rules = sortArr(state.config.bridges || [], col, dir, keyFn);
@@ -982,8 +989,8 @@ function renderRules() {
         : (r.source_tag || '—');
     return `<tr>
       <td>${esc(r.name)}</td>
-      <td>${isLocalR ? '<span class="badge neutral" style="font-size:11px">↑ local</span>' : `<span class="badge src" style="font-size:11px">↑ ${esc(r.source_tailnet)}</span>`}</td>
-      <td>${(r.dest_tailnets||[]).map(dt=>`<span class="badge dst" style="font-size:11px">↓ ${esc(dt)}</span>`).join(' ')}</td>
+      <td>${isLocalR ? '<span class="badge neutral" style="font-size:11px">↑ local</span>' : `<span class="badge src" style="font-size:11px">↑ ${esc(netName(r.source_tailnet))}</span>`}</td>
+      <td>${(r.dest_tailnets||[]).map(dt=>`<span class="badge dst" style="font-size:11px">↓ ${esc(netName(dt))}</span>`).join(' ')}</td>
       <td><span class="mono" style="font-size:12px" title="${esc(isLocalR ? (r.local_sources||[]).slice(0,2).map(s=>s.addr).join(', ') : srcLabel)}">${esc(isLocalR ? ((r.local_sources||[]).slice(0,2).map(s=>s.addr).join(', ') + (r.local_sources.length > 2 ? ` +${r.local_sources.length-2}` : '')) : srcLabel)}</span></td>
       <td><div class="port-chips">${ports}</div></td>
     </tr>`;
@@ -1061,9 +1068,9 @@ function renderConns() {
     const rule        = bridge && (state.config.bridges||[]).find(r => r.name === bridge.rule_name);
     // dest_tailnet = where VIP lives = where the client connects FROM
     // source_tailnet = where the backend lives = where the traffic goes TO
-    const clientTailnet  = bridge ? bridge.dest_tailnet : '';
+    const clientTailnet  = bridge ? netName(bridge.dest_tailnet) : '';
     const backendTailnet = rule
-      ? (rule.local_sources && rule.local_sources.length > 0 ? 'local' : rule.source_tailnet)
+      ? (rule.local_sources && rule.local_sources.length > 0 ? 'local' : netName(rule.source_tailnet))
       : '';
     const ruleName       = bridge ? bridge.rule_name  : '';
 

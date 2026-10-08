@@ -116,7 +116,7 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 			srcRec.bridge = rule.BridgeRef(dest.name)
 
 			m.store.UpsertBridge(state.BridgeEntry{
-				ID: bridgeID, RuleName: rule.Name, DestTailnet: dest.name,
+				ID: bridgeID, RuleName: rule.Name, DestTailnet: m.tailnetLabel(dest.name),
 				ServiceName: svcName,
 				SourceHost:  src.Addr, SourceIP: src.Addr,
 				Ports: slices.Clone(exposePorts), Status: state.BridgeStatusPending, CreatedAt: createdAt,
@@ -127,7 +127,7 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 				m.conflict(dest.name, err)
 				m.logger.Error("local rule: VIP ensure failed", "rule", rule.Name, "dest", dest.name, "addr", src.Addr, "err", err)
 				m.store.UpsertBridge(state.BridgeEntry{
-					ID: bridgeID, RuleName: rule.Name, DestTailnet: dest.name,
+					ID: bridgeID, RuleName: rule.Name, DestTailnet: m.tailnetLabel(dest.name),
 					ServiceName: svcName,
 					SourceHost:  src.Addr, SourceIP: src.Addr,
 					Ports: slices.Clone(exposePorts), Status: state.BridgeStatusError, Error: err.Error(), CreatedAt: createdAt,
@@ -147,7 +147,7 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 			}
 
 			m.store.UpsertBridge(state.BridgeEntry{
-				ID: bridgeID, RuleName: rule.Name, DestTailnet: dest.name,
+				ID: bridgeID, RuleName: rule.Name, DestTailnet: m.tailnetLabel(dest.name),
 				ServiceName: vip.ServiceName, SourceHost: src.Addr, SourceIP: src.Addr,
 				DestVIP: vip.VIP.String(), Ports: slices.Clone(exposePorts),
 				Status: state.BridgeStatusActive, CreatedAt: createdAt,
