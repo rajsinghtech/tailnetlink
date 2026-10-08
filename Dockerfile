@@ -1,6 +1,6 @@
 # Compile on the build machine's platform and cross-compile for the target,
 # so multi-arch builds don't run the Go toolchain under QEMU.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
 ARG TARGETOS TARGETARCH VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
