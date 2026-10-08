@@ -149,7 +149,21 @@ func (d *Discoverer) pollDevices(ctx context.Context) error {
 		d.logger.Warn("discoverer: list devices failed", "err", err)
 		return err
 	}
+	var services []tsclient.VIPService
+	if d.devices == nil && d.tag != "" {
+		services, err = d.client.VIPServices().List(ctx)
+		if err != nil {
+			// A device list succeeded and the service list did not. Publishing
+			// that partial set would look like every service disappeared.
+			d.logger.Warn("discoverer: list vip services failed (tag mode)", "err", err)
+			return err
+		}
+	}
+	d.applyDevices(ctx, devices, services)
+	return nil
+}
 
+func (d *Discoverer) applyDevices(ctx context.Context, devices []tsclient.Device, services []tsclient.VIPService) {
 	found := make(map[string]Device)
 	allTags := make(map[string]struct{})
 	var noIPNames []string
@@ -187,16 +201,11 @@ func (d *Discoverer) pollDevices(ctx context.Context) error {
 	}
 
 	// In tag mode, also discover VIP services with the same tag.
+	// services is nil in device mode; the caller already failed the poll
+	// if the service list could not be read.
 	var matchedSvcs int
 	if d.devices == nil && d.tag != "" {
-		svcs, err := d.client.VIPServices().List(ctx)
-		if err != nil {
-			// A device list succeeded and the service list did not. Publishing
-			// that partial set would look like every service disappeared.
-			d.logger.Warn("discoverer: list vip services failed (tag mode)", "err", err)
-			return err
-		}
-		for _, svc := range svcs {
+		for _, svc := range services {
 			if !hasTag(svc.Tags, d.tag) || svc.Annotations[annotationManaged] == "true" {
 				continue
 			}
@@ -237,7 +246,6 @@ func (d *Discoverer) pollDevices(ctx context.Context) error {
 	}
 
 	d.commit(ctx, found, "device/service")
-	return nil
 }
 
 func (d *Discoverer) pollServices(ctx context.Context) error {
@@ -246,7 +254,11 @@ func (d *Discoverer) pollServices(ctx context.Context) error {
 		d.logger.Warn("discoverer: list vip services failed", "err", err)
 		return err
 	}
+	d.applyServices(ctx, svcs)
+	return nil
+}
 
+func (d *Discoverer) applyServices(ctx context.Context, svcs []tsclient.VIPService) {
 	found := make(map[string]Device)
 	for _, svc := range svcs {
 		if _, ok := d.services[svc.Name]; !ok {
@@ -267,7 +279,28 @@ func (d *Discoverer) pollServices(ctx context.Context) error {
 
 	d.logger.Info("discoverer: poll (service mode)", "wanted", len(d.services), "online", len(found))
 	d.commit(ctx, found, "vip service")
-	return nil
+}
+
+// deliver is how the shared per-tailnet poller hands one fetch to this link.
+// A non-nil err leaves the desired set unchanged.
+func (d *Discoverer) deliver(ctx context.Context, devices []tsclient.Device, services []tsclient.VIPService, err error, dur time.Duration) {
+	report := func(e error) {
+		if d.onPoll != nil && ctx.Err() == nil {
+			d.onPoll(dur, e)
+		}
+	}
+	if err != nil {
+		d.logger.Warn("discoverer: list failed", "err", err)
+		report(err)
+		return
+	}
+	if d.services != nil {
+		d.applyServices(ctx, services)
+		report(nil)
+		return
+	}
+	d.applyDevices(ctx, devices, services)
+	report(nil)
 }
 
 // commit publishes found. With a snapshot consumer the whole set is the
