@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/rajsinghtech/tailnetlink/internal/tsapi"
 )
 
 func TestEndpoint(t *testing.T) {
@@ -80,6 +81,7 @@ func TestNilMetricsIsSafe(t *testing.T) {
 	m.Conflict("t")
 	m.TrackBridges(nil, nil)
 	m.TrackVIPServices(nil)
+	m.ObserveAPI(tsapi.APIAttempt{Path: "/api/v2/tailnet/-/devices", Code: 429})
 	if m.Registry() != nil {
 		t.Error("nil Metrics has a registry")
 	}
@@ -134,6 +136,35 @@ tailnetlink_bridges{status="error"} 0
 	}
 	if n := testutil.CollectAndCount(m.pollDuration); n != 1 {
 		t.Errorf("poll duration series = %d", n)
+	}
+}
+
+func TestObserveAPIRecordsStatusCode(t *testing.T) {
+	m := New()
+	m.ObserveAPI(tsapi.APIAttempt{Path: "/api/v2/tailnet/-/devices", Code: 429, Duration: 10 * time.Millisecond})
+	m.ObserveAPI(tsapi.APIAttempt{Path: "/api/v2/tailnet/-/devices", Code: 200, Duration: 5 * time.Millisecond})
+	m.ObserveAPI(tsapi.APIAttempt{Path: "/api/v2/tailnet/-/vip-services/svc:a", Code: 404, Duration: time.Millisecond})
+	m.ObserveAPI(tsapi.APIAttempt{Path: "/api/v2/oauth/token", Err: errors.New("down"), Duration: time.Millisecond})
+
+	if err := testutil.GatherAndCompare(m.Registry(), strings.NewReader(`
+# HELP tailnetlink_api_requests_total Tailscale API attempts by endpoint and HTTP status. code is the status, or "error" when the attempt did not get a response. 429 is counted on its own so it can be alerted on.
+# TYPE tailnetlink_api_requests_total counter
+tailnetlink_api_requests_total{code="200",endpoint="devices"} 1
+tailnetlink_api_requests_total{code="404",endpoint="services"} 1
+tailnetlink_api_requests_total{code="429",endpoint="devices"} 1
+tailnetlink_api_requests_total{code="error",endpoint="oauth"} 1
+`), "tailnetlink_api_requests_total"); err != nil {
+		t.Fatal(err)
+	}
+	// 404 is not an error. 429 and a failed attempt are.
+	if got := testutil.ToFloat64(m.apiErrors.WithLabelValues("devices")); got != 1 {
+		t.Errorf("device errors = %v, want 1 (the 429)", got)
+	}
+	if got := testutil.ToFloat64(m.apiErrors.WithLabelValues("services")); got != 0 {
+		t.Errorf("service errors = %v, want 0 (404 is not counted)", got)
+	}
+	if n := testutil.CollectAndCount(m.apiLatency); n != 3 {
+		t.Errorf("latency series = %d, want 3", n)
 	}
 }
 

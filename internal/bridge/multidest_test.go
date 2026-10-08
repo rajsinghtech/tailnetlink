@@ -563,7 +563,7 @@ func TestPerDestDNSOff(t *testing.T) {
 	m.cfg = &config.Config{Tailnets: map[string]config.TailnetConfig{
 		"edge-dst-ab12": {Tailnet: "example.ts.net", DNSDisabled: true},
 	}}
-	m.startDeviceDNS(context.Background(), "web/edge-dst-ab12/host.example.com", "web", "keiretsu.ts.net", "host.keiretsu.ts.net", "", netip.MustParseAddr("100.100.0.1"), destCtx{name: "edge-dst-ab12"})
+	m.startDeviceDNS(context.Background(), "web/edge-dst-ab12/host.example.com", "web", "keiretsu.ts.net", "host.keiretsu.ts.net", "", "", "", netip.MustParseAddr("100.100.0.1"), destCtx{name: "edge-dst-ab12"})
 	if len(m.dnsCleanups) != 0 {
 		t.Fatal("dest with dns off still registered DNS")
 	}

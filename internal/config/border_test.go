@@ -145,6 +145,28 @@ func TestBorderIDToken(t *testing.T) {
 	}
 }
 
+func TestBorderDNSZone(t *testing.T) {
+	body := borderJSON(`"links": [{"name": "app", "devices": [{"fqdn": "app.example.ts.net", "dns_name": "app.corp.example.com", "dns_zone": "app.corp.example.com"}], "ports": [443]}]`)
+	cfg, err := config.Parse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := cfg.Bridges[0].SourceDevices[0]
+	if d.DNSName != "app.corp.example.com" || d.DNSZone != "app.corp.example.com" {
+		t.Fatalf("device = %+v", d)
+	}
+	for name, bad := range map[string]string{
+		"outside": borderJSON(`"links": [{"name": "app", "devices": [{"fqdn": "app.example.ts.net", "dns_name": "app.corp.example.com", "dns_zone": "other.example.com"}], "ports": [443]}]`),
+		"no name": borderJSON(`"links": [{"name": "app", "local": [{"addr": "db.example:80", "dns_zone": "app.corp.example.com"}]}]`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := config.Parse([]byte(bad)); err == nil {
+				t.Fatal("accepted a bad dns_zone")
+			}
+		})
+	}
+}
+
 func TestBorderErrors(t *testing.T) {
 	base := borderJSON("")
 	cases := map[string]struct{ body, want string }{

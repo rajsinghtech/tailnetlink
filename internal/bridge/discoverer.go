@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -40,21 +41,57 @@ type Discoverer struct {
 	logger   *slog.Logger
 	warnFn   func(string)               // called with user-facing warning messages (e.g. "no match for tag")
 	onPoll   func(time.Duration, error) // called after every poll, if set
+	// onSnapshot, when set, receives the full desired set keyed by FQDN
+	// after a poll that produced one. Add and remove events are not sent.
+	// A name leaves that set only after it has been absent for
+	// removeAfterPolls polls or removeAfter, and at most maxDeletes names
+	// leave in one poll.
+	onSnapshot func(map[string]Device)
 
 	current map[string]Device // keyed by node ID or service name
 	added   chan Device
 	removed chan Device
+
+	// Snapshot-mode memory. stable is the set last published. absent tracks
+	// names that dropped out of a successful poll and are not yet removable.
+	stable map[string]Device
+	absent map[string]absenceRec
+
+	// Zero values use the defaults below. Tests set them.
+	removeAfterPolls int
+	removeAfter      time.Duration
+	maxDeletes       int
+	nowFn            func() time.Time
+}
+
+// A name is removed only after this many missed polls or this long,
+// whichever comes first, and a poll deletes at most defaultMaxDeletes names.
+const (
+	defaultRemoveAfterPolls = 3
+	defaultRemoveAfter      = 2 * time.Minute
+	defaultMaxDeletes       = 50
+)
+
+type absenceRec struct {
+	since time.Time
+	polls int
+	dev   Device
 }
 
 func NewDiscoverer(client *tsclient.Client, tag string, deviceFQDNs []string, serviceNames []string, poll time.Duration, logger *slog.Logger) *Discoverer {
 	d := &Discoverer{
-		client:  client,
-		tag:     tag,
-		poll:    poll,
-		logger:  logger,
-		current: make(map[string]Device),
-		added:   make(chan Device, 16),
-		removed: make(chan Device, 16),
+		client:           client,
+		tag:              tag,
+		poll:             poll,
+		logger:           logger,
+		current:          make(map[string]Device),
+		added:            make(chan Device, 16),
+		removed:          make(chan Device, 16),
+		stable:           map[string]Device{},
+		absent:           map[string]absenceRec{},
+		removeAfterPolls: defaultRemoveAfterPolls,
+		removeAfter:      defaultRemoveAfter,
+		maxDeletes:       defaultMaxDeletes,
 	}
 	// When source_tag is present, tag-mode drives discovery and explicit lists
 	// are only consulted for DNS/name overrides — don't switch modes.
@@ -112,7 +149,21 @@ func (d *Discoverer) pollDevices(ctx context.Context) error {
 		d.logger.Warn("discoverer: list devices failed", "err", err)
 		return err
 	}
+	var services []tsclient.VIPService
+	if d.devices == nil && d.tag != "" {
+		services, err = d.client.VIPServices().List(ctx)
+		if err != nil {
+			// A device list succeeded and the service list did not. Publishing
+			// that partial set would look like every service disappeared.
+			d.logger.Warn("discoverer: list vip services failed (tag mode)", "err", err)
+			return err
+		}
+	}
+	d.applyDevices(ctx, devices, services)
+	return nil
+}
 
+func (d *Discoverer) applyDevices(ctx context.Context, devices []tsclient.Device, services []tsclient.VIPService) {
 	found := make(map[string]Device)
 	allTags := make(map[string]struct{})
 	var noIPNames []string
@@ -150,29 +201,26 @@ func (d *Discoverer) pollDevices(ctx context.Context) error {
 	}
 
 	// In tag mode, also discover VIP services with the same tag.
+	// services is nil in device mode; the caller already failed the poll
+	// if the service list could not be read.
 	var matchedSvcs int
 	if d.devices == nil && d.tag != "" {
-		svcs, err := d.client.VIPServices().List(ctx)
-		if err != nil {
-			d.logger.Warn("discoverer: list vip services failed (tag mode)", "err", err)
-		} else {
-			for _, svc := range svcs {
-				if !hasTag(svc.Tags, d.tag) || svc.Annotations[annotationManaged] == "true" {
-					continue
-				}
-				ip, ok := firstIP(svc.Addrs)
-				if !ok {
-					d.logger.Debug("discoverer: vip service has no routable IP, skipping", "service", svc.Name)
-					continue
-				}
-				found[svc.Name] = Device{
-					Name: svc.Name,
-					FQDN: svc.Name,
-					IP:   ip,
-					Tags: svc.Tags,
-				}
-				matchedSvcs++
+		for _, svc := range services {
+			if !hasTag(svc.Tags, d.tag) || svc.Annotations[annotationManaged] == "true" {
+				continue
 			}
+			ip, ok := firstIP(svc.Addrs)
+			if !ok {
+				d.logger.Debug("discoverer: vip service has no routable IP, skipping", "service", svc.Name)
+				continue
+			}
+			found[svc.Name] = Device{
+				Name: svc.Name,
+				FQDN: svc.Name,
+				IP:   ip,
+				Tags: svc.Tags,
+			}
+			matchedSvcs++
 		}
 	}
 
@@ -197,8 +245,7 @@ func (d *Discoverer) pollDevices(ctx context.Context) error {
 		d.logger.Info("discoverer: poll", "tag", d.tag, "total_devices", len(devices), "matched_devices", len(found)-matchedSvcs, "matched_services", matchedSvcs)
 	}
 
-	d.diffAndNotify(ctx, found, "device/service")
-	return nil
+	d.commit(ctx, found, "device/service")
 }
 
 func (d *Discoverer) pollServices(ctx context.Context) error {
@@ -207,7 +254,11 @@ func (d *Discoverer) pollServices(ctx context.Context) error {
 		d.logger.Warn("discoverer: list vip services failed", "err", err)
 		return err
 	}
+	d.applyServices(ctx, svcs)
+	return nil
+}
 
+func (d *Discoverer) applyServices(ctx context.Context, svcs []tsclient.VIPService) {
 	found := make(map[string]Device)
 	for _, svc := range svcs {
 		if _, ok := d.services[svc.Name]; !ok {
@@ -227,8 +278,113 @@ func (d *Discoverer) pollServices(ctx context.Context) error {
 	}
 
 	d.logger.Info("discoverer: poll (service mode)", "wanted", len(d.services), "online", len(found))
-	d.diffAndNotify(ctx, found, "vip service")
-	return nil
+	d.commit(ctx, found, "vip service")
+}
+
+// deliver is how the shared per-tailnet poller hands one fetch to this link.
+// A non-nil err leaves the desired set unchanged.
+func (d *Discoverer) deliver(ctx context.Context, devices []tsclient.Device, services []tsclient.VIPService, err error, dur time.Duration) {
+	report := func(e error) {
+		if d.onPoll != nil && ctx.Err() == nil {
+			d.onPoll(dur, e)
+		}
+	}
+	if err != nil {
+		d.logger.Warn("discoverer: list failed", "err", err)
+		report(err)
+		return
+	}
+	if d.services != nil {
+		d.applyServices(ctx, services)
+		report(nil)
+		return
+	}
+	d.applyDevices(ctx, devices, services)
+	report(nil)
+}
+
+// commit publishes found. With a snapshot consumer the whole set is the
+// desired state, keyed by FQDN so a re-registered node (new id, same name)
+// is an update rather than a removal plus an add. Without one, the
+// per-event channels are used and tests can read them.
+func (d *Discoverer) commit(ctx context.Context, found map[string]Device, kind string) {
+	if d.onSnapshot == nil {
+		d.diffAndNotify(ctx, found, kind)
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	live := make(map[string]Device, len(found))
+	for _, dev := range found {
+		live[dev.FQDN] = copyDevice(dev)
+	}
+	d.onSnapshot(d.retain(live))
+}
+
+// retain keeps a name that disappeared until it has been gone for enough
+// polls or long enough, and lets at most maxDeletes names go in one poll.
+// The input and the result are keyed by FQDN.
+func (d *Discoverer) retain(live map[string]Device) map[string]Device {
+	if d.absent == nil {
+		d.absent = map[string]absenceRec{}
+	}
+	if d.stable == nil {
+		d.stable = map[string]Device{}
+	}
+	pollsN := d.removeAfterPolls
+	if pollsN <= 0 {
+		pollsN = defaultRemoveAfterPolls
+	}
+	wait := d.removeAfter
+	if wait <= 0 {
+		wait = defaultRemoveAfter
+	}
+	capN := d.maxDeletes
+	if capN <= 0 {
+		capN = defaultMaxDeletes
+	}
+	now := time.Now()
+	if d.nowFn != nil {
+		now = d.nowFn()
+	}
+	for fqdn := range live {
+		delete(d.absent, fqdn)
+	}
+	for fqdn, dev := range d.stable {
+		if _, ok := live[fqdn]; ok {
+			continue
+		}
+		rec := d.absent[fqdn]
+		if rec.since.IsZero() {
+			rec.since = now
+		}
+		rec.polls++
+		rec.dev = dev
+		d.absent[fqdn] = rec
+	}
+	eligible := make([]string, 0, len(d.absent))
+	for fqdn, rec := range d.absent {
+		if rec.polls >= pollsN || now.Sub(rec.since) >= wait {
+			eligible = append(eligible, fqdn)
+		}
+	}
+	sort.Strings(eligible)
+	if len(eligible) > capN {
+		eligible = eligible[:capN]
+	}
+	for _, fqdn := range eligible {
+		delete(d.absent, fqdn)
+	}
+	out := make(map[string]Device, len(live)+len(d.absent))
+	for fqdn, dev := range live {
+		out[fqdn] = dev
+	}
+	for fqdn, rec := range d.absent {
+		out[fqdn] = rec.dev
+	}
+	d.stable = out
+	return out
 }
 
 // diffAndNotify announces what changed between the last poll and found. It

@@ -6,6 +6,7 @@ require (
 	github.com/miekg/dns v1.1.72
 	github.com/prometheus/client_golang v1.24.1
 	golang.org/x/oauth2 v0.36.0
+	golang.org/x/time v0.15.0
 	tailscale.com v1.96.5
 	tailscale.com/client/tailscale/v2 v2.9.0
 )
@@ -104,7 +105,6 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
-	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.47.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 	golang.zx2c4.com/wireguard/windows v1.0.1 // indirect

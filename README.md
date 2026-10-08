@@ -17,8 +17,8 @@ source tailnet                         dest tailnet
 
 1. Authenticates to each tailnet with an OAuth client secret or a workload identity token (scopes: `devices:core:read`, `auth_keys`, `services`, `dns`).
 2. Spins up a [tsnet](https://pkg.go.dev/tailscale.com/tsnet) node in each tailnet.
-3. Polls the Tailscale API for devices matching the configured tag or FQDN list.
-4. Creates a Tailscale VIP service in the destination tailnet for each discovered device.
+3. Polls the Tailscale API for devices matching the configured tag or FQDN list. Every link on a tailnet shares that list: one device list and one service list per interval, not one of each per link. When every link selects by tag, the device list asks the API for those tags. The first poll waits a short random offset (at most five seconds) and later polls jitter by about 20%, so borders do not poll in lockstep.
+4. Creates a Tailscale VIP service in the destination tailnet for each discovered device. Discovery publishes the set of names that should exist. A failed list does not change that set. A name is removed only after it has been missing for 3 polls or 2 minutes, and at most 50 names are deleted per poll. A fixed pool of workers makes the destination match the set, one service name at a time, and retries failures with exponential backoff. A device that comes back with the same name keeps its VIP.
 5. Registers the tsnet node as the VIP service host and proxies TCP connections back to the source device through the source tsnet node. Listens on one node run one at a time, and a listen counts only after the service is in that node's advertised set, so concurrent registrations are not lost.
 6. Optionally starts an authoritative DNS server and configures split-DNS so `{hostname}.{zone}` resolves to the VIP IP.
 
@@ -115,9 +115,9 @@ Older multi-tailnet configs (`tailnets` / `bridges` / `instance_id`) are no long
 }
 ```
 
-One source node does the dialing. Each destination gets its own node, VIP services, split DNS and authz, so allow lists can differ. Links are written once and published into every destination. Adding or removing a destination in the file is picked up without a restart: the destination that left loses only its own services.
+One source node does the dialing. Each destination gets its own node, VIP services, split DNS and authz, so allow lists can differ. Links are written once. The source is polled once, and that list is published into every destination. Each destination reconciles on its own queue and hosts its own VIP listens, so a retry on one tailnet does not delay the others. `dns_zone` is registered in each destination that has DNS on. Adding or removing a destination in the file is picked up without a restart: the destination that left loses only its own services.
 
-A destination that fails to authenticate, call the API, or start its node does not stop the others. `/readyz` is process-wide. It is ready when the config is applied, the source node is up, at least one destination is up, and each non-local link has polled within three poll intervals. A destination whose start already failed does not block that. A destination that is still starting does. If every destination has failed, the process is not ready. A failed destination is tried again on the next config reload. It is not retried in the background.
+A destination that fails to authenticate, call the API, or start its node does not stop the others. `/readyz` is process-wide. It is ready when the config is applied, the source node is up, at least one destination is up, and each non-local link has polled within three poll intervals. A destination whose start already failed does not block that. A destination that is still starting does. If every destination has failed, the process is not ready. A destination that failed to start is tried again on the next config reload. A VIP that failed to publish is retried on that destination's queue.
 
 The source node state stays at `<name>-src`. A single `dest` stays at `<name>-dst` (`tailnetlink-<name>-dst`). Each `dests` entry, including a list of one, uses `<name>-dst-` plus a short hash of the tailnet name. Adding or removing a destination does not rename the others, and those directories do not collide with `<name>-dst`.
 
@@ -150,9 +150,9 @@ A link has a `name` and exactly one of `tag`, `devices`, `services` or `local`, 
 |---|---|
 | `name` | Unique name for this link |
 | `tag` | Discover devices and VIP services with this ACL tag |
-| `devices` | Explicit device specs (`fqdn`, optional `dns_name`, `short_name`) |
+| `devices` | Explicit device specs (`fqdn`, optional `dns_name`, `dns_zone`, `short_name`) |
 | `services` | Explicit VIP service names from the source (`name`, optional DNS fields) |
-| `local` | Addresses reachable from the host (`addr`, optional `expose_port`, `dns_name`, `short_name`) |
+| `local` | Addresses reachable from the host (`addr`, optional `expose_port`, `dns_name`, `dns_zone`, `short_name`) |
 | `ports` | TCP ports to forward (required except for `local`) |
 
 `short_name` must be a DNS label: 1 to 63 lowercase letters, digits or dashes, not starting or ending with a dash. Two entries that would end up with the same short name are rejected when the config loads. Names tailnetlink generates itself are cut to fit and get a short hash suffix.
@@ -215,7 +215,23 @@ Grant example (destination policy):
 
 ### Split DNS
 
-With DNS on (the default), when an entry sets `dns_name` (or a device has a real FQDN), tailnetlink runs a small authoritative DNS server for the parent zone on a shared VIP, `svc:tnl-dns-<zone>-dns`, in the destination and points split DNS for that zone at it. The server answers over TCP only: a tsnet node does not receive UDP sent to a VIP service address. Clients fall back to TCP after the UDP attempt times out.
+With DNS on (the default), when an entry sets `dns_name` (or a device has a real FQDN), tailnetlink runs a small authoritative DNS server for the parent zone on a shared VIP, `svc:tnl-dns-<zone>-dns`, in the destination and points split DNS for that zone at it. `app.corp.example.com` is published as the name `app` in the zone `corp.example.com`, so every other name under `corp.example.com` is also sent to that VIP. The server answers over TCP only: a tsnet node does not receive UDP sent to a VIP service address. Clients fall back to TCP after the UDP attempt times out.
+
+Set `dns_zone` on a device, service, or local source to choose the zone. It must be `dns_name` itself or a parent of it. When they are equal, the record is the apex of that zone and split-DNS is registered for that name only. Leave `dns_zone` out to keep the parent-zone behavior.
+
+```json
+{
+  "name": "app",
+  "devices": [
+    {
+      "fqdn": "app.example.ts.net",
+      "dns_name": "app.corp.example.com",
+      "dns_zone": "app.corp.example.com"
+    }
+  ],
+  "ports": [443]
+}
+```
 
 ### OAuth and workload identity
 
@@ -289,6 +305,8 @@ See `deploy/` for a compose example. Build locally with `make docker-build` (tag
 - `/readyz` is 200 once the config has been applied, every configured tailnet's node is up, and every tailnet rule has polled successfully within the last three poll intervals. Otherwise it is 503 with the reason.
 - `/metrics` is Prometheus text. Labels only carry rule names, tailnet keys and fixed values, never device names or client addresses.
 
+Each tailnet's admin API client has its own token bucket: 20 requests per second, burst 40. HTTP 429 and 5xx are retried (POST is not retried on 5xx, because creating a key or exchanging a token may already have succeeded). A `Retry-After` header is honored, with a little jitter, and a call gives up after 4 attempts or 30 seconds of waiting.
+
 | Metric | Labels | |
 |---|---|---|
 | `tailnetlink_bridges` | `status` | Bridges by status (pending, active, error) |
@@ -298,6 +316,8 @@ See `deploy/` for a compose example. Build locally with `make docker-build` (tag
 | `tailnetlink_bytes_total` | `rule`, `direction` | Bytes forwarded; `in` is client to backend |
 | `tailnetlink_dial_failures_total` | `rule` | Failed backend dials |
 | `tailnetlink_api_errors_total` | `endpoint` | Failed Tailscale API calls (devices, services, keys, dns, oauth, other); 404s are not counted |
+| `tailnetlink_api_requests_total` | `endpoint`, `code` | Every API attempt. `code` is the HTTP status, or `error` when there was no response. 429 is its own value, so it can be alerted on. |
+| `tailnetlink_api_request_duration_seconds` | `endpoint` | How long one API attempt took |
 | `tailnetlink_poll_duration_seconds` | `rule` | Discovery poll time |
 | `tailnetlink_poll_errors_total` | `rule` | Failed discovery polls |
 | `tailnetlink_ownership_conflicts_total` | `tailnet` | Wanted service names taken by something this instance doesn't own |
@@ -328,6 +348,7 @@ internal/state/         in-memory state store + SSE pub/sub
 internal/bridge/
   bridge.go             Manager — reconcile loop, tailnet lifecycle
   discoverer.go         polls Tailscale API for matching devices
+  queue.go              desired-state reconcile queue and worker pool
   reconciler.go         creates/deletes VIP services in dest tailnet
   forwarder.go          TCP proxy: VIP listener → source device
   dns.go                authoritative DNS server (split-DNS)

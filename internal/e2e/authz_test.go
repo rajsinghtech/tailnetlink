@@ -47,6 +47,18 @@ func TestManagerAuthzRequireCap(t *testing.T) {
 	}
 }
 
+// A client that is already streaming a netmap when the VIP appears must
+// learn the route. Otherwise it dials the address forever.
+func TestClientLearnsVIPRoute(t *testing.T) {
+	ctx := e2eSetup(t)
+	b := newBorder(t)
+	echoBackend(t, ctx, b.src, "backend", 8080)
+	cl := client(t, ctx, b.dst, "client")
+	startManager(t, b.config(b.deviceRule("web", "backend", "", 8080)), "")
+	vip := waitVIP(t, b.dstAPI, b.serviceName("backend", ""))
+	echoVia(t, ctx, cl, netip.AddrPortFrom(vip, 8080), "open")
+}
+
 // A link authz of off overrides a border require_cap default.
 func TestManagerAuthzLinkOverridesBorder(t *testing.T) {
 	ctx := e2eSetup(t)

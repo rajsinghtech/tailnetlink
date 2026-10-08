@@ -14,7 +14,9 @@ import (
 	"net/url"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	tsclient "tailscale.com/client/tailscale/v2"
 )
@@ -40,13 +42,31 @@ type Server struct {
 
 	srv *httptest.Server
 
-	mu       sync.Mutex
-	fail     map[Call]int
-	calls    []Call
-	devices  []tsclient.Device
-	services map[string]tsclient.VIPService
-	splitDNS map[string][]string
-	nextIP   int
+	mu            sync.Mutex
+	fail          map[Call]int
+	once          *fault
+	calls         []Call
+	deviceQueries []string
+	devices       []tsclient.Device
+	services      map[string]tsclient.VIPService
+	splitDNS      map[string][]string
+	nextIP        int
+
+	// Token bucket. limitRate <= 0 means unlimited.
+	limitRate   float64
+	limitBurst  float64
+	limitTokens float64
+	limitLast   time.Time
+
+	inflight atomic.Int64
+	peak     atomic.Int64
+}
+
+// fault is one injected response, consumed on the first match.
+type fault struct {
+	method string
+	path   string // empty matches every path
+	code   int
 }
 
 // New starts a fake API server and stops it when the test ends.
@@ -166,6 +186,28 @@ func (s *Server) Writes() []Call {
 	return out
 }
 
+// SetRateLimit rejects requests over a token bucket with 429 and
+// Retry-After: 1. perSec <= 0 disables the limit.
+func (s *Server) SetRateLimit(perSec, burst float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.limitRate = perSec
+	s.limitBurst = burst
+	s.limitTokens = burst
+	s.limitLast = time.Time{}
+}
+
+// FailOnce makes the next request matching method and path (path may be
+// empty to match every path) answer with code, then succeed after that.
+func (s *Server) FailOnce(method, path string, code int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.once = &fault{method: method, path: path, code: code}
+}
+
+// PeakInFlight is the most requests this server was handling at once.
+func (s *Server) PeakInFlight() int64 { return s.peak.Load() }
+
 // Fail makes every request matching method and path (relative, as in Call)
 // answer with the given HTTP status until the test ends.
 func (s *Server) Fail(method, path string, code int) {
@@ -186,6 +228,14 @@ func (s *Server) ResetCalls() {
 
 func (s *Server) record(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := s.inflight.Add(1)
+		defer s.inflight.Add(-1)
+		for {
+			pk := s.peak.Load()
+			if n <= pk || s.peak.CompareAndSwap(pk, n) {
+				break
+			}
+		}
 		prefix := "/api/v2/tailnet/" + s.Tailnet
 		path := r.URL.Path
 		if len(path) >= len(prefix) && path[:len(prefix)] == prefix {
@@ -195,9 +245,24 @@ func (s *Server) record(next http.Handler) http.Handler {
 		call := Call{Method: r.Method, Path: path}
 		s.calls = append(s.calls, call)
 		code, fail := s.fail[call]
+		var once *fault
+		if s.once != nil && s.once.method == r.Method && (s.once.path == "" || s.once.path == path) {
+			once = s.once
+			s.once = nil
+		}
+		limited := !fail && once == nil && !s.takeToken()
 		s.mu.Unlock()
 		if fail {
 			writeErr(w, code, "injected failure")
+			return
+		}
+		if once != nil {
+			writeErr(w, once.code, "injected failure")
+			return
+		}
+		if limited {
+			w.Header().Set("Retry-After", "1")
+			writeErr(w, http.StatusTooManyRequests, "rate limited")
 			return
 		}
 		if r.Header.Get("Authorization") == "" && r.URL.Path != "/api/v2/oauth/token" && r.URL.Path != "/api/v2/oauth/token-exchange" {
@@ -206,6 +271,28 @@ func (s *Server) record(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// takeToken reports whether the request may proceed. Caller holds s.mu.
+func (s *Server) takeToken() bool {
+	if s.limitRate <= 0 {
+		return true
+	}
+	now := time.Now()
+	if s.limitLast.IsZero() {
+		s.limitLast = now
+		s.limitTokens = s.limitBurst
+	}
+	s.limitTokens += now.Sub(s.limitLast).Seconds() * s.limitRate
+	if s.limitTokens > s.limitBurst {
+		s.limitTokens = s.limitBurst
+	}
+	s.limitLast = now
+	if s.limitTokens < 1 {
+		return false
+	}
+	s.limitTokens--
+	return true
 }
 
 func (s *Server) checkTailnet(w http.ResponseWriter, r *http.Request) bool {
@@ -319,11 +406,19 @@ func (s *Server) patchSplitDNS(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+// DeviceListQueries is the raw query string of each device list, in order.
+func (s *Server) DeviceListQueries() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.deviceQueries...)
+}
+
 func (s *Server) listDevices(w http.ResponseWriter, r *http.Request) {
 	if !s.checkTailnet(w, r) {
 		return
 	}
 	s.mu.Lock()
+	s.deviceQueries = append(s.deviceQueries, r.URL.RawQuery)
 	out := append([]tsclient.Device(nil), s.devices...)
 	s.mu.Unlock()
 	writeJSON(w, map[string]any{"devices": out})

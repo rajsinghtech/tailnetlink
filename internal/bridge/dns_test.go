@@ -34,6 +34,26 @@ func serveDNS(t *testing.T, d *DNSServer) func(name string, qtype uint16) *dns.M
 	}
 }
 
+func TestDNSServerAnswersExactZoneApex(t *testing.T) {
+	const zone = "app.corp.example.com"
+	d := NewDNSServer(nil, nil, nil, testOwner, zone, discardLogger())
+	d.AddRecord("@", netip.MustParseAddr("100.100.1.9"))
+	q := serveDNS(t, d)
+	if r := q(zone, dns.TypeA); len(r.Answer) != 1 || r.Answer[0].(*dns.A).A.String() != "100.100.1.9" || !r.Authoritative {
+		t.Errorf("apex A = %+v", r)
+	}
+	if r := q(zone, dns.TypeAAAA); r.Rcode != dns.RcodeSuccess || len(r.Answer) != 0 {
+		t.Errorf("apex AAAA with only an A = %+v", r)
+	}
+	d.AddRecord("@", netip.MustParseAddr("fd7a:115c:a1e0::9"))
+	if r := q(zone, dns.TypeAAAA); len(r.Answer) != 1 || r.Answer[0].(*dns.AAAA).AAAA.String() != "fd7a:115c:a1e0::9" {
+		t.Errorf("apex AAAA = %+v", r)
+	}
+	if r := q("other.corp.example.com", dns.TypeA); len(r.Answer) != 0 {
+		t.Errorf("sibling name answered: %+v", r)
+	}
+}
+
 func TestDNSServerAnswers(t *testing.T) {
 	d := NewDNSServer(nil, nil, nil, testOwner, "src.example", discardLogger())
 	d.AddRecord("web", netip.MustParseAddr("100.100.1.1"))

@@ -104,6 +104,32 @@ func (r BridgeRule) validate() error {
 	if r.SourceTag == "" && len(r.SourceDevices) == 0 && len(r.SourceServices) == 0 {
 		return fmt.Errorf("either source_tag, source_devices, or source_services must be specified")
 	}
+	for i, d := range r.SourceDevices {
+		if err := checkDNSZone(d.DNSName, d.DNSZone, fmt.Sprintf("source_devices[%d]", i)); err != nil {
+			return err
+		}
+	}
+	for i, s := range r.SourceServices {
+		if err := checkDNSZone(s.DNSName, s.DNSZone, fmt.Sprintf("source_services[%d]", i)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkDNSZone checks an optional split-DNS zone. With no zone the name is
+// published under its parent, as before. A zone requires dns_name, and that
+// name must be the zone or a name inside it.
+func checkDNSZone(name, zone, where string) error {
+	if strings.TrimSpace(zone) == "" {
+		return nil
+	}
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("%s: dns_zone requires dns_name", where)
+	}
+	if _, _, err := SplitHost(name, zone); err != nil {
+		return fmt.Errorf("%s: %w", where, err)
+	}
 	return nil
 }
 
@@ -125,6 +151,9 @@ func validateLocalSources(sources []LocalSourceSpec) error {
 		}
 		if isLocalOrIP(host) && src.DNSName == "" {
 			return fmt.Errorf("local_sources[%d].addr %q requires dns_name (cannot derive from localhost/IP)", i, src.Addr)
+		}
+		if err := checkDNSZone(src.DNSName, src.DNSZone, fmt.Sprintf("local_sources[%d]", i)); err != nil {
+			return err
 		}
 	}
 	return nil

@@ -62,6 +62,7 @@ type Manager struct {
 	metrics  *metrics.Metrics     // nil means no metrics
 	lastPoll map[string]time.Time // rule name -> last successful discovery poll
 	applied  bool                 // a Reconcile has finished at least once
+	pollers  map[string]*sourcePoller
 
 	// vipDesired / vipAdvertised feed tailnetlink_vip_services. A name is
 	// desired once ListenService starts for it and advertised once it is
@@ -108,6 +109,7 @@ func New(store *state.Store, logger *slog.Logger, ui http.Handler) *Manager {
 		lastPoll:      make(map[string]time.Time),
 		vipDesired:    map[string]map[string]struct{}{},
 		vipAdvertised: map[string]map[string]struct{}{},
+		pollers:       map[string]*sourcePoller{},
 	}
 }
 
@@ -219,13 +221,12 @@ func (m *Manager) metricsRef() *metrics.Metrics {
 }
 
 func (m *Manager) newAPIClient(tc config.TailnetConfig) *tsclient.Client {
-	m.mu.Lock()
-	mt := m.metrics
-	m.mu.Unlock()
-	if mt == nil {
-		return newAPIClient(tc)
+	mt := m.metricsRef()
+	var obs tsapi.APIObserver
+	if mt != nil {
+		obs = mt
 	}
-	return tsapi.NewClient(tc, mt.Transport(nil))
+	return tsapi.NewClient(tc, tsapi.LimitedTransport(nil, tsapi.DefaultAPIRatePerSec, tsapi.DefaultAPIBurst, obs))
 }
 
 // Reconcile diffs newCfg against the running config and applies the minimum
@@ -912,184 +913,74 @@ func (m *Manager) runRule(ctx context.Context, rule config.BridgeRule, pollInter
 	m.logger.Info("bridge rule started", "rule", rule.Name, "source", rule.SourceTailnet, "dests", destNames, "ports", rule.Ports)
 	m.store.Log("info", fmt.Sprintf("[%s] rule started: %s→%v ports=%v", rule.Name, rule.SourceTailnet, destNames, rule.Ports), nil)
 
-	activeDevices := make(map[string]Device)
-	var mu sync.Mutex
-	var devWg sync.WaitGroup
-
-	go disc.Run(ctx)
-
-	for {
-		select {
-		case <-ctx.Done():
-			devWg.Wait() // drain in-flight handlers before cleanup
-			remove := m.removing(rule.Name)
-			drop := m.takeDrops(rule.Name)
-			mu.Lock()
-			devs := make([]Device, 0, len(activeDevices))
-			for _, dev := range activeDevices {
-				devs = append(devs, dev)
-			}
-			mu.Unlock()
-			for _, dev := range devs {
-				removedHere := false
-				for _, dest := range dests {
-					bridgeID := rule.Name + "/" + dest.name + "/" + dev.FQDN
-					gone := remove || drop[dest.name]
-					m.forgetVIP(dest.name, ServiceName(rule.SourceTailnet, dev.FQDN, shortNameFor(rule, dev.FQDN)))
-					m.stopBridge(bridgeID, gone)
-					if gone {
-						removedHere = true
-						if err := dest.rec.Delete(context.Background(), rule.SourceTailnet, dev, shortNameFor(rule, dev.FQDN)); err != nil {
-							m.logger.Warn("reconciler: delete failed", "rule", rule.Name, "dest", dest.name, "device", dev.Name, "err", err)
-						}
-					}
-					m.store.DeleteBridge(bridgeID)
-				}
-				if removedHere {
-					m.store.Log("info", fmt.Sprintf("[%s] bridge removed: %s", rule.Name, dev.Name), nil)
-				}
-			}
-			if !remove {
-				m.store.Log("info", fmt.Sprintf("[%s] rule stopped; services left in place", rule.Name), nil)
-			}
+	// One discoverer polls the source. Each destination has its own reconcile
+	// queue, so a retry on one tailnet does not delay listens on another.
+	destByName := make(map[string]destCtx, len(dests))
+	queues := make(map[string]*reconcileQueue, len(dests))
+	for _, dest := range dests {
+		destByName[dest.name] = dest
+		d := dest
+		q := newReconcileQueue(reconcileWorkers, func(ctx context.Context, item qItem) error {
+			return m.converge(ctx, rule, d, srcSrv, dialTimeout, item)
+		})
+		q.start(ctx)
+		queues[dest.name] = q
+	}
+	disc.onSnapshot = func(found map[string]Device) {
+		if ctx.Err() != nil {
 			return
-		case dev := <-disc.Added():
-			devWg.Add(1)
-			go func(d Device) {
-				defer devWg.Done()
-				m.handleDeviceAdded(ctx, rule, d, dests, srcSrv, dialTimeout, activeDevices, &mu)
-			}(dev)
-		case dev := <-disc.Removed():
-			devWg.Add(1)
-			go func(d Device) {
-				defer devWg.Done()
-				m.handleDeviceRemoved(ctx, rule, d, dests, activeDevices, &mu)
-			}(dev)
 		}
+		for _, dest := range dests {
+			queues[dest.name].Replace(specsFor(rule, []destCtx{dest}, found))
+		}
+	}
+
+	poller := m.sharedPoller(rule.SourceTailnet, srcClient, pollInterval)
+	poller.subscribe(disc)
+	defer poller.unsubscribe(disc)
+
+	<-ctx.Done()
+	for _, q := range queues {
+		q.wg.Wait()
+	}
+
+	remove := m.removing(rule.Name)
+	drop := m.takeDrops(rule.Name)
+	for _, b := range m.store.GetBridges() {
+		if b.RuleName != rule.Name {
+			continue
+		}
+		destName, fqdn, ok := splitBridgeID(rule.Name, b.ID)
+		if !ok {
+			continue
+		}
+		gone := remove || drop[destName]
+		m.forgetVIP(destName, b.ServiceName)
+		m.stopBridge(b.ID, gone)
+		if gone {
+			if dest, known := destByName[destName]; known {
+				dev := Device{Name: b.SourceHost, FQDN: fqdn}
+				if err := dest.rec.Delete(context.Background(), rule.SourceTailnet, dev, shortNameFor(rule, fqdn)); err != nil {
+					m.logger.Warn("reconciler: delete failed", "rule", rule.Name, "dest", destName, "device", dev.Name, "err", err)
+				}
+			}
+		}
+		m.store.DeleteBridge(b.ID)
+	}
+	if !remove {
+		m.store.Log("info", fmt.Sprintf("[%s] rule stopped; services left in place", rule.Name), nil)
 	}
 }
 
-func (m *Manager) handleDeviceAdded(
-	ctx context.Context,
-	rule config.BridgeRule,
-	dev Device,
-	dests []destCtx,
-	srcSrv *tsnet.Server,
-	dialTimeout time.Duration,
-	activeDevices map[string]Device,
-	mu *sync.Mutex,
-) {
-	createdAt := time.Now()
-	shortName := shortNameFor(rule, dev.FQDN)
-	svcName := ServiceName(rule.SourceTailnet, dev.FQDN, shortName)
-	m.store.Log("info", fmt.Sprintf("[%s] provisioning bridge for %s", rule.Name, dev.Name), nil)
-
-	for _, dest := range dests {
-		bridgeID := rule.Name + "/" + dest.name + "/" + dev.FQDN
-
-		m.store.UpsertBridge(state.BridgeEntry{
-			ID: bridgeID, RuleName: rule.Name, DestTailnet: m.tailnetLabel(dest.name),
-			ServiceName: svcName,
-			SourceHost:  dev.Name, SourceIP: dev.IP.String(),
-			Ports: rule.Ports, Status: state.BridgeStatusPending, CreatedAt: createdAt,
-		})
-
-		vip, err := dest.rec.Ensure(ctx, rule.SourceTailnet, dev, shortName)
-		if err != nil {
-			m.conflict(dest.name, err)
-			m.logger.Error("reconciler: ensure failed", "rule", rule.Name, "dest", dest.name, "device", dev.Name, "err", err)
-			m.store.UpsertBridge(state.BridgeEntry{
-				ID: bridgeID, RuleName: rule.Name, DestTailnet: m.tailnetLabel(dest.name),
-				ServiceName: svcName,
-				SourceHost:  dev.Name, SourceIP: dev.IP.String(),
-				Ports: rule.Ports, Status: state.BridgeStatusError, Error: err.Error(), CreatedAt: createdAt,
-			})
-			m.store.Log("error", fmt.Sprintf("[%s] bridge failed for %s→%s: %v", rule.Name, dev.Name, dest.name, err), nil)
-			continue
-		}
-
-		fwd := NewForwarder(dest.srv, srcSrv, vip, bridgeID, dialTimeout, m.store, m.logger)
-		fwd.rule, fwd.metrics, fwd.authz = rule.Name, m.metricsRef(), m.authzFor(rule, dest.name)
-		if err := startForwarder(fwd, ctx); err != nil {
-			// The listen verified nothing, or it did and then a later port
-			// failed and the listeners were closed. Keep the name desired
-			// so the gauge shows it is not actually advertised.
-			m.dropAdvertised(dest.name, vip.ServiceName)
-			m.logger.Error("forwarder: start failed", "rule", rule.Name, "dest", dest.name, "device", dev.Name, "err", err)
-			m.store.UpsertBridge(state.BridgeEntry{
-				ID: bridgeID, RuleName: rule.Name, DestTailnet: m.tailnetLabel(dest.name), ServiceName: vip.ServiceName,
-				SourceHost: dev.Name, SourceIP: dev.IP.String(),
-				Ports: rule.Ports, Status: state.BridgeStatusError, Error: err.Error(), CreatedAt: createdAt,
-			})
-			_ = dest.rec.Delete(context.Background(), rule.SourceTailnet, dev, shortName)
-			continue
-		}
-
-		m.store.UpsertBridge(state.BridgeEntry{
-			ID: bridgeID, RuleName: rule.Name, DestTailnet: m.tailnetLabel(dest.name), ServiceName: vip.ServiceName,
-			SourceHost: dev.Name, SourceIP: dev.IP.String(), DestVIP: vip.VIP.String(),
-			Ports: rule.Ports, Status: state.BridgeStatusActive, CreatedAt: createdAt,
-		})
-		m.store.Log("info", fmt.Sprintf("[%s] bridge active: %s → %s (%s)", rule.Name, dev.Name, vip.VIP, dest.name), nil)
-
-		if vip.VIP.IsValid() {
-			m.mu.Lock()
-			srcDomain := m.cfg.Tailnets[rule.SourceTailnet].Tailnet
-			m.mu.Unlock()
-			m.startDeviceDNS(ctx, bridgeID, rule.Name, srcDomain, dev.FQDN, dnsNameFor(rule, dev.FQDN), vip.VIP, dest)
-		}
-
-		m.mu.Lock()
-		m.forwarders[bridgeID] = fwd
-		m.mu.Unlock()
+// splitBridgeID parses rule/dest/fqdn. The fqdn is the remainder, so it may
+// contain slashes only if a name did; configured names do not.
+func splitBridgeID(ruleName, id string) (dest, fqdn string, ok bool) {
+	rest, found := strings.CutPrefix(id, ruleName+"/")
+	if !found {
+		return "", "", false
 	}
-
-	mu.Lock()
-	activeDevices[dev.FQDN] = dev
-	mu.Unlock()
-}
-
-func (m *Manager) handleDeviceRemoved(
-	ctx context.Context,
-	rule config.BridgeRule,
-	dev Device,
-	dests []destCtx,
-	activeDevices map[string]Device,
-	mu *sync.Mutex,
-) {
-	shortName := shortNameFor(rule, dev.FQDN)
-	for _, dest := range dests {
-		bridgeID := rule.Name + "/" + dest.name + "/" + dev.FQDN
-		m.forgetVIP(dest.name, ServiceName(rule.SourceTailnet, dev.FQDN, shortName))
-
-		m.mu.Lock()
-		if fwd, ok := m.forwarders[bridgeID]; ok {
-			fwd.Stop()
-			delete(m.forwarders, bridgeID)
-		}
-		m.mu.Unlock()
-
-		if err := dest.rec.Delete(ctx, rule.SourceTailnet, dev, shortName); err != nil {
-			m.logger.Error("reconciler: delete failed", "rule", rule.Name, "dest", dest.name, "device", dev.Name, "err", err)
-			m.store.Log("error", fmt.Sprintf("[%s] bridge cleanup failed for %s→%s: %v", rule.Name, dev.Name, dest.name, err), nil)
-		}
-
-		m.mu.Lock()
-		cleanup := m.dnsCleanups[bridgeID]
-		delete(m.dnsCleanups, bridgeID)
-		m.mu.Unlock()
-		if cleanup != nil {
-			cleanup(true)
-		}
-
-		m.store.DeleteBridge(bridgeID)
-	}
-
-	m.store.Log("info", fmt.Sprintf("[%s] bridge removed: %s", rule.Name, dev.Name), nil)
-
-	mu.Lock()
-	delete(activeDevices, dev.FQDN)
-	mu.Unlock()
+	dest, fqdn, ok = strings.Cut(rest, "/")
+	return dest, fqdn, ok && dest != "" && fqdn != ""
 }
 
 func (m *Manager) fetchAuthKey(ctx context.Context, client *tsclient.Client, tags []string, ephemeral bool) (string, error) {
@@ -1145,6 +1036,20 @@ func dnsNameFor(rule config.BridgeRule, fqdn string) string {
 	return ""
 }
 
+func dnsZoneFor(rule config.BridgeRule, fqdn string) string {
+	for _, spec := range rule.SourceDevices {
+		if strings.EqualFold(spec.FQDN, fqdn) {
+			return spec.DNSZone
+		}
+	}
+	for _, spec := range rule.SourceServices {
+		if strings.EqualFold(spec.Name, fqdn) {
+			return spec.DNSZone
+		}
+	}
+	return ""
+}
+
 func shortNameFor(rule config.BridgeRule, fqdn string) string {
 	for _, spec := range rule.SourceDevices {
 		if strings.EqualFold(spec.FQDN, fqdn) {
@@ -1157,16 +1062,6 @@ func shortNameFor(rule config.BridgeRule, fqdn string) string {
 		}
 	}
 	return ""
-}
-
-// parseHostname splits a full DNS hostname into (parentDomain, recordLabel).
-// "ai.keiretsu.ts.net" → ("keiretsu.ts.net", "ai")
-// "ai" (bare)          → ("ai", "@")
-func parseHostname(dnsName string) (parentDomain, recordLabel string) {
-	if dot := strings.IndexByte(dnsName, '.'); dot >= 0 {
-		return dnsName[dot+1:], dnsName[:dot]
-	}
-	return dnsName, "@"
 }
 
 type sharedDNSEntry struct {
@@ -1291,7 +1186,7 @@ func (m *Manager) releaseSharedDNS(destName, parentDomain, recordLabel string, r
 // service-mode FQDNs (svc:name, no dot) it derives {short-name}.{srcDomain} so the
 // service resolves at its canonical ts.net name from the destination tailnet.
 // A custom dns_name is always attempted independently.
-func (m *Manager) startDeviceDNS(ctx context.Context, bridgeID, ruleName, srcDomain, sourceFQDN, customDNS string, vipIP netip.Addr, dest destCtx) {
+func (m *Manager) startDeviceDNS(ctx context.Context, bridgeID, ruleName, srcDomain, sourceFQDN, sourceZone, customDNS, customZone string, vipIP netip.Addr, dest destCtx) {
 	m.mu.Lock()
 	off := m.dnsOff || (m.cfg != nil && m.cfg.Tailnets[dest.name].DNSDisabled)
 	m.mu.Unlock()
@@ -1302,22 +1197,33 @@ func (m *Manager) startDeviceDNS(ctx context.Context, bridgeID, ruleName, srcDom
 	var srcAcquired bool
 
 	// Determine the effective always-on FQDN.
-	// For real device FQDNs (e.g. aperture.keiretsu.ts.net) use as-is.
-	// For service names (e.g. svc:ai), derive ai.keiretsu.ts.net so it resolves
+	// For real device FQDNs (e.g. app.example.ts.net) use as-is.
+	// For service names (e.g. svc:ai), derive ai.example.ts.net so it resolves
 	// from dest tailnets the same way it does within the source tailnet.
 	effectiveFQDN := sourceFQDN
 	if !strings.Contains(sourceFQDN, ".") && srcDomain != "" {
 		shortName := strings.TrimPrefix(sourceFQDN, "svc:")
 		effectiveFQDN = shortName + "." + srcDomain
 	}
+	// One name that is both the source name and the custom name is published
+	// once. A dns_zone on the custom name applies to that single record.
+	if customDNS != "" && strings.EqualFold(customDNS, effectiveFQDN) {
+		if sourceZone == "" {
+			sourceZone = customZone
+		}
+		customDNS = ""
+	}
 
-	if strings.Contains(effectiveFQDN, ".") {
-		srcParent, srcLabel = parseHostname(effectiveFQDN)
-		if entry, err := m.acquireSharedDNS(ctx, dest.name, srcParent, dest); err != nil {
+	if strings.Contains(effectiveFQDN, ".") || sourceZone != "" {
+		var err error
+		srcParent, srcLabel, err = config.SplitHost(effectiveFQDN, sourceZone)
+		if err != nil {
+			m.logger.Warn("DNS name rejected", "rule", ruleName, "hostname", effectiveFQDN, "zone", sourceZone, "err", err)
+		} else if entry, err := m.acquireSharedDNS(ctx, dest.name, srcParent, dest); err != nil {
 			m.logger.Warn("shared DNS acquire failed", "rule", ruleName, "dest", dest.name, "hostname", effectiveFQDN, "err", err)
 		} else {
 			entry.server.AddRecord(srcLabel, vipIP)
-			m.logger.Info("DNS record added", "rule", ruleName, "hostname", effectiveFQDN, "dest", dest.name)
+			m.logger.Info("DNS record added", "rule", ruleName, "hostname", effectiveFQDN, "zone", srcParent, "dest", dest.name)
 			srcAcquired = true
 		}
 	}
@@ -1325,13 +1231,16 @@ func (m *Manager) startDeviceDNS(ctx context.Context, bridgeID, ruleName, srcDom
 	// Custom hostname: always attempted independently, regardless of above.
 	var customParent, customLabel string
 	var customAcquired bool
-	if customDNS != "" && customDNS != sourceFQDN {
-		customParent, customLabel = parseHostname(customDNS)
-		if entry, err := m.acquireSharedDNS(ctx, dest.name, customParent, dest); err != nil {
+	if customDNS != "" && !strings.EqualFold(customDNS, effectiveFQDN) {
+		var err error
+		customParent, customLabel, err = config.SplitHost(customDNS, customZone)
+		if err != nil {
+			m.logger.Warn("custom DNS name rejected", "rule", ruleName, "hostname", customDNS, "zone", customZone, "err", err)
+		} else if entry, err := m.acquireSharedDNS(ctx, dest.name, customParent, dest); err != nil {
 			m.logger.Warn("custom DNS acquire failed", "rule", ruleName, "dest", dest.name, "hostname", customDNS, "err", err)
 		} else {
 			entry.server.AddRecord(customLabel, vipIP)
-			m.logger.Info("custom DNS record added", "rule", ruleName, "hostname", customDNS, "dest", dest.name)
+			m.logger.Info("custom DNS record added", "rule", ruleName, "hostname", customDNS, "zone", customParent, "dest", dest.name)
 			customAcquired = true
 		}
 	}
