@@ -836,6 +836,20 @@ func dnsNameFor(rule config.BridgeRule, fqdn string) string {
 	return ""
 }
 
+func dnsZoneFor(rule config.BridgeRule, fqdn string) string {
+	for _, spec := range rule.SourceDevices {
+		if strings.EqualFold(spec.FQDN, fqdn) {
+			return spec.DNSZone
+		}
+	}
+	for _, spec := range rule.SourceServices {
+		if strings.EqualFold(spec.Name, fqdn) {
+			return spec.DNSZone
+		}
+	}
+	return ""
+}
+
 func shortNameFor(rule config.BridgeRule, fqdn string) string {
 	for _, spec := range rule.SourceDevices {
 		if strings.EqualFold(spec.FQDN, fqdn) {
@@ -848,16 +862,6 @@ func shortNameFor(rule config.BridgeRule, fqdn string) string {
 		}
 	}
 	return ""
-}
-
-// parseHostname splits a full DNS hostname into (parentDomain, recordLabel).
-// "ai.keiretsu.ts.net" → ("keiretsu.ts.net", "ai")
-// "ai" (bare)          → ("ai", "@")
-func parseHostname(dnsName string) (parentDomain, recordLabel string) {
-	if dot := strings.IndexByte(dnsName, '.'); dot >= 0 {
-		return dnsName[dot+1:], dnsName[:dot]
-	}
-	return dnsName, "@"
 }
 
 type sharedDNSEntry struct {
@@ -982,7 +986,7 @@ func (m *Manager) releaseSharedDNS(destName, parentDomain, recordLabel string, r
 // service-mode FQDNs (svc:name, no dot) it derives {short-name}.{srcDomain} so the
 // service resolves at its canonical ts.net name from the destination tailnet.
 // A custom dns_name is always attempted independently.
-func (m *Manager) startDeviceDNS(ctx context.Context, bridgeID, ruleName, srcDomain, sourceFQDN, customDNS string, vipIP netip.Addr, dest destCtx) {
+func (m *Manager) startDeviceDNS(ctx context.Context, bridgeID, ruleName, srcDomain, sourceFQDN, sourceZone, customDNS, customZone string, vipIP netip.Addr, dest destCtx) {
 	m.mu.Lock()
 	off := m.dnsOff
 	m.mu.Unlock()
@@ -993,22 +997,33 @@ func (m *Manager) startDeviceDNS(ctx context.Context, bridgeID, ruleName, srcDom
 	var srcAcquired bool
 
 	// Determine the effective always-on FQDN.
-	// For real device FQDNs (e.g. aperture.keiretsu.ts.net) use as-is.
-	// For service names (e.g. svc:ai), derive ai.keiretsu.ts.net so it resolves
+	// For real device FQDNs (e.g. app.example.ts.net) use as-is.
+	// For service names (e.g. svc:ai), derive ai.example.ts.net so it resolves
 	// from dest tailnets the same way it does within the source tailnet.
 	effectiveFQDN := sourceFQDN
 	if !strings.Contains(sourceFQDN, ".") && srcDomain != "" {
 		shortName := strings.TrimPrefix(sourceFQDN, "svc:")
 		effectiveFQDN = shortName + "." + srcDomain
 	}
+	// One name that is both the source name and the custom name is published
+	// once. A dns_zone on the custom name applies to that single record.
+	if customDNS != "" && strings.EqualFold(customDNS, effectiveFQDN) {
+		if sourceZone == "" {
+			sourceZone = customZone
+		}
+		customDNS = ""
+	}
 
-	if strings.Contains(effectiveFQDN, ".") {
-		srcParent, srcLabel = parseHostname(effectiveFQDN)
-		if entry, err := m.acquireSharedDNS(ctx, dest.name, srcParent, dest); err != nil {
+	if strings.Contains(effectiveFQDN, ".") || sourceZone != "" {
+		var err error
+		srcParent, srcLabel, err = config.SplitHost(effectiveFQDN, sourceZone)
+		if err != nil {
+			m.logger.Warn("DNS name rejected", "rule", ruleName, "hostname", effectiveFQDN, "zone", sourceZone, "err", err)
+		} else if entry, err := m.acquireSharedDNS(ctx, dest.name, srcParent, dest); err != nil {
 			m.logger.Warn("shared DNS acquire failed", "rule", ruleName, "dest", dest.name, "hostname", effectiveFQDN, "err", err)
 		} else {
 			entry.server.AddRecord(srcLabel, vipIP)
-			m.logger.Info("DNS record added", "rule", ruleName, "hostname", effectiveFQDN, "dest", dest.name)
+			m.logger.Info("DNS record added", "rule", ruleName, "hostname", effectiveFQDN, "zone", srcParent, "dest", dest.name)
 			srcAcquired = true
 		}
 	}
@@ -1016,13 +1031,16 @@ func (m *Manager) startDeviceDNS(ctx context.Context, bridgeID, ruleName, srcDom
 	// Custom hostname: always attempted independently, regardless of above.
 	var customParent, customLabel string
 	var customAcquired bool
-	if customDNS != "" && customDNS != sourceFQDN {
-		customParent, customLabel = parseHostname(customDNS)
-		if entry, err := m.acquireSharedDNS(ctx, dest.name, customParent, dest); err != nil {
+	if customDNS != "" && !strings.EqualFold(customDNS, effectiveFQDN) {
+		var err error
+		customParent, customLabel, err = config.SplitHost(customDNS, customZone)
+		if err != nil {
+			m.logger.Warn("custom DNS name rejected", "rule", ruleName, "hostname", customDNS, "zone", customZone, "err", err)
+		} else if entry, err := m.acquireSharedDNS(ctx, dest.name, customParent, dest); err != nil {
 			m.logger.Warn("custom DNS acquire failed", "rule", ruleName, "dest", dest.name, "hostname", customDNS, "err", err)
 		} else {
 			entry.server.AddRecord(customLabel, vipIP)
-			m.logger.Info("custom DNS record added", "rule", ruleName, "hostname", customDNS, "dest", dest.name)
+			m.logger.Info("custom DNS record added", "rule", ruleName, "hostname", customDNS, "zone", customParent, "dest", dest.name)
 			customAcquired = true
 		}
 	}

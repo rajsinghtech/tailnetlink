@@ -62,6 +62,32 @@ func TestPruneDeletesOnlyOwned(t *testing.T) {
 	}
 }
 
+func TestPruneExactZoneKeepsOtherResolvers(t *testing.T) {
+	api := fakeapi.New(t)
+	own := map[string]string{"tailnetlink/owner": testOwner}
+	api.PutService(tsclient.VIPService{
+		Name: "svc:tnl-dns-app-corp-example-com-dns", Addrs: []string{"100.100.0.53"}, Annotations: own,
+	})
+	api.SetSplitDNS("app.corp.example.com", []string{"100.100.0.53", "192.0.2.53"})
+	api.SetSplitDNS("corp.example.com", []string{"192.0.2.9"})
+	t.Setenv("TNL_PRUNE_EXACT_SECRET", "secret")
+	cfg := &config.Config{
+		InstanceID: testOwner,
+		Tailnets: map[string]config.TailnetConfig{
+			"dest": {Tailnet: api.Tailnet, APIBaseURL: api.URL(), OAuth: config.OAuthCreds{ClientID: "id", ClientSecretEnv: "TNL_PRUNE_EXACT_SECRET"}},
+		},
+	}
+	if _, err := Prune(context.Background(), cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := api.SplitDNS("app.corp.example.com"); !slices.Equal(got, []string{"192.0.2.53"}) {
+		t.Errorf("exact zone resolvers = %v", got)
+	}
+	if got := api.SplitDNS("corp.example.com"); !slices.Equal(got, []string{"192.0.2.9"}) {
+		t.Errorf("parent zone resolvers = %v", got)
+	}
+}
+
 func TestPruneDryRunChangesNothing(t *testing.T) {
 	api, cfg := pruneFixture(t)
 	api.ResetCalls()

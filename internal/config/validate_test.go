@@ -71,6 +71,23 @@ func TestValidateBridges(t *testing.T) {
 		{"local negative expose", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "h:80", ExposePort: -1})}, "expose_port"},
 		{"local ip needs dns", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "10.0.0.1:80"})}, "requires dns_name"},
 		{"localhost needs dns", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "localhost:80"})}, "requires dns_name"},
+		{"exact zone", []config.BridgeRule{tag("r", func(r *config.BridgeRule) {
+			r.SourceTag = ""
+			r.SourceDevices = []config.DeviceSpec{{FQDN: "app.example.ts.net", DNSName: "app.corp.example.com", DNSZone: "app.corp.example.com"}}
+		})}, ""},
+		{"name inside zone", []config.BridgeRule{tag("r", func(r *config.BridgeRule) {
+			r.SourceTag = ""
+			r.SourceDevices = []config.DeviceSpec{{FQDN: "app.example.ts.net", DNSName: "app.corp.example.com", DNSZone: "corp.example.com"}}
+		})}, ""},
+		{"zone without name", []config.BridgeRule{tag("r", func(r *config.BridgeRule) {
+			r.SourceTag = ""
+			r.SourceDevices = []config.DeviceSpec{{FQDN: "app.example.ts.net", DNSZone: "app.corp.example.com"}}
+		})}, "dns_zone requires dns_name"},
+		{"name outside zone", []config.BridgeRule{tag("r", func(r *config.BridgeRule) {
+			r.SourceTag = ""
+			r.SourceServices = []config.ServiceSpec{{Name: "svc:app", DNSName: "app.corp.example.com", DNSZone: "other.example.com"}}
+		})}, "must equal dns_zone"},
+		{"bad zone", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "127.0.0.1:80", DNSName: "app.corp.example.com", DNSZone: "not a zone"})}, "invalid character"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

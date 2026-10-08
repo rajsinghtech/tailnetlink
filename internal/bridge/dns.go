@@ -13,6 +13,10 @@ import (
 	"tailscale.com/tsnet"
 )
 
+// listenDNS hosts the DNS VIP. Tests replace it so DNS setup can run
+// without a live tsnet node. Production goes through the serialized listen.
+var listenDNS = listenServiceWithRetry
+
 // DNSServer is an authoritative DNS server for one zone in one destination
 // tailnet, shared by every rule that publishes names in that zone. It is
 // exposed as a Tailscale VIP service on TCP:53 so split-DNS can point at a
@@ -86,7 +90,7 @@ func (d *DNSServer) Start(ctx context.Context) (netip.Addr, error) {
 		return netip.Addr{}, fmt.Errorf("DNS VIP service %q has no assigned IP address", d.svcName)
 	}
 
-	ln, err := listenServiceWithRetry(d.srv, d.svcName, tsnet.ServiceModeTCP{Port: 53})
+	ln, err := listenDNS(d.srv, d.svcName, tsnet.ServiceModeTCP{Port: 53})
 	if err != nil {
 		return netip.Addr{}, fmt.Errorf("dns listen service tcp: %w", err)
 	}

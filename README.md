@@ -101,9 +101,9 @@ A link has a `name` and exactly one of `tag`, `devices`, `services` or `local`, 
 |---|---|
 | `name` | Unique name for this link |
 | `tag` | Discover devices and VIP services with this ACL tag |
-| `devices` | Explicit device specs (`fqdn`, optional `dns_name`, `short_name`) |
+| `devices` | Explicit device specs (`fqdn`, optional `dns_name`, `dns_zone`, `short_name`) |
 | `services` | Explicit VIP service names from the source (`name`, optional DNS fields) |
-| `local` | Addresses reachable from the host (`addr`, optional `expose_port`, `dns_name`, `short_name`) |
+| `local` | Addresses reachable from the host (`addr`, optional `expose_port`, `dns_name`, `dns_zone`, `short_name`) |
 | `ports` | TCP ports to forward (required except for `local`) |
 
 `short_name` must be a DNS label: 1 to 63 lowercase letters, digits or dashes, not starting or ending with a dash. Two entries that would end up with the same short name are rejected when the config loads. Names tailnetlink generates itself are cut to fit and get a short hash suffix.
@@ -166,7 +166,23 @@ Grant example (destination policy):
 
 ### Split DNS
 
-With DNS on (the default), when an entry sets `dns_name` (or a device has a real FQDN), tailnetlink runs a small authoritative DNS server for the parent zone on a shared VIP, `svc:tnl-dns-<zone>-dns`, in the destination and points split DNS for that zone at it. The server answers over TCP only: a tsnet node does not receive UDP sent to a VIP service address. Clients fall back to TCP after the UDP attempt times out.
+With DNS on (the default), when an entry sets `dns_name` (or a device has a real FQDN), tailnetlink runs a small authoritative DNS server for the parent zone on a shared VIP, `svc:tnl-dns-<zone>-dns`, in the destination and points split DNS for that zone at it. `app.corp.example.com` is published as the name `app` in the zone `corp.example.com`, so every other name under `corp.example.com` is also sent to that VIP. The server answers over TCP only: a tsnet node does not receive UDP sent to a VIP service address. Clients fall back to TCP after the UDP attempt times out.
+
+Set `dns_zone` on a device, service, or local source to choose the zone. It must be `dns_name` itself or a parent of it. When they are equal, the record is the apex of that zone and split-DNS is registered for that name only. Leave `dns_zone` out to keep the parent-zone behavior.
+
+```json
+{
+  "name": "app",
+  "devices": [
+    {
+      "fqdn": "app.example.ts.net",
+      "dns_name": "app.corp.example.com",
+      "dns_zone": "app.corp.example.com"
+    }
+  ],
+  "ports": [443]
+}
+```
 
 ### OAuth and workload identity
 

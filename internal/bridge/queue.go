@@ -367,7 +367,7 @@ func (m *Manager) converge(ctx context.Context, rule config.BridgeRule, dest des
 			srcDomain = m.cfg.Tailnets[rule.SourceTailnet].Tailnet
 		}
 		m.mu.Unlock()
-		m.startDeviceDNS(ctx, item.bridgeID, rule.Name, srcDomain, dev.FQDN, dnsNameFor(rule, dev.FQDN), vip.VIP, dest)
+		m.startDeviceDNS(ctx, item.bridgeID, rule.Name, srcDomain, dev.FQDN, "", dnsNameFor(rule, dev.FQDN), dnsZoneFor(rule, dev.FQDN), vip.VIP, dest)
 	}
 	m.mu.Lock()
 	m.forwarders[item.bridgeID] = fwd
