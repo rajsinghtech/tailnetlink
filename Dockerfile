@@ -10,7 +10,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
   -ldflags "-s -w -X main.Version=${VERSION}" \
   -o /tailnetlink ./cmd/tailnetlink
 
-FROM alpine:3.21
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates \
   && addgroup -S -g 65532 nonroot \
   && adduser -S -u 65532 -G nonroot nonroot \
