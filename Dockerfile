@@ -1,6 +1,6 @@
 # Compile on the build machine's platform and cross-compile for the target,
 # so multi-arch builds don't run the Go toolchain under QEMU.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c AS build
 ARG TARGETOS TARGETARCH VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -10,7 +10,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
   -ldflags "-s -w -X main.Version=${VERSION}" \
   -o /tailnetlink ./cmd/tailnetlink
 
-FROM alpine:3.21
+FROM alpine:3.21@sha256:ce64758a109eb420d874a118f87920e625e12d3634e03b4a5573fd9f6e5d3507
 RUN apk add --no-cache ca-certificates \
   && addgroup -S -g 65532 nonroot \
   && adduser -S -u 65532 -G nonroot nonroot \
