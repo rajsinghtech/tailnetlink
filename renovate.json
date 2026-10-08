@@ -60,7 +60,7 @@
     {
       "description": "Group the first Docker digest pins into one pull request",
       "matchDatasources": ["docker"],
-      "matchUpdateTypes": ["pin"],
+      "matchUpdateTypes": ["pin", "pinDigest"],
       "groupName": "docker-digests"
     },
     {
@@ -82,8 +82,14 @@
     {
       "description": "Group the first GitHub Action digest pins into one pull request",
       "matchDepTypes": ["action", "workflow"],
-      "matchUpdateTypes": ["pin"],
+      "matchUpdateTypes": ["pin", "pinDigest"],
       "groupName": "action-digests"
+    },
+    {
+      "description": "Keep the GoReleaser config schema major with the GoReleaser CLI major",
+      "matchPackageNames": ["goreleaser/goreleaser"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "goreleaser"
     },
     {
       "description": "Pin GitHub Action digests",
