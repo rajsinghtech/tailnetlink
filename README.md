@@ -17,7 +17,7 @@ source tailnet                         dest tailnet
 
 1. Authenticates to each tailnet with an OAuth client secret or a workload identity token (scopes: `devices:core:read`, `auth_keys`, `services`, `dns`).
 2. Spins up a [tsnet](https://pkg.go.dev/tailscale.com/tsnet) node in each tailnet.
-3. Polls the Tailscale API for devices matching the configured tag or FQDN list.
+3. Polls the Tailscale API for devices matching the configured tag or FQDN list. Every link on a tailnet shares that list: one device list and one service list per interval, not one of each per link. When every link selects by tag, the device list asks the API for those tags. The first poll waits a short random offset (at most five seconds) and later polls jitter by about 20%, so borders do not poll in lockstep.
 4. Creates a Tailscale VIP service in the destination tailnet for each discovered device. Discovery publishes the set of names that should exist. A failed list does not change that set. A name is removed only after it has been missing for 3 polls or 2 minutes, and at most 50 names are deleted per poll. A fixed pool of workers makes the destination match the set, one service name at a time, and retries failures with exponential backoff. A device that comes back with the same name keeps its VIP.
 5. Registers the tsnet node as the VIP service host and proxies TCP connections back to the source device through the source tsnet node. Listens on one node run one at a time, and a listen counts only after the service is in that node's advertised set, so concurrent registrations are not lost.
 6. Optionally starts an authoritative DNS server and configures split-DNS so `{hostname}.{zone}` resolves to the VIP IP.

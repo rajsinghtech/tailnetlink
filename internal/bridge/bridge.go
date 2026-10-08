@@ -60,6 +60,7 @@ type Manager struct {
 	metrics  *metrics.Metrics     // nil means no metrics
 	lastPoll map[string]time.Time // rule name -> last successful discovery poll
 	applied  bool                 // a Reconcile has finished at least once
+	pollers  map[string]*sourcePoller
 
 	// vipDesired / vipAdvertised feed tailnetlink_vip_services. A name is
 	// desired once ListenService starts for it and advertised once it is
@@ -104,6 +105,7 @@ func New(store *state.Store, logger *slog.Logger, ui http.Handler) *Manager {
 		lastPoll:      make(map[string]time.Time),
 		vipDesired:    map[string]map[string]struct{}{},
 		vipAdvertised: map[string]map[string]struct{}{},
+		pollers:       map[string]*sourcePoller{},
 	}
 }
 
@@ -737,15 +739,11 @@ func (m *Manager) runRule(ctx context.Context, rule config.BridgeRule, pollInter
 	}
 	q.start(ctx)
 
-	var discWG sync.WaitGroup
-	discWG.Add(1)
-	go func() {
-		defer discWG.Done()
-		disc.Run(ctx)
-	}()
+	poller := m.sharedPoller(rule.SourceTailnet, srcClient, pollInterval)
+	poller.subscribe(disc)
+	defer poller.unsubscribe(disc)
 
 	<-ctx.Done()
-	discWG.Wait()
 	q.wg.Wait()
 
 	remove := m.removing(rule.Name)
