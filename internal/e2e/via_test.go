@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -25,8 +26,9 @@ import (
 // local entry is dialed through the source node's userspace netstack to an
 // address that exists only behind a subnet router. The source node installs
 // the one advertised prefix that covers the target and not the router's
-// other prefix. Removing the entry withdraws that prefix. Other nodes and
-// the tailnet DNS config are unchanged, and no tun device is opened.
+// other prefix. Removing the entry withdraws that prefix, and shutting the
+// process down leaves the same empty set. Other nodes, their routes, and
+// both tailnets' DNS config are unchanged, and no tun device is opened.
 func TestViaTailnetReachesBackendThroughSubnetRouter(t *testing.T) {
 	ctx := e2eSetup(t)
 	b := newBorder(t)
@@ -70,7 +72,8 @@ func TestViaTailnetReachesBackendThroughSubnetRouter(t *testing.T) {
 	bystander := b.src.node(t, ctx, "bystander")
 	_ = bystander
 
-	before := sourceSnap(t, b.src)
+	beforeSrc := controlSnap(t, b.src)
+	beforeDst := controlSnap(t, b.dst)
 	rule := config.BridgeRule{
 		Name: "app", SourceTailnet: b.srcName, DestTailnets: []string{b.dstName},
 		LocalSources: []config.LocalSourceSpec{{
@@ -102,8 +105,17 @@ func TestViaTailnetReachesBackendThroughSubnetRouter(t *testing.T) {
 	if saw99.Load() {
 		t.Fatal("traffic reached 10.99.0.9; that prefix was accepted")
 	}
-	if !sameSnap(before, sourceSnap(t, b.src)) {
-		t.Fatalf("source tailnet changed\nbefore %s\nafter  %s", before, sourceSnap(t, b.src))
+	if !sameSnap(beforeSrc, controlSnap(t, b.src)) || !sameSnap(beforeDst, controlSnap(t, b.dst)) {
+		t.Fatalf("tailnet changed\nsrc before %s\nsrc after  %s\ndst before %s\ndst after  %s", beforeSrc, controlSnap(t, b.src), beforeDst, controlSnap(t, b.dst))
+	}
+	assertLinkHasNoApprovedRoutes(t, b.src, "tailnetlink-"+b.srcName, true)
+	assertLinkHasNoApprovedRoutes(t, b.dst, "tailnetlink-"+b.dstName, true)
+	assertNoDNSOrRouteWrites(t, b.srcAPI)
+	if got := r.m.AcceptedRoutes(b.dstName); len(got) != 0 {
+		t.Fatalf("dest tailnet accepted routes with no via:tailnet entry: %v", got)
+	}
+	if on, err := r.m.RouteAll(ctx, b.dstName); err != nil || on {
+		t.Fatalf("dest RouteAll = %v, %v", on, err)
 	}
 	assertNoTun(t)
 
@@ -115,9 +127,29 @@ func TestViaTailnetReachesBackendThroughSubnetRouter(t *testing.T) {
 	if err != nil || on {
 		t.Fatalf("RouteAll after removal = %v, %v", on, err)
 	}
-	if !sameSnap(before, sourceSnap(t, b.src)) {
-		t.Fatalf("source tailnet residue\nbefore %s\nafter  %s", before, sourceSnap(t, b.src))
+	if got := r.m.AcceptedRoutes(b.dstName); len(got) != 0 {
+		t.Fatalf("dest routes after removal: %v", got)
 	}
+	if !sameSnap(beforeSrc, controlSnap(t, b.src)) || !sameSnap(beforeDst, controlSnap(t, b.dst)) {
+		t.Fatalf("tailnet residue after reload\nsrc %s\ndst %s", controlSnap(t, b.src), controlSnap(t, b.dst))
+	}
+	assertLinkHasNoApprovedRoutes(t, b.src, "tailnetlink-"+b.srcName, true)
+	assertLinkHasNoApprovedRoutes(t, b.dst, "tailnetlink-"+b.dstName, true)
+	assertNoDNSOrRouteWrites(t, b.srcAPI)
+
+	r.stop(t)
+	if got := r.m.AcceptedRoutes(b.srcName); len(got) != 0 {
+		t.Fatalf("accepted routes after shutdown: %v", got)
+	}
+	if got := r.m.AcceptedRoutes(b.dstName); len(got) != 0 {
+		t.Fatalf("dest routes after shutdown: %v", got)
+	}
+	if !sameSnap(beforeSrc, controlSnap(t, b.src)) || !sameSnap(beforeDst, controlSnap(t, b.dst)) {
+		t.Fatalf("tailnet residue after shutdown\nsrc %s\ndst %s", controlSnap(t, b.src), controlSnap(t, b.dst))
+	}
+	assertLinkHasNoApprovedRoutes(t, b.src, "tailnetlink-"+b.srcName, false)
+	assertLinkHasNoApprovedRoutes(t, b.dst, "tailnetlink-"+b.dstName, false)
+	assertNoDNSOrRouteWrites(t, b.srcAPI)
 }
 
 func onlyPrefix(got []netip.Prefix, cidr string) bool {
@@ -175,22 +207,33 @@ func serveDNSA(name string, ip net.IP) func(net.Conn) {
 }
 
 type tailnetSnap struct {
-	dns       string
-	router    string
-	bystander string
+	dns   string
+	peers string
 }
 
-func sourceSnap(t *testing.T, tn *tailnet) tailnetSnap {
+// controlSnap is the tailnet DNS config plus every peer this process did
+// not create. The tailnetlink nodes and the dialing test client are left
+// out so the comparison is the other devices' names, tags, addresses, and
+// approved routes.
+func controlSnap(t *testing.T, tn *tailnet) tailnetSnap {
 	t.Helper()
 	raw, err := json.Marshal(tn.control.DNSConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return tailnetSnap{
-		dns:       string(raw),
-		router:    nodeSig(findNode(tn, "router")),
-		bystander: nodeSig(findNode(tn, "bystander")),
+	var peers []string
+	for _, n := range tn.control.AllNodes() {
+		host := ""
+		if n.Hostinfo.Valid() {
+			host = n.Hostinfo.Hostname()
+		}
+		if strings.HasPrefix(host, "tailnetlink-") || host == "client" {
+			continue
+		}
+		peers = append(peers, nodeSig(n))
 	}
+	slices.Sort(peers)
+	return tailnetSnap{dns: string(raw), peers: strings.Join(peers, "\n")}
 }
 
 func sameSnap(a, b tailnetSnap) bool {
@@ -198,7 +241,37 @@ func sameSnap(a, b tailnetSnap) bool {
 }
 
 func (s tailnetSnap) String() string {
-	return fmt.Sprintf("dns=%s router=%s bystander=%s", s.dns, s.router, s.bystander)
+	return fmt.Sprintf("dns=%s peers=%s", s.dns, s.peers)
+}
+
+// assertLinkHasNoApprovedRoutes checks the tailnetlink node did not
+// advertise or receive subnet routes in the control plane. A missing node
+// after shutdown is fine: there is nothing left behind.
+func assertLinkHasNoApprovedRoutes(t *testing.T, tn *tailnet, host string, mustExist bool) {
+	t.Helper()
+	n := findNode(tn, host)
+	if n == nil {
+		if mustExist {
+			t.Fatalf("node %s missing from control", host)
+		}
+		return
+	}
+	if len(n.PrimaryRoutes) != 0 {
+		t.Fatalf("%s primary routes = %v", host, n.PrimaryRoutes)
+	}
+	if n.Hostinfo.Valid() && n.Hostinfo.RoutableIPs().Len() != 0 {
+		t.Fatalf("%s routable IPs = %v", host, n.Hostinfo.RoutableIPs())
+	}
+}
+
+func assertNoDNSOrRouteWrites(t *testing.T, api *ctlBridge) {
+	t.Helper()
+	for _, call := range api.Writes() {
+		low := strings.ToLower(call)
+		if strings.Contains(low, "dns") || strings.Contains(low, "route") || strings.Contains(low, "acl") || strings.Contains(low, "policy") {
+			t.Errorf("source tailnet control write %q", call)
+		}
+	}
 }
 
 func findNode(tn *tailnet, host string) *tailcfg.Node {
