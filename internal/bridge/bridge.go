@@ -61,6 +61,13 @@ type Manager struct {
 	lastPoll map[string]time.Time // rule name -> last successful discovery poll
 	applied  bool                 // a Reconcile has finished at least once
 
+	// vipDesired / vipAdvertised feed tailnetlink_vip_services. A name is
+	// desired once ListenService starts for it and advertised once it is
+	// verified in the node's AdvertiseServices list.
+	vipMu         sync.Mutex
+	vipDesired    map[string]map[string]struct{}
+	vipAdvertised map[string]map[string]struct{}
+
 	dnsMu      sync.Mutex                 // protects sharedDNS and dnsPending
 	sharedDNS  map[string]*sharedDNSEntry // keyed by destName+"/"+parentDomain
 	dnsPending map[string]*dnsCreation    // in-progress creations, same key space
@@ -78,23 +85,25 @@ var closeServer = (*tsnet.Server).Close
 // VIP service in every tailnet; nil means the UI is off.
 func New(store *state.Store, logger *slog.Logger, ui http.Handler) *Manager {
 	return &Manager{
-		logger:      logger,
-		store:       store,
-		ui:          ui,
-		cfg:         &config.Config{Tailnets: map[string]config.TailnetConfig{}, Bridges: []config.BridgeRule{}},
-		servers:     make(map[string]*tsnet.Server),
-		apiClients:  make(map[string]*tsclient.Client),
-		forwarders:  make(map[string]*Forwarder),
-		dnsCleanups: make(map[string]func(bool)),
-		rules:       make(map[string]context.CancelFunc),
-		ruleDone:    make(map[string]chan struct{}),
-		ruleRemove:  make(map[string]bool),
-		webServers:  make(map[string]*http.Server),
-		nodeDirs:    make(map[string]string),
-		ephemeral:   make(map[string]bool),
-		sharedDNS:   make(map[string]*sharedDNSEntry),
-		dnsPending:  make(map[string]*dnsCreation),
-		lastPoll:    make(map[string]time.Time),
+		logger:        logger,
+		store:         store,
+		ui:            ui,
+		cfg:           &config.Config{Tailnets: map[string]config.TailnetConfig{}, Bridges: []config.BridgeRule{}},
+		servers:       make(map[string]*tsnet.Server),
+		apiClients:    make(map[string]*tsclient.Client),
+		forwarders:    make(map[string]*Forwarder),
+		dnsCleanups:   make(map[string]func(bool)),
+		rules:         make(map[string]context.CancelFunc),
+		ruleDone:      make(map[string]chan struct{}),
+		ruleRemove:    make(map[string]bool),
+		webServers:    make(map[string]*http.Server),
+		nodeDirs:      make(map[string]string),
+		ephemeral:     make(map[string]bool),
+		sharedDNS:     make(map[string]*sharedDNSEntry),
+		dnsPending:    make(map[string]*dnsCreation),
+		lastPoll:      make(map[string]time.Time),
+		vipDesired:    map[string]map[string]struct{}{},
+		vipAdvertised: map[string]map[string]struct{}{},
 	}
 }
 
@@ -111,6 +120,7 @@ func (m *Manager) SetMetrics(mt *metrics.Metrics) {
 		}
 		return counts
 	})
+	mt.TrackVIPServices(m.vipCounts)
 }
 
 // Ready returns nil once the config has been applied, every configured
@@ -499,6 +509,7 @@ func (m *Manager) startTailnet(ctx context.Context, name string, tc config.Tailn
 	m.nodeDirs[name] = dir
 	m.ephemeral[name] = tc.Ephemeral
 	m.mu.Unlock()
+	m.bindNode(name, srv)
 
 	m.store.SetTailnet(name, state.TailnetStatus{Name: tc.Tailnet, Role: name, Connected: true})
 	m.store.Log("info", fmt.Sprintf("connected to tailnet %q (%s)", name, tc.Tailnet), nil)
@@ -535,6 +546,7 @@ func (m *Manager) stopWebUI(name string, remove bool) {
 	if ok {
 		_ = ws.Close()
 	}
+	m.forgetVIP(name, uiService)
 	if remove && client != nil {
 		if err := deleteOwnedVIPService(context.Background(), client, owner, uiService); err != nil {
 			m.logger.Warn("web UI VIP: delete failed", "tailnet", name, "err", err)
@@ -569,6 +581,7 @@ func (m *Manager) stopTailnet(name string, remove bool) {
 	if !ok {
 		return
 	}
+	m.unbindNode(name, srv)
 	if remove {
 		if err := deleteOwnedVIPService(context.Background(), client, owner, uiService); err != nil {
 			m.logger.Warn("web UI VIP: delete failed", "tailnet", name, "err", err)
@@ -726,6 +739,7 @@ func (m *Manager) runRule(ctx context.Context, rule config.BridgeRule, pollInter
 			for _, dev := range devs {
 				for _, dest := range dests {
 					bridgeID := rule.Name + "/" + dest.name + "/" + dev.FQDN
+					m.forgetVIP(dest.name, ServiceName(rule.SourceTailnet, dev.FQDN, shortNameFor(rule, dev.FQDN)))
 					m.stopBridge(bridgeID, remove)
 					if remove {
 						if err := dest.rec.Delete(context.Background(), rule.SourceTailnet, dev, shortNameFor(rule, dev.FQDN)); err != nil {
@@ -800,6 +814,10 @@ func (m *Manager) handleDeviceAdded(
 		fwd := NewForwarder(dest.srv, srcSrv, vip, bridgeID, dialTimeout, m.store, m.logger)
 		fwd.rule, fwd.metrics, fwd.authz = rule.Name, m.metricsRef(), rule.Authz
 		if err := startForwarder(fwd, ctx); err != nil {
+			// The listen verified nothing, or it did and then a later port
+			// failed and the listeners were closed. Keep the name desired
+			// so the gauge shows it is not actually advertised.
+			m.dropAdvertised(dest.name, vip.ServiceName)
 			m.logger.Error("forwarder: start failed", "rule", rule.Name, "dest", dest.name, "device", dev.Name, "err", err)
 			m.store.UpsertBridge(state.BridgeEntry{
 				ID: bridgeID, RuleName: rule.Name, DestTailnet: dest.name, ServiceName: vip.ServiceName,
@@ -845,6 +863,7 @@ func (m *Manager) handleDeviceRemoved(
 	shortName := shortNameFor(rule, dev.FQDN)
 	for _, dest := range dests {
 		bridgeID := rule.Name + "/" + dest.name + "/" + dev.FQDN
+		m.forgetVIP(dest.name, ServiceName(rule.SourceTailnet, dev.FQDN, shortName))
 
 		m.mu.Lock()
 		if fwd, ok := m.forwarders[bridgeID]; ok {
@@ -1008,12 +1027,14 @@ func (m *Manager) acquireSharedDNS(ctx context.Context, destName, parentDomain s
 			dnsServer := NewDNSServer(dest.srv, dest.client, dest.tags, m.ownerID(), parentDomain, m.logger)
 			resolverIP, err := dnsServer.Start(ctx)
 			if err != nil {
+				m.forgetVIP(destName, DNSServiceName(parentDomain))
 				m.conflict(destName, err)
 				return nil, fmt.Errorf("shared DNS start: %w", err)
 			}
 			sdns := NewSplitDNSConfigurator(dest.client, parentDomain, resolverIP.String(), m.logger)
 			if err := sdns.Configure(ctx); err != nil {
 				dnsServer.Stop()
+				m.forgetVIP(destName, DNSServiceName(parentDomain))
 				_ = dnsServer.DeleteService(context.Background())
 				return nil, fmt.Errorf("split-DNS configure: %w", err)
 			}
@@ -1057,6 +1078,7 @@ func (m *Manager) releaseSharedDNS(destName, parentDomain, recordLabel string, r
 	m.dnsMu.Unlock()
 
 	entry.server.Stop()
+	m.forgetVIP(destName, DNSServiceName(parentDomain))
 	if !remove {
 		return
 	}
@@ -1187,6 +1209,7 @@ func (m *Manager) serveWebUI(ctx context.Context, tailnetName string, srv *tsnet
 
 	ln, err := listenServiceWithRetry(srv, svcName, tsnet.ServiceModeTCP{Port: 80})
 	if err != nil {
+		m.forgetVIP(tailnetName, svcName)
 		m.logger.Warn("web UI VIP: listen failed", "tailnet", tailnetName, "err", err)
 		m.store.Log("warn", fmt.Sprintf("[%s] web UI VIP listen failed: %v", tailnetName, err), nil)
 		return

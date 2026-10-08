@@ -13,11 +13,11 @@ import (
 
 func stubDNSListen(t *testing.T) {
 	t.Helper()
-	orig := listenService
-	listenService = func(*tsnet.Server, string, tsnet.ServiceMode) (net.Listener, error) {
+	orig := listenDNS
+	listenDNS = func(*tsnet.Server, string, tsnet.ServiceMode) (net.Listener, error) {
 		return net.Listen("tcp", "127.0.0.1:0")
 	}
-	t.Cleanup(func() { listenService = orig })
+	t.Cleanup(func() { listenDNS = orig })
 }
 
 // An exact dns_zone registers split-DNS for that name only, answers the

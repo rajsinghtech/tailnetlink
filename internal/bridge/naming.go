@@ -3,12 +3,8 @@ package bridge
 import (
 	"crypto/md5"
 	"fmt"
-	"net"
 	"regexp"
 	"strings"
-	"time"
-
-	"tailscale.com/tsnet"
 )
 
 var invalidChars = regexp.MustCompile(`[^a-zA-Z0-9-]`)
@@ -51,25 +47,4 @@ func sanitize(s string) string {
 	s = invalidChars.ReplaceAllString(s, "-")
 	s = strings.Trim(s, "-")
 	return s
-}
-
-// listenService is ListenService with retries. Tests replace it so DNS setup
-// can run against the fake control API without a live tsnet node.
-var listenService = listenServiceWithRetry
-
-// listenServiceWithRetry calls srv.ListenService, retrying up to 8 times on
-// etag-mismatch races that occur when concurrent goroutines update the serve config.
-func listenServiceWithRetry(srv *tsnet.Server, svcName string, mode tsnet.ServiceMode) (net.Listener, error) {
-	for attempt := range 8 {
-		ln, err := srv.ListenService(svcName, mode)
-		if err == nil {
-			return ln, nil
-		}
-		if strings.Contains(err.Error(), "etag mismatch") {
-			time.Sleep(time.Duration(attempt+1) * 150 * time.Millisecond)
-			continue
-		}
-		return nil, err
-	}
-	return nil, fmt.Errorf("listen %s: etag mismatch after retries", svcName)
 }
