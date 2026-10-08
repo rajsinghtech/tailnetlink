@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/netip"
 	"reflect"
 	"slices"
@@ -291,6 +292,27 @@ func TestReconcilerDeleteReadError(t *testing.T) {
 	}
 	if w := api.Writes(); len(w) != 0 {
 		t.Errorf("writes = %v, want none", callStrings(w))
+	}
+}
+
+func TestReconcilerDeleteRetriesAfterFailure(t *testing.T) {
+	api := fakeapi.New(t)
+	r := NewReconciler(api.Client(), []int{80}, nil, testOwner, discardLogger())
+	if _, err := r.Ensure(context.Background(), "src", testDevice(), ""); err != nil {
+		t.Fatal(err)
+	}
+	api.FailOnce(http.MethodDelete, "/vip-services/svc:tnl-src-web-1", http.StatusInternalServerError)
+	if err := r.Delete(context.Background(), "src", testDevice(), ""); err == nil {
+		t.Fatal("want the injected failure")
+	}
+	if _, ok := api.Service("svc:tnl-src-web-1"); !ok {
+		t.Fatal("failed delete removed the service from the reconciler")
+	}
+	if err := r.Delete(context.Background(), "src", testDevice(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := api.Service("svc:tnl-src-web-1"); ok {
+		t.Fatal("service still exists after the retry")
 	}
 }
 

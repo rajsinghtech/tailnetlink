@@ -719,180 +719,68 @@ func (m *Manager) runRule(ctx context.Context, rule config.BridgeRule, pollInter
 	m.logger.Info("bridge rule started", "rule", rule.Name, "source", rule.SourceTailnet, "dests", destNames, "ports", rule.Ports)
 	m.store.Log("info", fmt.Sprintf("[%s] rule started: %s→%v ports=%v", rule.Name, rule.SourceTailnet, destNames, rule.Ports), nil)
 
-	activeDevices := make(map[string]Device)
-	var mu sync.Mutex
-	var devWg sync.WaitGroup
-
-	go disc.Run(ctx)
-
-	for {
-		select {
-		case <-ctx.Done():
-			devWg.Wait() // drain in-flight handlers before cleanup
-			remove := m.removing(rule.Name)
-			mu.Lock()
-			devs := make([]Device, 0, len(activeDevices))
-			for _, dev := range activeDevices {
-				devs = append(devs, dev)
-			}
-			mu.Unlock()
-			for _, dev := range devs {
-				for _, dest := range dests {
-					bridgeID := rule.Name + "/" + dest.name + "/" + dev.FQDN
-					m.forgetVIP(dest.name, ServiceName(rule.SourceTailnet, dev.FQDN, shortNameFor(rule, dev.FQDN)))
-					m.stopBridge(bridgeID, remove)
-					if remove {
-						if err := dest.rec.Delete(context.Background(), rule.SourceTailnet, dev, shortNameFor(rule, dev.FQDN)); err != nil {
-							m.logger.Warn("reconciler: delete failed", "rule", rule.Name, "dest", dest.name, "device", dev.Name, "err", err)
-						}
-					}
-					m.store.DeleteBridge(bridgeID)
-				}
-				if remove {
-					m.store.Log("info", fmt.Sprintf("[%s] bridge removed: %s", rule.Name, dev.Name), nil)
-				}
-			}
-			if !remove {
-				m.store.Log("info", fmt.Sprintf("[%s] rule stopped; services left in place", rule.Name), nil)
-			}
+	destByName := make(map[string]destCtx, len(dests))
+	for _, dest := range dests {
+		destByName[dest.name] = dest
+	}
+	q := newReconcileQueue(reconcileWorkers, func(ctx context.Context, item qItem) error {
+		dest, ok := destByName[item.dest]
+		if !ok {
+			return fmt.Errorf("unknown dest %q", item.dest)
+		}
+		return m.converge(ctx, rule, dest, srcSrv, dialTimeout, item)
+	})
+	disc.onSnapshot = func(found map[string]Device) {
+		if ctx.Err() != nil {
 			return
-		case dev := <-disc.Added():
-			devWg.Add(1)
-			go func(d Device) {
-				defer devWg.Done()
-				m.handleDeviceAdded(ctx, rule, d, dests, srcSrv, dialTimeout, activeDevices, &mu)
-			}(dev)
-		case dev := <-disc.Removed():
-			devWg.Add(1)
-			go func(d Device) {
-				defer devWg.Done()
-				m.handleDeviceRemoved(ctx, rule, d, dests, activeDevices, &mu)
-			}(dev)
 		}
+		q.Replace(specsFor(rule, dests, found))
+	}
+	q.start(ctx)
+
+	var discWG sync.WaitGroup
+	discWG.Add(1)
+	go func() {
+		defer discWG.Done()
+		disc.Run(ctx)
+	}()
+
+	<-ctx.Done()
+	discWG.Wait()
+	q.wg.Wait()
+
+	remove := m.removing(rule.Name)
+	for _, b := range m.store.GetBridges() {
+		if b.RuleName != rule.Name {
+			continue
+		}
+		m.forgetVIP(b.DestTailnet, b.ServiceName)
+		m.stopBridge(b.ID, remove)
+		if remove {
+			destName, fqdn, ok := splitBridgeID(rule.Name, b.ID)
+			if dest, known := destByName[destName]; ok && known {
+				dev := Device{Name: b.SourceHost, FQDN: fqdn}
+				if err := dest.rec.Delete(context.Background(), rule.SourceTailnet, dev, shortNameFor(rule, fqdn)); err != nil {
+					m.logger.Warn("reconciler: delete failed", "rule", rule.Name, "dest", destName, "device", dev.Name, "err", err)
+				}
+			}
+		}
+		m.store.DeleteBridge(b.ID)
+	}
+	if !remove {
+		m.store.Log("info", fmt.Sprintf("[%s] rule stopped; services left in place", rule.Name), nil)
 	}
 }
 
-func (m *Manager) handleDeviceAdded(
-	ctx context.Context,
-	rule config.BridgeRule,
-	dev Device,
-	dests []destCtx,
-	srcSrv *tsnet.Server,
-	dialTimeout time.Duration,
-	activeDevices map[string]Device,
-	mu *sync.Mutex,
-) {
-	createdAt := time.Now()
-	shortName := shortNameFor(rule, dev.FQDN)
-	svcName := ServiceName(rule.SourceTailnet, dev.FQDN, shortName)
-	m.store.Log("info", fmt.Sprintf("[%s] provisioning bridge for %s", rule.Name, dev.Name), nil)
-
-	for _, dest := range dests {
-		bridgeID := rule.Name + "/" + dest.name + "/" + dev.FQDN
-
-		m.store.UpsertBridge(state.BridgeEntry{
-			ID: bridgeID, RuleName: rule.Name, DestTailnet: dest.name,
-			ServiceName: svcName,
-			SourceHost:  dev.Name, SourceIP: dev.IP.String(),
-			Ports: rule.Ports, Status: state.BridgeStatusPending, CreatedAt: createdAt,
-		})
-
-		vip, err := dest.rec.Ensure(ctx, rule.SourceTailnet, dev, shortName)
-		if err != nil {
-			m.conflict(dest.name, err)
-			m.logger.Error("reconciler: ensure failed", "rule", rule.Name, "dest", dest.name, "device", dev.Name, "err", err)
-			m.store.UpsertBridge(state.BridgeEntry{
-				ID: bridgeID, RuleName: rule.Name, DestTailnet: dest.name,
-				ServiceName: svcName,
-				SourceHost:  dev.Name, SourceIP: dev.IP.String(),
-				Ports: rule.Ports, Status: state.BridgeStatusError, Error: err.Error(), CreatedAt: createdAt,
-			})
-			m.store.Log("error", fmt.Sprintf("[%s] bridge failed for %s→%s: %v", rule.Name, dev.Name, dest.name, err), nil)
-			continue
-		}
-
-		fwd := NewForwarder(dest.srv, srcSrv, vip, bridgeID, dialTimeout, m.store, m.logger)
-		fwd.rule, fwd.metrics, fwd.authz = rule.Name, m.metricsRef(), rule.Authz
-		if err := startForwarder(fwd, ctx); err != nil {
-			// The listen verified nothing, or it did and then a later port
-			// failed and the listeners were closed. Keep the name desired
-			// so the gauge shows it is not actually advertised.
-			m.dropAdvertised(dest.name, vip.ServiceName)
-			m.logger.Error("forwarder: start failed", "rule", rule.Name, "dest", dest.name, "device", dev.Name, "err", err)
-			m.store.UpsertBridge(state.BridgeEntry{
-				ID: bridgeID, RuleName: rule.Name, DestTailnet: dest.name, ServiceName: vip.ServiceName,
-				SourceHost: dev.Name, SourceIP: dev.IP.String(),
-				Ports: rule.Ports, Status: state.BridgeStatusError, Error: err.Error(), CreatedAt: createdAt,
-			})
-			_ = dest.rec.Delete(context.Background(), rule.SourceTailnet, dev, shortName)
-			continue
-		}
-
-		m.store.UpsertBridge(state.BridgeEntry{
-			ID: bridgeID, RuleName: rule.Name, DestTailnet: dest.name, ServiceName: vip.ServiceName,
-			SourceHost: dev.Name, SourceIP: dev.IP.String(), DestVIP: vip.VIP.String(),
-			Ports: rule.Ports, Status: state.BridgeStatusActive, CreatedAt: createdAt,
-		})
-		m.store.Log("info", fmt.Sprintf("[%s] bridge active: %s → %s (%s)", rule.Name, dev.Name, vip.VIP, dest.name), nil)
-
-		if vip.VIP.IsValid() {
-			m.mu.Lock()
-			srcDomain := m.cfg.Tailnets[rule.SourceTailnet].Tailnet
-			m.mu.Unlock()
-			m.startDeviceDNS(ctx, bridgeID, rule.Name, srcDomain, dev.FQDN, dnsNameFor(rule, dev.FQDN), vip.VIP, dest)
-		}
-
-		m.mu.Lock()
-		m.forwarders[bridgeID] = fwd
-		m.mu.Unlock()
+// splitBridgeID parses rule/dest/fqdn. The fqdn is the remainder, so it may
+// contain slashes only if a name did; configured names do not.
+func splitBridgeID(ruleName, id string) (dest, fqdn string, ok bool) {
+	rest, found := strings.CutPrefix(id, ruleName+"/")
+	if !found {
+		return "", "", false
 	}
-
-	mu.Lock()
-	activeDevices[dev.FQDN] = dev
-	mu.Unlock()
-}
-
-func (m *Manager) handleDeviceRemoved(
-	ctx context.Context,
-	rule config.BridgeRule,
-	dev Device,
-	dests []destCtx,
-	activeDevices map[string]Device,
-	mu *sync.Mutex,
-) {
-	shortName := shortNameFor(rule, dev.FQDN)
-	for _, dest := range dests {
-		bridgeID := rule.Name + "/" + dest.name + "/" + dev.FQDN
-		m.forgetVIP(dest.name, ServiceName(rule.SourceTailnet, dev.FQDN, shortName))
-
-		m.mu.Lock()
-		if fwd, ok := m.forwarders[bridgeID]; ok {
-			fwd.Stop()
-			delete(m.forwarders, bridgeID)
-		}
-		m.mu.Unlock()
-
-		if err := dest.rec.Delete(ctx, rule.SourceTailnet, dev, shortName); err != nil {
-			m.logger.Error("reconciler: delete failed", "rule", rule.Name, "dest", dest.name, "device", dev.Name, "err", err)
-			m.store.Log("error", fmt.Sprintf("[%s] bridge cleanup failed for %s→%s: %v", rule.Name, dev.Name, dest.name, err), nil)
-		}
-
-		m.mu.Lock()
-		cleanup := m.dnsCleanups[bridgeID]
-		delete(m.dnsCleanups, bridgeID)
-		m.mu.Unlock()
-		if cleanup != nil {
-			cleanup(true)
-		}
-
-		m.store.DeleteBridge(bridgeID)
-	}
-
-	m.store.Log("info", fmt.Sprintf("[%s] bridge removed: %s", rule.Name, dev.Name), nil)
-
-	mu.Lock()
-	delete(activeDevices, dev.FQDN)
-	mu.Unlock()
+	dest, fqdn, ok = strings.Cut(rest, "/")
+	return dest, fqdn, ok && dest != "" && fqdn != ""
 }
 
 func (m *Manager) fetchAuthKey(ctx context.Context, client *tsclient.Client, tags []string, ephemeral bool) (string, error) {
