@@ -2,11 +2,111 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
   "labels": ["dependencies"],
+  "dependencyDashboard": true,
+  "baseBranchPatterns": ["main"],
+  "postUpdateOptions": ["gomodTidy"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track Go tools pinned with go run <module>@<version> in CI, the Makefile, and contributor docs",
+      "managerFilePatterns": [
+        "/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/",
+        "/(^|/)Makefile$/",
+        "/(^|/)CONTRIBUTING\\.md$/"
+      ],
+      "matchStrings": [
+        "go run (?<depName>[\\w.\\-]+(?:/[\\w.\\-]+)*?)(?:/cmd/[\\w.\\-]+)?@(?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "go"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the GoReleaser config schema major in .goreleaser.yml",
+      "managerFilePatterns": ["/(^|/)\\.goreleaser\\.ya?ml$/"],
+      "matchStrings": ["^version:\\s*(?<currentValue>\\d+)\\s*(?:\\r?\\n|$)"],
+      "depNameTemplate": "goreleaser/goreleaser",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "regex:^(?<major>\\d+)$",
+      "extractVersionTemplate": "^v(?<version>\\d+)\\.\\d+\\.\\d+$"
+    }
+  ],
   "packageRules": [
     {
+      "description": "Update indirect Go modules along with direct ones",
       "matchManagers": ["gomod"],
       "matchDepTypes": ["indirect"],
-      "enabled": false
+      "enabled": true
+    },
+    {
+      "description": "Keep Go toolchain and go directive updates enabled",
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["go"],
+      "enabled": true
+    },
+    {
+      "description": "Group and automerge non-major Go module updates",
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "go-dependencies",
+      "automerge": true
+    },
+    {
+      "description": "Group and automerge non-major Docker image updates from the Dockerfile and deploy manifests",
+      "matchManagers": ["dockerfile", "docker-compose"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "docker",
+      "automerge": true
+    },
+    {
+      "description": "Group the first Docker digest pins into one pull request",
+      "matchDatasources": ["docker"],
+      "matchUpdateTypes": ["pin", "pinDigest"],
+      "groupName": "docker-digests"
+    },
+    {
+      "description": "Pin Docker image digests",
+      "matchDatasources": ["docker"],
+      "pinDigests": true
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "actions",
+      "automerge": true
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "major-actions"
+    },
+    {
+      "description": "Group the first GitHub Action digest pins into one pull request",
+      "matchDepTypes": ["action", "workflow"],
+      "matchUpdateTypes": ["pin", "pinDigest"],
+      "groupName": "action-digests"
+    },
+    {
+      "description": "Keep the GoReleaser config schema major with the GoReleaser CLI major",
+      "matchPackageNames": ["goreleaser/goreleaser"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "goreleaser"
+    },
+    {
+      "description": "Pin GitHub Action digests",
+      "matchDepTypes": ["action", "workflow"],
+      "pinDigests": true
+    },
+    {
+      "description": "Group and automerge non-major pinned tool updates",
+      "matchManagers": ["custom.regex"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "tools",
+      "automerge": true
+    },
+    {
+      "description": "Automerge remaining minor, patch, and digest updates. Major updates stay as normal pull requests.",
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "automerge": true
     }
   ]
 }
