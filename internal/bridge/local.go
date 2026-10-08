@@ -52,6 +52,7 @@ func localBridgeID(kind, rule, dest, addr, shortName string) string {
 
 type localBridgeInfo struct {
 	bridgeID  string
+	destName  string
 	rec       *Reconciler
 	dev       Device
 	shortName string
@@ -91,10 +92,15 @@ func (m *Manager) runEndpointRule(ctx context.Context, rule config.BridgeRule, d
 		m.mu.Unlock()
 		if destSrv == nil {
 			m.logger.Error(kind+" rule: dest tailnet not connected", "rule", rule.Name, "dest", destName)
-			m.store.Log("error", fmt.Sprintf("[%s] rule failed: dest tailnet %q not connected", rule.Name, destName), nil)
-			return
+			m.store.Log("error", fmt.Sprintf("[%s] skipping dest tailnet %q: not connected", rule.Name, destName), nil)
+			continue
 		}
 		dests = append(dests, destCtx{name: destName, srv: destSrv, client: destClient, tags: destTags})
+	}
+	if len(dests) == 0 {
+		m.logger.Error(kind+" rule: no destination is connected", "rule", rule.Name)
+		m.store.Log("error", fmt.Sprintf("[%s] rule failed: no destination is connected", rule.Name), nil)
+		return
 	}
 
 	m.logger.Info(kind+" rule started", "rule", rule.Name, "sources", len(sources))
@@ -130,6 +136,7 @@ func (m *Manager) runEndpointRule(ctx context.Context, rule config.BridgeRule, d
 		for _, dest := range dests {
 			bridgeID := localBridgeID(kind, rule.Name, dest.name, src.Addr, shortName)
 			srcRec := NewReconciler(dest.client, exposePorts, dest.tags, m.ownerID(), m.logger)
+			srcRec.bridge = rule.BridgeRef(dest.name)
 
 			m.store.UpsertBridge(state.BridgeEntry{
 				ID: bridgeID, RuleName: rule.Name, DestTailnet: dest.name,
@@ -173,7 +180,7 @@ func (m *Manager) runEndpointRule(ctx context.Context, rule config.BridgeRule, d
 					return ip, nil
 				}
 			}
-			fwd.rule, fwd.metrics, fwd.authz = rule.Name, m.metricsRef(), rule.Authz
+			fwd.rule, fwd.metrics, fwd.authz = rule.Name, m.metricsRef(), m.authzFor(rule, dest.name)
 			if err := startForwarder(fwd, ctx); err != nil {
 				m.logger.Error(kind+" rule: forwarder start failed", "rule", rule.Name, "dest", dest.name, "addr", src.Addr, "err", err)
 				_ = srcRec.Delete(context.Background(), kind, syntheticDev, shortName)
@@ -199,6 +206,7 @@ func (m *Manager) runEndpointRule(ctx context.Context, rule config.BridgeRule, d
 
 			bridges = append(bridges, localBridgeInfo{
 				bridgeID:  bridgeID,
+				destName:  dest.name,
 				rec:       srcRec,
 				dev:       syntheticDev,
 				shortName: shortName,
@@ -208,16 +216,20 @@ func (m *Manager) runEndpointRule(ctx context.Context, rule config.BridgeRule, d
 
 	<-ctx.Done()
 
-	// Shutdown and restarts leave the services in place; only removing the
-	// rule from the config deletes them.
+	// Shutdown and restarts leave the services in place. Removing the rule
+	// deletes every destination's services. Removing one destination deletes
+	// only that destination's.
 	remove := m.removing(rule.Name)
+	drop := m.takeDrops(rule.Name)
 	var wg sync.WaitGroup
 	for _, lb := range bridges {
 		wg.Add(1)
 		go func(lb localBridgeInfo) {
 			defer wg.Done()
-			m.stopBridge(lb.bridgeID, remove)
-			if remove {
+			gone := remove || drop[lb.destName]
+			m.forgetVIP(lb.destName, ServiceName(kind, lb.dev.FQDN, lb.shortName))
+			m.stopBridge(lb.bridgeID, gone)
+			if gone {
 				if err := lb.rec.Delete(context.Background(), kind, lb.dev, lb.shortName); err != nil {
 					m.logger.Warn(kind+" rule: VIP delete failed", "bridge", lb.bridgeID, "err", err)
 				}

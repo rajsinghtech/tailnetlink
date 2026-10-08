@@ -226,12 +226,19 @@ func (b *Border) Compile() (*Config, error) {
 	cfg.Tailnets[src] = b.Source.tailnet(b.Node.Ephemeral)
 	cfg.Tailnets[dst] = b.Dest.tailnet(b.Node.Ephemeral)
 	for i, l := range b.Links {
-		rule, err := l.rule(src, dst, b.Authz)
+		rule, err := l.rule(src, []string{dst}, b.Authz)
 		if err != nil {
 			if l.Name == "" {
 				return nil, fmt.Errorf("links[%d]: %w", i, err)
 			}
 			return nil, fmt.Errorf("link %q: %w", l.Name, err)
+		}
+		if len(l.Local) > 0 {
+			// From is the tailnet key this link leaves. A border's key is
+			// the source tailnet. The shared-node mesh passes the bridge's
+			// from key into rule the same way, and the VIP annotation is
+			// from/dest/link.
+			rule.From = src
 		}
 		cfg.Bridges = append(cfg.Bridges, rule)
 	}
@@ -276,7 +283,11 @@ func localNeedsTailnet(sources []LocalSourceSpec) bool {
 	return false
 }
 
-func (l Link) rule(src, dst string, borderAuthz AuthzConfig) (BridgeRule, error) {
+// rule compiles one link. src is the tailnet key the link leaves: a border's
+// source key, or a mesh bridge's from key. dsts is copied so the caller can
+// reuse its slice. A local entry with via:tailnet sets SourceTailnet to src
+// because the dialer looks that field up, not From.
+func (l Link) rule(src string, dsts []string, borderAuthz AuthzConfig) (BridgeRule, error) {
 	if l.Name == "" {
 		return BridgeRule{}, errors.New("name is required")
 	}
@@ -295,15 +306,15 @@ func (l Link) rule(src, dst string, borderAuthz AuthzConfig) (BridgeRule, error)
 	case selectors > 1:
 		return BridgeRule{}, errors.New("set only one of tag, devices, services or local")
 	}
-	r := BridgeRule{Name: l.Name, DestTailnets: []string{dst}, Authz: l.Authz.Effective(borderAuthz)}
+	r := BridgeRule{Name: l.Name, DestTailnets: append([]string(nil), dsts...), Authz: l.Authz.Effective(borderAuthz)}
 	if len(l.Local) > 0 {
 		if len(l.Ports) > 0 {
 			return BridgeRule{}, errors.New("ports doesn't apply to a local link; set addr and ports on each target")
 		}
 		r.LocalSources = append([]LocalSourceSpec(nil), l.Local...)
 		if localNeedsTailnet(r.LocalSources) {
-			// The source node is where via:tailnet dials. Pod entries on the
-			// same link still dial the host network.
+			// src is the bridge's from key. Pod entries on the same link
+			// still dial the host network and leave SourceTailnet empty.
 			r.SourceTailnet = src
 		}
 		return r, nil

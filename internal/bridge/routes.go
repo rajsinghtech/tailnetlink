@@ -10,6 +10,15 @@ import (
 	"tailscale.com/tsnet"
 )
 
+// Scoped subnet acceptance lives in syncTailnetDial and installSubnetRoutes.
+// Those run after Reconcile stores the config. They change only this node's
+// userspace WireGuard allowed IPs.
+//
+// The shared-node branch has a no-op acceptNodeRoutes hook and
+// refreshAcceptedRoutes in this file. That hook is not used. Do not bring it
+// back: it would hide the scoped install, and accepting or approving routes
+// through it would change the tailnet for everyone else.
+
 // errNoSubnetRoute means no peer in the source tailnet is advertising a
 // route that covers the address.
 var errNoSubnetRoute = errors.New("no subnet route to that address")
