@@ -314,7 +314,7 @@ func (m *Manager) converge(ctx context.Context, rule config.BridgeRule, dest des
 	}
 
 	base := state.BridgeEntry{
-		ID: item.bridgeID, RuleName: rule.Name, DestTailnet: dest.name,
+		ID: item.bridgeID, RuleName: rule.Name, DestTailnet: m.tailnetLabel(dest.name),
 		ServiceName: svcName, SourceHost: dev.Name, SourceIP: dev.IP.String(),
 		Ports: slices.Clone(rule.Ports), CreatedAt: item.created,
 	}
@@ -340,7 +340,7 @@ func (m *Manager) converge(ctx context.Context, rule config.BridgeRule, dest des
 	}
 
 	fwd := NewForwarder(dest.srv, srcSrv, vip, item.bridgeID, dialTimeout, m.store, m.logger)
-	fwd.rule, fwd.metrics, fwd.authz = rule.Name, m.metricsRef(), rule.Authz
+	fwd.rule, fwd.metrics, fwd.authz = rule.Name, m.metricsRef(), m.authzFor(rule, dest.name)
 	if err := startForwarder(fwd, ctx); err != nil {
 		// Keep the VIP. The name stays desired and the queue tries again.
 		m.dropAdvertised(dest.name, vip.ServiceName)

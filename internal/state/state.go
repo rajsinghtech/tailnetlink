@@ -34,8 +34,9 @@ func New() *Store {
 // --- Domain types ---
 
 type TailnetStatus struct {
-	Name      string   `json:"name"`
-	Role      string   `json:"role"` // "source" | "dest"
+	ID        string   `json:"id"`   // config key, stable across source and dest
+	Name      string   `json:"name"` // tailnet name shown in the UI
+	Role      string   `json:"role"` // "source" | "dest", or the key when unset
 	Connected bool     `json:"connected"`
 	Devices   []Device `json:"devices"`
 	Tag       string   `json:"tag"`
@@ -121,6 +122,12 @@ const (
 // --- Tailnet methods ---
 
 func (s *Store) SetTailnet(id string, status TailnetStatus) {
+	if status.ID == "" {
+		status.ID = id
+	}
+	if status.Name == "" {
+		status.Name = id
+	}
 	s.mu.Lock()
 	s.tailnets[id] = &status
 	s.mu.Unlock()
