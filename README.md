@@ -19,7 +19,7 @@ source tailnet                         dest tailnet
 2. Spins up a [tsnet](https://pkg.go.dev/tailscale.com/tsnet) node in each tailnet.
 3. Polls the Tailscale API for devices matching the configured tag or FQDN list.
 4. Creates a Tailscale VIP service in the destination tailnet for each discovered device.
-5. Registers the tsnet node as the VIP service host and proxies TCP connections back to the source device through the source tsnet node.
+5. Registers the tsnet node as the VIP service host and proxies TCP connections back to the source device through the source tsnet node. Listens on one node run one at a time, and a listen counts only after the service is in that node's advertised set, so concurrent registrations are not lost.
 6. Optionally starts an authoritative DNS server and configures split-DNS so `{hostname}.{zone}` resolves to the VIP IP.
 
 No static auth keys are stored. The first start mints an auth key through the OAuth API; after that each node reuses its saved state, so it keeps its identity and its VIP services across restarts.
@@ -243,6 +243,7 @@ See `deploy/` for a compose example. Build locally with `make docker-build` (tag
 | Metric | Labels | |
 |---|---|---|
 | `tailnetlink_bridges` | `status` | Bridges by status (pending, active, error) |
+| `tailnetlink_vip_services` | `tailnet`, `state` | VIP services this process has started hosting (`desired`) and verified in the node's advertised set (`advertised`). A gap means a listen did not stick. |
 | `tailnetlink_connections_active` | `rule` | Connections being forwarded right now |
 | `tailnetlink_connections_total` | `rule` | Connections forwarded |
 | `tailnetlink_bytes_total` | `rule`, `direction` | Bytes forwarded; `in` is client to backend |
@@ -283,6 +284,7 @@ internal/bridge/
   dns.go                authoritative DNS server (split-DNS)
   splitdns.go           configures split-DNS on dest tailnet
   naming.go             deterministic VIP service name generation
+  listen.go             serialized VIP listens, checked against AdvertiseServices
 internal/server/        read-only HTTP API + SSE + embedded web UI
 ```
 

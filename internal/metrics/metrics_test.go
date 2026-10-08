@@ -79,6 +79,7 @@ func TestNilMetricsIsSafe(t *testing.T) {
 	m.PollDone("r", time.Second, errors.New("x"))
 	m.Conflict("t")
 	m.TrackBridges(nil, nil)
+	m.TrackVIPServices(nil)
 	if m.Registry() != nil {
 		t.Error("nil Metrics has a registry")
 	}

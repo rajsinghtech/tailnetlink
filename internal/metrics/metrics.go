@@ -9,6 +9,7 @@ package metrics
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -108,6 +109,49 @@ func (c *bridgeCollector) Collect(ch chan<- prometheus.Metric) {
 	counts := c.count()
 	for _, s := range c.statuses {
 		ch <- prometheus.MustNewConstMetric(bridgesDesc, prometheus.GaugeValue, float64(counts[s]), s)
+	}
+}
+
+// TrackVIPServices exports tailnetlink_vip_services{tailnet,state}. state is
+// desired (a listen was started) or advertised (the name was then found in
+// the node's AdvertiseServices). count is read at scrape time.
+func (m *Metrics) TrackVIPServices(count func() (desired, advertised map[string]int)) {
+	if m == nil {
+		return
+	}
+	m.reg.MustRegister(&vipCollector{count: count})
+}
+
+var vipDesc = prometheus.NewDesc(
+	"tailnetlink_vip_services",
+	"VIP services this process intends to host (desired) and has verified in AdvertiseServices (advertised).",
+	[]string{"tailnet", "state"},
+	nil,
+)
+
+type vipCollector struct {
+	count func() (desired, advertised map[string]int)
+}
+
+func (c *vipCollector) Describe(ch chan<- *prometheus.Desc) { ch <- vipDesc }
+
+func (c *vipCollector) Collect(ch chan<- prometheus.Metric) {
+	desired, advertised := c.count()
+	seen := map[string]struct{}{}
+	var names []string
+	for _, set := range []map[string]int{desired, advertised} {
+		for name := range set {
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	for _, tn := range names {
+		ch <- prometheus.MustNewConstMetric(vipDesc, prometheus.GaugeValue, float64(desired[tn]), tn, "desired")
+		ch <- prometheus.MustNewConstMetric(vipDesc, prometheus.GaugeValue, float64(advertised[tn]), tn, "advertised")
 	}
 }
 
