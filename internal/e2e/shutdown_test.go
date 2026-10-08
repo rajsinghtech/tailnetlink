@@ -16,7 +16,6 @@ func TestManagerCloseDisconnectsNodes(t *testing.T) {
 	waitVIP(t, b.dstAPI, b.serviceName("backend", ""))
 	waitVIP(t, b.dstAPI, "svc:tailnetlink")
 
-	srcBefore, dstBefore := b.src.control.InServeMap(), b.dst.control.InServeMap()
 	r.cancel()
 	cctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -26,7 +25,12 @@ func TestManagerCloseDisconnectsNodes(t *testing.T) {
 	}
 	t.Logf("closed in %v", time.Since(start).Round(time.Millisecond))
 
+	// The echo backend stays on the source control server. The destination
+	// has only the tailnetlink node, so its map count goes to zero. A node
+	// can hold two map polls for a moment while one replaces the other, so
+	// subtracting one from the earlier count reports a disconnect as a node
+	// that is still connected.
 	waitFor(t, 10*time.Second, "tailnetlink nodes off both control servers", func() bool {
-		return b.src.control.InServeMap() == srcBefore-1 && b.dst.control.InServeMap() == dstBefore-1
+		return b.src.control.InServeMap() == 1 && b.dst.control.InServeMap() == 0
 	})
 }

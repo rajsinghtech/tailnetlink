@@ -320,9 +320,9 @@ func (b *ctlBridge) sync() {
 		if tags == nil {
 			continue
 		}
-		if !slices.Equal(n.Tags, tags) {
+		tagsChanged := !slices.Equal(n.Tags, tags)
+		if tagsChanged {
 			n.Tags = slices.Clone(tags)
-			b.tn.control.UpdateNode(n)
 		}
 		caps := tailcfg.ServiceIPMappings{}
 		var routes []netip.Prefix
@@ -345,20 +345,30 @@ func (b *ctlBridge) sync() {
 		same := b.applied[n.Key] == fp
 		b.applied[n.Key] = fp
 		b.mu.Unlock()
-		if same {
+		if same && !tagsChanged {
 			continue
 		}
-		cm := tailcfg.NodeCapMap{}
-		if len(caps) > 0 {
-			vcaps := map[tailcfg.ServiceName]views.Slice[netip.Addr]{}
-			for k, v := range caps {
-				vcaps[k] = views.SliceOf(v)
+		if !same {
+			cm := tailcfg.NodeCapMap{}
+			if len(caps) > 0 {
+				vcaps := map[tailcfg.ServiceName]views.Slice[netip.Addr]{}
+				for k, v := range caps {
+					vcaps[k] = views.SliceOf(v)
+				}
+				vj, _ := json.Marshal(vcaps)
+				cm[tailcfg.NodeAttrServiceHost] = []tailcfg.RawMessage{tailcfg.RawMessage(vj)}
 			}
-			vj, _ := json.Marshal(vcaps)
-			cm[tailcfg.NodeAttrServiceHost] = []tailcfg.RawMessage{tailcfg.RawMessage(vj)}
+			// Store the VIP route before waking anyone. SetNodeCapMap and
+			// UpdateNode wake every streaming client, and SetSubnetRoutes
+			// wakes only this node. A wake that is sent first is often
+			// dropped once the buffer holds it, so the client builds one
+			// netmap without the route and then dials time out.
+			b.tn.control.SetSubnetRoutes(n.Key, routes)
+			b.tn.control.SetNodeCapMap(n.Key, cm)
 		}
-		b.tn.control.SetNodeCapMap(n.Key, cm)
-		b.tn.control.SetSubnetRoutes(n.Key, routes)
+		if tagsChanged {
+			b.tn.control.UpdateNode(n)
+		}
 	}
 }
 
