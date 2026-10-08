@@ -287,12 +287,11 @@ func echoBackend(t *testing.T, ctx context.Context, tn *tailnet, host string, po
 }
 
 // client starts a node in tn that accepts subnet routes, so it can reach
-// VIP services.
+// VIP services. RouteAll is set before Up so the first netmap can install
+// a VIP prefix that is already published.
 func client(t *testing.T, ctx context.Context, tn *tailnet, host string) node {
 	t.Helper()
-	n := tn.node(t, ctx, host)
-	acceptRoutes(t, ctx, n)
-	return n
+	return tn.startNode(t, ctx, host, true)
 }
 
 // waitVIP waits for a service to exist in api and returns its first address.

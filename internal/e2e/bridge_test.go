@@ -40,21 +40,29 @@ type ctlBridge struct {
 	hostTags map[string][]string // hostname prefix -> tags
 	nextIP   int
 	applied  map[key.NodePublic]string
-	hidden   map[string]bool
-	stop     chan struct{}
+	// wakeUntil / wakeNext replay a publish. testcontrol keeps one wake per
+	// node and drops the rest, and a map poll replaced during startup never
+	// reads the dropped one. The fingerprint would otherwise not try again,
+	// so the client dials the VIP through the kernel and times out.
+	wakeUntil map[key.NodePublic]time.Time
+	wakeNext  map[key.NodePublic]time.Time
+	hidden    map[string]bool
+	stop      chan struct{}
 }
 
 func newCtlBridge(t *testing.T, tn *tailnet) *ctlBridge {
 	t.Helper()
 	b := &ctlBridge{
-		tn:       tn,
-		services: map[string]tsclient.VIPService{},
-		splitDNS: map[string][]string{},
-		hostTags: map[string][]string{"tailnetlink-": {"tag:tailnetlink"}},
-		nextIP:   1,
-		applied:  map[key.NodePublic]string{},
-		hidden:   map[string]bool{},
-		stop:     make(chan struct{}),
+		tn:        tn,
+		services:  map[string]tsclient.VIPService{},
+		splitDNS:  map[string][]string{},
+		hostTags:  map[string][]string{"tailnetlink-": {"tag:tailnetlink"}},
+		nextIP:    1,
+		applied:   map[key.NodePublic]string{},
+		wakeUntil: map[key.NodePublic]time.Time{},
+		wakeNext:  map[key.NodePublic]time.Time{},
+		hidden:    map[string]bool{},
+		stop:      make(chan struct{}),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v2/oauth/token", b.token)
@@ -309,6 +317,30 @@ func (b *ctlBridge) syncLoop() {
 	}
 }
 
+// How long, and how often, to replay a route publish. A client that is
+// still opening its map poll when the first wake is sent keeps the netmap
+// from before the route existed.
+const (
+	routeWakeFor   = 3 * time.Second
+	routeWakeEvery = 200 * time.Millisecond
+)
+
+// keepWaking replays the current service-host publish for d. Use it after a
+// control change that is not itself a VIP publish, such as an app-cap grant.
+// The replayed map is built from control's current state, so it includes
+// that grant and any VIP route already stored.
+func (b *ctlBridge) keepWaking(d time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	until := time.Now().Add(d)
+	for _, n := range b.tn.control.AllNodes() {
+		if until.After(b.wakeUntil[n.Key]) {
+			b.wakeUntil[n.Key] = until
+		}
+		b.wakeNext[n.Key] = time.Time{}
+	}
+}
+
 // sync tags nodes and hands out service-host capabilities.
 func (b *ctlBridge) sync() {
 	b.mu.Lock()
@@ -317,6 +349,7 @@ func (b *ctlBridge) sync() {
 	b.mu.Unlock()
 	sort.Slice(svcs, func(i, j int) bool { return svcs[i].Name < svcs[j].Name })
 
+	now := time.Now()
 	for _, n := range b.tn.control.AllNodes() {
 		var tags []string
 		best := -1
@@ -351,33 +384,51 @@ func (b *ctlBridge) sync() {
 		fp := string(j) + fmt.Sprint(routes)
 		b.mu.Lock()
 		same := b.applied[n.Key] == fp
-		b.applied[n.Key] = fp
+		if !same {
+			b.applied[n.Key] = fp
+			b.wakeUntil[n.Key] = now.Add(routeWakeFor)
+			b.wakeNext[n.Key] = now.Add(routeWakeEvery)
+		}
+		due := now.Before(b.wakeUntil[n.Key]) && !now.Before(b.wakeNext[n.Key])
+		if due {
+			b.wakeNext[n.Key] = now.Add(routeWakeEvery)
+		}
 		b.mu.Unlock()
-		if same && !tagsChanged {
+		if same && !tagsChanged && !due {
 			continue
 		}
+		cm := serviceHostCap(caps)
 		if !same {
-			cm := tailcfg.NodeCapMap{}
-			if len(caps) > 0 {
-				vcaps := map[tailcfg.ServiceName]views.Slice[netip.Addr]{}
-				for k, v := range caps {
-					vcaps[k] = views.SliceOf(v)
-				}
-				vj, _ := json.Marshal(vcaps)
-				cm[tailcfg.NodeAttrServiceHost] = []tailcfg.RawMessage{tailcfg.RawMessage(vj)}
-			}
 			// Store the VIP route before waking anyone. SetNodeCapMap and
 			// UpdateNode wake every streaming client, and SetSubnetRoutes
 			// wakes only this node. A wake that is sent first is often
-			// dropped once the buffer holds it, so the client builds one
-			// netmap without the route and then dials time out.
+			// dropped once the buffer holds it, and the client then dials
+			// the VIP through the kernel until it times out.
 			b.tn.control.SetSubnetRoutes(n.Key, routes)
+			b.tn.control.SetNodeCapMap(n.Key, cm)
+		} else if due {
+			// The route is already stored. Wake again so a poll that
+			// missed the first one builds a map that includes it.
 			b.tn.control.SetNodeCapMap(n.Key, cm)
 		}
 		if tagsChanged {
 			b.tn.control.UpdateNode(n)
 		}
 	}
+}
+
+func serviceHostCap(caps tailcfg.ServiceIPMappings) tailcfg.NodeCapMap {
+	cm := tailcfg.NodeCapMap{}
+	if len(caps) == 0 {
+		return cm
+	}
+	vcaps := map[tailcfg.ServiceName]views.Slice[netip.Addr]{}
+	for k, v := range caps {
+		vcaps[k] = views.SliceOf(v)
+	}
+	vj, _ := json.Marshal(vcaps)
+	cm[tailcfg.NodeAttrServiceHost] = []tailcfg.RawMessage{tailcfg.RawMessage(vj)}
+	return cm
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

@@ -61,6 +61,16 @@ type node struct {
 
 func (tn *tailnet) node(t *testing.T, ctx context.Context, hostname string) node {
 	t.Helper()
+	return tn.startNode(t, ctx, hostname, false)
+}
+
+// startNode brings a tsnet node up. When routes is set, RouteAll is on
+// before the first netmap is applied, so a VIP prefix already in that map
+// is installed. Setting it afterwards leaves the prefix out of the
+// userspace route table until another netmap arrives, and testcontrol
+// often never sends that one.
+func (tn *tailnet) startNode(t *testing.T, ctx context.Context, hostname string, routes bool) node {
+	t.Helper()
 	s := &tsnet.Server{
 		Dir:        t.TempDir(),
 		ControlURL: tn.url,
@@ -70,6 +80,18 @@ func (tn *tailnet) node(t *testing.T, ctx context.Context, hostname string) node
 		Logf:       logger.Discard,
 	}
 	t.Cleanup(func() { s.Close() })
+	if routes {
+		if err := s.Start(); err != nil {
+			t.Fatalf("%s start: %v", hostname, err)
+		}
+		lc, err := s.LocalClient()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := lc.EditPrefs(ctx, &ipn.MaskedPrefs{RouteAllSet: true, Prefs: ipn.Prefs{RouteAll: true}}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	st, err := s.Up(ctx)
 	if err != nil {
 		t.Fatalf("%s up: %v", hostname, err)
@@ -93,11 +115,14 @@ func (tn *tailnet) makeServiceHost(t *testing.T, ctx context.Context, n node, sv
 		cm = tailcfg.NodeCapMap{}
 	}
 	cm[tailcfg.NodeAttrServiceHost] = []tailcfg.RawMessage{tailcfg.RawMessage(j)}
-	tn.control.SetNodeCapMap(n.key, cm)
+	// Store the route before the wakes. SetNodeCapMap and UpdateNode wake
+	// every poll, and a wake that loses the race is not retried.
 	tn.control.SetSubnetRoutes(n.key, []netip.Prefix{netip.PrefixFrom(vip, 32)})
+	tn.control.SetNodeCapMap(n.key, cm)
 	cur = tn.control.Node(n.key)
 	cur.Tags = append(cur.Tags, tag)
 	tn.control.UpdateNode(cur)
+	replayWake(ctx, func() { tn.control.SetNodeCapMap(n.key, cm) })
 
 	lc, err := n.srv.LocalClient()
 	if err != nil {
@@ -111,6 +136,26 @@ func (tn *tailnet) makeServiceHost(t *testing.T, ctx context.Context, n node, sv
 		_, ok := st.Self.CapMap[tailcfg.NodeAttrServiceHost]
 		return ok
 	})
+}
+
+// replayWake calls wake a few times. testcontrol drops a netmap wake when
+// a node's one-slot buffer is full and does not retry, so a poll that is
+// in the middle of starting up never sees the route.
+func replayWake(ctx context.Context, wake func()) {
+	go func() {
+		var last time.Duration
+		for _, at := range []time.Duration{100 * time.Millisecond, 400 * time.Millisecond, time.Second, 2 * time.Second} {
+			timer := time.NewTimer(at - last)
+			last = at
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+				wake()
+			}
+		}
+	}()
 }
 
 func acceptRoutes(t *testing.T, ctx context.Context, n node) {
