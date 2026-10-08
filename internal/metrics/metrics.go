@@ -10,11 +10,13 @@ package metrics
 import (
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/rajsinghtech/tailnetlink/internal/tsapi"
 )
 
 // Metrics is safe to use as a nil pointer: every method does nothing then.
@@ -26,6 +28,8 @@ type Metrics struct {
 	bytes        *prometheus.CounterVec
 	dialFailures *prometheus.CounterVec
 	apiErrors    *prometheus.CounterVec
+	apiRequests  *prometheus.CounterVec
+	apiLatency   *prometheus.HistogramVec
 	pollDuration *prometheus.HistogramVec
 	pollErrors   *prometheus.CounterVec
 	conflicts    *prometheus.CounterVec
@@ -56,6 +60,15 @@ func New() *Metrics {
 			Name: "tailnetlink_api_errors_total",
 			Help: "Tailscale API requests that failed or returned an error status (404 is not counted).",
 		}, []string{"endpoint"}),
+		apiRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "tailnetlink_api_requests_total",
+			Help: "Tailscale API attempts by endpoint and HTTP status. code is the status, or \"error\" when the attempt did not get a response. 429 is counted on its own so it can be alerted on.",
+		}, []string{"endpoint", "code"}),
+		apiLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "tailnetlink_api_request_duration_seconds",
+			Help:    "How long one Tailscale API attempt took.",
+			Buckets: prometheus.DefBuckets,
+		}, []string{"endpoint"}),
 		pollDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "tailnetlink_poll_duration_seconds",
 			Help:    "How long a discovery poll took.",
@@ -74,7 +87,7 @@ func New() *Metrics {
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.connsActive, m.connsTotal, m.bytes, m.dialFailures,
-		m.apiErrors, m.pollDuration, m.pollErrors, m.conflicts,
+		m.apiErrors, m.apiRequests, m.apiLatency, m.pollDuration, m.pollErrors, m.conflicts,
 	)
 	return m
 }
@@ -190,6 +203,24 @@ func (m *Metrics) PollDone(rule string, d time.Duration, err error) {
 	m.pollDuration.WithLabelValues(rule).Observe(d.Seconds())
 	if err != nil {
 		m.pollErrors.WithLabelValues(rule).Inc()
+	}
+}
+
+// ObserveAPI records one admin API attempt, including retries. A nil
+// Metrics ignores it.
+func (m *Metrics) ObserveAPI(a tsapi.APIAttempt) {
+	if m == nil {
+		return
+	}
+	code := "error"
+	if a.Err == nil {
+		code = strconv.Itoa(a.Code)
+	}
+	ep := Endpoint(a.Path)
+	m.apiRequests.WithLabelValues(ep, code).Inc()
+	m.apiLatency.WithLabelValues(ep).Observe(a.Duration.Seconds())
+	if a.Err != nil || (a.Code >= 400 && a.Code != http.StatusNotFound) {
+		m.apiErrors.WithLabelValues(ep).Inc()
 	}
 }
 
