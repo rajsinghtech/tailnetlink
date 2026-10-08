@@ -1,7 +1,6 @@
 package e2e
 
 import (
-	"fmt"
 	"net"
 	"net/netip"
 	"os"
@@ -69,7 +68,7 @@ func TestMeshBridgeViaTailnet(t *testing.T) {
 	beforeWork := controlSnap(t, work)
 
 	path := filepath.Join(t.TempDir(), "tailnetlink.json")
-	bridge := fmt.Sprintf(`{"from":"home","to":["work"],"links":[{
+	bridge := `{"from":"home","to":["work"],"links":[{
 		"name":"db",
 		"local":[{
 			"addr":"app.internal.example.com",
@@ -78,7 +77,7 @@ func TestMeshBridgeViaTailnet(t *testing.T) {
 			"short_name":"db",
 			"ports":[8080]
 		}]
-	}]}`)
+	}]}`
 	body := g.meshJSON([]string{"home", "work"}, bridge)
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
