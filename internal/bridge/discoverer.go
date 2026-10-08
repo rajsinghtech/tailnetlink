@@ -40,6 +40,9 @@ type Discoverer struct {
 	logger   *slog.Logger
 	warnFn   func(string)               // called with user-facing warning messages (e.g. "no match for tag")
 	onPoll   func(time.Duration, error) // called after every poll, if set
+	// onSnapshot, when set, receives the full desired set keyed by FQDN
+	// after a poll that produced one. Add and remove events are not sent.
+	onSnapshot func(map[string]Device)
 
 	current map[string]Device // keyed by node ID or service name
 	added   chan Device
@@ -197,7 +200,7 @@ func (d *Discoverer) pollDevices(ctx context.Context) error {
 		d.logger.Info("discoverer: poll", "tag", d.tag, "total_devices", len(devices), "matched_devices", len(found)-matchedSvcs, "matched_services", matchedSvcs)
 	}
 
-	d.diffAndNotify(ctx, found, "device/service")
+	d.commit(ctx, found, "device/service")
 	return nil
 }
 
@@ -227,8 +230,28 @@ func (d *Discoverer) pollServices(ctx context.Context) error {
 	}
 
 	d.logger.Info("discoverer: poll (service mode)", "wanted", len(d.services), "online", len(found))
-	d.diffAndNotify(ctx, found, "vip service")
+	d.commit(ctx, found, "vip service")
 	return nil
+}
+
+// commit publishes found. With a snapshot consumer the whole set is the
+// desired state, keyed by FQDN so a re-registered node (new id, same name)
+// is an update rather than a removal plus an add. Without one, the
+// per-event channels are used and tests can read them.
+func (d *Discoverer) commit(ctx context.Context, found map[string]Device, kind string) {
+	if d.onSnapshot == nil {
+		d.diffAndNotify(ctx, found, kind)
+		return
+	}
+	d.current = found
+	if ctx.Err() != nil {
+		return
+	}
+	snap := make(map[string]Device, len(found))
+	for _, dev := range found {
+		snap[dev.FQDN] = dev
+	}
+	d.onSnapshot(snap)
 }
 
 // diffAndNotify announces what changed between the last poll and found. It

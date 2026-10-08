@@ -18,7 +18,7 @@ source tailnet                         dest tailnet
 1. Authenticates to each tailnet with an OAuth client secret or a workload identity token (scopes: `devices:core:read`, `auth_keys`, `services`, `dns`).
 2. Spins up a [tsnet](https://pkg.go.dev/tailscale.com/tsnet) node in each tailnet.
 3. Polls the Tailscale API for devices matching the configured tag or FQDN list.
-4. Creates a Tailscale VIP service in the destination tailnet for each discovered device.
+4. Creates a Tailscale VIP service in the destination tailnet for each discovered device. Discovery publishes the set of names that should exist. A fixed pool of workers makes the destination match that set, one service name at a time, and retries failures with exponential backoff. A device that comes back with the same name keeps its VIP.
 5. Registers the tsnet node as the VIP service host and proxies TCP connections back to the source device through the source tsnet node. Listens on one node run one at a time, and a listen counts only after the service is in that node's advertised set, so concurrent registrations are not lost.
 6. Optionally starts an authoritative DNS server and configures split-DNS so `{hostname}.{zone}` resolves to the VIP IP.
 
@@ -295,6 +295,7 @@ internal/state/         in-memory state store + SSE pub/sub
 internal/bridge/
   bridge.go             Manager — reconcile loop, tailnet lifecycle
   discoverer.go         polls Tailscale API for matching devices
+  queue.go              desired-state reconcile queue and worker pool
   reconciler.go         creates/deletes VIP services in dest tailnet
   forwarder.go          TCP proxy: VIP listener → source device
   dns.go                authoritative DNS server (split-DNS)
