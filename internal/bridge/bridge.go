@@ -957,17 +957,6 @@ func shortNameFor(rule config.BridgeRule, fqdn string) string {
 	return ""
 }
 
-// parseHostname splits a full DNS hostname into (parentDomain, recordLabel).
-// "ai.example.ts.net" → ("example.ts.net", "ai")
-// "ai" (bare)         → ("ai", "@")
-func parseHostname(dnsName string) (parentDomain, recordLabel string) {
-	zone, label, err := config.SplitHost(dnsName, "")
-	if err != nil {
-		return dnsName, "@"
-	}
-	return zone, label
-}
-
 type sharedDNSEntry struct {
 	server *DNSServer
 	sdns   *SplitDNSConfigurator
