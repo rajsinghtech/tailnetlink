@@ -164,8 +164,12 @@ func run(args []string, stdout io.Writer, sig <-chan os.Signal) int {
 	case <-ctx.Done():
 	case err := <-srvErr:
 		running--
-		logger.Error("server failed", "err", err)
-		code = 1
+		// A listener that stopped because shutdown already cancelled ctx
+		// returns nil. That is not a failure; only a real error is.
+		if err != nil {
+			logger.Error("server failed", "err", err)
+			code = 1
+		}
 		cancel()
 	}
 
