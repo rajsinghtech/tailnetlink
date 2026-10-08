@@ -55,14 +55,18 @@ type sourcePoller struct {
 	have        bool
 	fetched     time.Time
 	fetchedFull bool
-	fetchedTags []string
-	devices     []tsclient.Device
-	services    []tsclient.VIPService
-	err         error
-	dur         time.Duration
+	// fetchedServices is whether that poll listed VIP services. A later
+	// tag or service link cannot reuse a device-only fetch.
+	fetchedServices bool
+	fetchedTags     []string
+	devices         []tsclient.Device
+	services        []tsclient.VIPService
+	err             error
+	dur             time.Duration
 
 	ctx       context.Context
 	cancel    context.CancelFunc
+	done      chan struct{} // closed when loop returns
 	started   bool
 	booting   bool
 	polling   bool
@@ -90,6 +94,7 @@ func (m *Manager) sharedPoller(name string, client *tsclient.Client, interval ti
 		subs:   map[*Discoverer]struct{}{},
 		ctx:    ctx,
 		cancel: cancel,
+		done:   make(chan struct{}),
 	}
 	m.pollers[name] = p
 	return p
@@ -98,8 +103,10 @@ func (m *Manager) sharedPoller(name string, client *tsclient.Client, interval ti
 func (p *sourcePoller) subscribe(d *Discoverer) {
 	p.mu.Lock()
 	p.subs[d] = struct{}{}
-	tags, full, _, _ := p.planLocked()
-	fresh := p.have && p.err == nil && time.Since(p.fetched) < p.base && covers(p.fetchedTags, p.fetchedFull, tags, full)
+	tags, full, _, needServices := p.planLocked()
+	fresh := p.have && p.err == nil && time.Since(p.fetched) < p.base &&
+		covers(p.fetchedTags, p.fetchedFull, tags, full) &&
+		(!needServices || p.fetchedServices)
 	devs, svcs, err, dur := p.devices, p.services, p.err, p.dur
 	start := !p.started
 	if start {
@@ -155,6 +162,11 @@ func (p *sourcePoller) unsubscribe(d *Discoverer) {
 		return
 	}
 	p.cancel()
+	// The loop reads startJitter and may still be inside a poll. Wait so a
+	// caller that then swaps those hooks does not race the goroutine.
+	if p.done != nil {
+		<-p.done
+	}
 	p.m.mu.Lock()
 	if p.m.pollers[p.name] == p {
 		delete(p.m.pollers, p.name)
@@ -163,6 +175,7 @@ func (p *sourcePoller) unsubscribe(d *Discoverer) {
 }
 
 func (p *sourcePoller) loop() {
+	defer close(p.done)
 	if d := startJitter(p.base); d > 0 {
 		t := time.NewTimer(d)
 		select {
@@ -232,8 +245,9 @@ func (p *sourcePoller) poll() {
 	p.mu.Lock()
 	p.devices, p.services, p.err, p.dur, p.fetched, p.have = devs, svcs, err, dur, time.Now(), true
 	p.fetchedFull, p.fetchedTags = fullDevices, append([]string(nil), tags...)
-	newTags, newFull, _, _ := p.planLocked()
-	if !covers(tags, fullDevices, newTags, newFull) {
+	p.fetchedServices = err == nil && needServices
+	newTags, newFull, _, newServices := p.planLocked()
+	if !covers(tags, fullDevices, newTags, newFull) || (newServices && !needServices) {
 		p.pollAgain = true
 	}
 	subs := make([]*Discoverer, 0, len(p.subs))

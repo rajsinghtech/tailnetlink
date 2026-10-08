@@ -170,6 +170,34 @@ func TestServiceModeSkipsTheDeviceList(t *testing.T) {
 	}
 }
 
+// A device-mode link does not list services. A tag link added later on the
+// same tailnet has to fetch them instead of reusing that device-only poll
+// for the rest of the interval.
+func TestTagLinkAfterDeviceLinkListsServices(t *testing.T) {
+	tm := newTestManager(t)
+	tm.src.SetDevices([]tsclient.Device{devNamed(0, "tag:other")})
+	tm.src.PutService(tsclient.VIPService{Name: "svc:extra", Addrs: []string{"100.100.1.1"}, Tags: []string{"tag:web"}})
+	tm.startRule(t, config.BridgeRule{
+		Name: "dev", SourceTailnet: "src", DestTailnets: []string{"dest"},
+		SourceDevices: []config.DeviceSpec{{FQDN: "h0.src.example"}},
+		Ports:         []int{80},
+	}, time.Hour)
+	waitFor(t, 5*time.Second, "device bridge", func() bool {
+		a, _, _ := bridgeCounts(tm.m.store)
+		return a == 1
+	})
+	if got := listCalls(t, tm, "/vip-services"); got != 0 {
+		t.Fatalf("device-only link listed services %d times", got)
+	}
+	tag := webRule()
+	tag.Name = "tagged"
+	tm.startRule(t, tag, time.Hour)
+	waitFor(t, 5*time.Second, "tagged service exported", func() bool {
+		_, ok := tm.dest.Service("svc:tnl-src-extra")
+		return ok
+	})
+}
+
 func devNamed(i int, tag string) tsclient.Device {
 	host := "h" + string(rune('0'+i))
 	return tsclient.Device{
