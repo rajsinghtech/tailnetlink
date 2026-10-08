@@ -328,6 +328,48 @@ func TestReconcilerDeleteError(t *testing.T) {
 	}
 }
 
+func TestReconcilerBridgeConflictDoesNotOverwrite(t *testing.T) {
+	api := fakeapi.New(t)
+	first := NewReconciler(api.Client(), []int{443}, []string{"tag:tailnetlink"}, testOwner, discardLogger())
+	first.bridge = "home/work/api"
+	if _, err := first.Ensure(context.Background(), "home", testDevice(), "billing"); err != nil {
+		t.Fatal(err)
+	}
+	before, ok := api.Service("svc:billing")
+	if !ok || before.Annotations[annotationBridge] != "home/work/api" || before.Annotations[annotationOwner] != testOwner {
+		t.Fatalf("created = %+v", before)
+	}
+	second := NewReconciler(api.Client(), []int{80}, nil, testOwner, discardLogger())
+	second.bridge = "partner/work/billing"
+	_, err := second.Ensure(context.Background(), "partner", testDevice(), "billing")
+	var ce *ConflictError
+	if !errors.As(err, &ce) || !strings.Contains(ce.Error(), "home/work/api") {
+		t.Fatalf("err = %v, want a bridge conflict", err)
+	}
+	if !errors.Is(err, ErrNameConflict) {
+		t.Fatal("conflict is not ErrNameConflict")
+	}
+	after, _ := api.Service("svc:billing")
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("service changed:\n got %+v\nwant %+v", after, before)
+	}
+	if err := second.Delete(context.Background(), "partner", testDevice(), "billing"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := api.Service("svc:billing"); !ok {
+		t.Fatal("delete of the other bridge removed the service")
+	}
+	if err := deleteOwnedBridge(context.Background(), api.Client(), testOwner, "partner/work/billing", "svc:billing"); !errors.Is(err, ErrNameConflict) {
+		t.Fatalf("direct delete err = %v", err)
+	}
+	if err := first.Delete(context.Background(), "home", testDevice(), "billing"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := api.Service("svc:billing"); ok {
+		t.Fatal("owning bridge did not delete its service")
+	}
+}
+
 func TestConflictErrorMessage(t *testing.T) {
 	for _, tc := range []struct {
 		err  *ConflictError

@@ -59,6 +59,9 @@ type Config struct {
 	// DNSDisabled turns off the DNS VIP and split-DNS (border dns.enabled
 	// false).
 	DNSDisabled bool `json:"dns_disabled,omitempty"`
+	// SharedNodes is true for a mesh: one node per tailnet key, used both
+	// to dial and to host VIPs. A border leaves it false.
+	SharedNodes bool `json:"shared_nodes,omitempty"`
 	// AuthKeyExpiry is how long the auth keys minted for new nodes last.
 	AuthKeyExpiry Duration `json:"auth_key_expiry"`
 }

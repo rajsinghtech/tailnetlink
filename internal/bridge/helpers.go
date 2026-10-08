@@ -60,9 +60,39 @@ func (e *ConflictError) Error() string {
 
 func (e *ConflictError) Is(target error) bool { return target == ErrNameConflict }
 
-// ownedBy reports whether svc carries owner's exact owner annotation.
-func ownedBy(svc *tsclient.VIPService, owner string) bool {
-	return owner != "" && svc.Annotations[annotationOwner] == owner
+// ownedBy reports whether svc belongs to owner. With bridge set, a service
+// that already names a different bridge is not ours to change. An empty
+// bridge annotation still matches, so a service this process created before
+// bridge ids were written can be updated by the bridge that owns that name.
+// An empty bridge argument ignores the bridge annotation. Prune, the UI and
+// DNS use that form and may touch any service this instance owns.
+func ownedBy(svc *tsclient.VIPService, owner, bridge string) bool {
+	if svc == nil || owner == "" || svc.Annotations[annotationOwner] != owner {
+		return false
+	}
+	if bridge == "" {
+		return true
+	}
+	got := svc.Annotations[annotationBridge]
+	return got == "" || got == bridge
+}
+
+// conflictOwner is the Owner string on a ConflictError. When the existing
+// service names a bridge, that id is included. A service with no bridge
+// annotation keeps the owner value alone, including empty.
+func conflictOwner(svc *tsclient.VIPService) string {
+	if svc == nil {
+		return ""
+	}
+	owner := svc.Annotations[annotationOwner]
+	bridge := svc.Annotations[annotationBridge]
+	if bridge == "" {
+		return owner
+	}
+	if owner == "" {
+		return "bridge " + bridge
+	}
+	return owner + " bridge " + bridge
 }
 
 // ensureVIPService creates svc, or updates it if it already exists and is
@@ -73,11 +103,12 @@ func ensureVIPService(ctx context.Context, client *tsclient.Client, owner string
 	if owner == "" {
 		return nil, errors.New("ensure VIP service: no instance id")
 	}
+	wantBridge := svc.Annotations[annotationBridge]
 	existing, err := client.VIPServices().Get(ctx, svc.Name)
 	switch {
 	case err == nil:
-		if !ownedBy(existing, owner) {
-			return nil, &ConflictError{Service: svc.Name, Owner: existing.Annotations[annotationOwner]}
+		if !ownedBy(existing, owner, wantBridge) {
+			return nil, &ConflictError{Service: svc.Name, Owner: conflictOwner(existing)}
 		}
 		svc.Addrs = existing.Addrs
 	case tsclient.IsNotFound(err):
@@ -88,6 +119,11 @@ func ensureVIPService(ctx context.Context, client *tsclient.Client, owner string
 	maps.Copy(annotations, svc.Annotations)
 	annotations[annotationManaged] = "true"
 	annotations[annotationOwner] = owner
+	if wantBridge == "" {
+		delete(annotations, annotationBridge)
+	} else {
+		annotations[annotationBridge] = wantBridge
+	}
 	svc.Annotations = annotations
 	if err := client.VIPServices().CreateOrUpdate(ctx, svc); err != nil {
 		return nil, fmt.Errorf("create/update VIP service %q: %w", svc.Name, err)
@@ -109,8 +145,31 @@ func deleteOwnedVIPService(ctx context.Context, client *tsclient.Client, owner, 
 		return nil
 	case err != nil:
 		return fmt.Errorf("get VIP service %q: %w", name, err)
-	case !ownedBy(existing, owner):
-		return &ConflictError{Service: name, Owner: existing.Annotations[annotationOwner]}
+	case !ownedBy(existing, owner, ""):
+		return &ConflictError{Service: name, Owner: conflictOwner(existing)}
+	}
+	if err := client.VIPServices().Delete(ctx, name); err != nil && !tsclient.IsNotFound(err) {
+		return fmt.Errorf("delete VIP service %q: %w", name, err)
+	}
+	return nil
+}
+
+// deleteOwnedBridge deletes name only when owner and bridge still match.
+// An empty bridge falls back to the owner check, which is what prune uses.
+// A service owned by this instance but published by a different bridge is
+// left in place.
+func deleteOwnedBridge(ctx context.Context, client *tsclient.Client, owner, bridge, name string) error {
+	if bridge == "" {
+		return deleteOwnedVIPService(ctx, client, owner, name)
+	}
+	existing, err := client.VIPServices().Get(ctx, name)
+	switch {
+	case tsclient.IsNotFound(err):
+		return nil
+	case err != nil:
+		return fmt.Errorf("get VIP service %q: %w", name, err)
+	case !ownedBy(existing, owner, bridge):
+		return &ConflictError{Service: name, Owner: conflictOwner(existing)}
 	}
 	if err := client.VIPServices().Delete(ctx, name); err != nil && !tsclient.IsNotFound(err) {
 		return fmt.Errorf("delete VIP service %q: %w", name, err)

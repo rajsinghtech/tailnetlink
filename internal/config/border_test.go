@@ -318,7 +318,6 @@ func TestParseViaTailnet(t *testing.T) {
 		t.Fatalf("pod link = %+v", cfg.Bridges[0])
 	}
 }
-
 func sideJSON(tailnet, id string, extra string) string {
 	s := fmt.Sprintf(`"tailnet": %q, "oauth": {"client_id": %q, "client_secret_file": "/run/s"}, "tags": ["tag:tailnetlink"]`, tailnet, id)
 	if extra != "" {

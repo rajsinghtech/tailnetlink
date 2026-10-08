@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rajsinghtech/tailnetlink/internal/config"
+	"github.com/rajsinghtech/tailnetlink/internal/state"
 	tsclient "tailscale.com/client/tailscale/v2"
 )
 
@@ -66,10 +67,23 @@ func TestSharedDiscoveryOneListPerTailnet(t *testing.T) {
 		rule.Ports = []int{443 + i}
 		tm.startRule(t, rule, time.Hour)
 	}
-	waitFor(t, 5*time.Second, "every link active", func() bool {
-		a, _, _ := bridgeCounts(tm.m.store)
-		return a == 3*5 // 4 devices + 1 service, three links
+	// The three links discover the same names, so they want the same VIP
+	// services. The first bridge to claim a name owns it. The others stop
+	// with a conflict instead of overwriting it. Every link still consumes
+	// the one shared poll.
+	waitFor(t, 5*time.Second, "every link settled", func() bool {
+		a, e, p := bridgeCounts(tm.m.store)
+		return p == 0 && a+e == 3*5
 	})
+	active, errs, _ := bridgeCounts(tm.m.store)
+	if active < 5 || errs == 0 {
+		t.Fatalf("active=%d errors=%d, want the first bridge to own each name and the others to conflict", active, errs)
+	}
+	for _, b := range tm.m.store.GetBridges() {
+		if b.Status == state.BridgeStatusError && !strings.Contains(b.Error, "conflict") {
+			t.Errorf("bridge %s error = %s, want a name conflict", b.ID, b.Error)
+		}
+	}
 	if got := listCalls(t, tm, "/devices"); got != 1 {
 		t.Fatalf("device lists = %d, want 1 for 3 links", got)
 	}
@@ -154,6 +168,34 @@ func TestServiceModeSkipsTheDeviceList(t *testing.T) {
 	if got := listCalls(t, tm, "/vip-services"); got != 1 {
 		t.Fatalf("service lists = %d, want 1", got)
 	}
+}
+
+// A device-mode link does not list services. A tag link added later on the
+// same tailnet has to fetch them instead of reusing that device-only poll
+// for the rest of the interval.
+func TestTagLinkAfterDeviceLinkListsServices(t *testing.T) {
+	tm := newTestManager(t)
+	tm.src.SetDevices([]tsclient.Device{devNamed(0, "tag:other")})
+	tm.src.PutService(tsclient.VIPService{Name: "svc:extra", Addrs: []string{"100.100.1.1"}, Tags: []string{"tag:web"}})
+	tm.startRule(t, config.BridgeRule{
+		Name: "dev", SourceTailnet: "src", DestTailnets: []string{"dest"},
+		SourceDevices: []config.DeviceSpec{{FQDN: "h0.src.example"}},
+		Ports:         []int{80},
+	}, time.Hour)
+	waitFor(t, 5*time.Second, "device bridge", func() bool {
+		a, _, _ := bridgeCounts(tm.m.store)
+		return a == 1
+	})
+	if got := listCalls(t, tm, "/vip-services"); got != 0 {
+		t.Fatalf("device-only link listed services %d times", got)
+	}
+	tag := webRule()
+	tag.Name = "tagged"
+	tm.startRule(t, tag, time.Hour)
+	waitFor(t, 5*time.Second, "tagged service exported", func() bool {
+		_, ok := tm.dest.Service("svc:tnl-src-extra")
+		return ok
+	})
 }
 
 func devNamed(i int, tag string) tsclient.Device {

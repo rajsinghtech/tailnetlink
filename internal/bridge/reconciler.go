@@ -113,7 +113,7 @@ func (r *Reconciler) Delete(ctx context.Context, srcTailnet string, dev Device, 
 	delete(r.services, svcName)
 	r.mu.Unlock()
 
-	if err := deleteOwnedVIPService(ctx, r.client, r.owner, svcName); err != nil {
+	if err := deleteOwnedBridge(ctx, r.client, r.owner, r.bridge, svcName); err != nil {
 		// Put it back so a later Delete tries the API again. Dropping it
 		// here made one failed delete look like success forever.
 		r.mu.Lock()

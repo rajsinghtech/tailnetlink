@@ -46,6 +46,7 @@ type Manager struct {
 
 	scopes      map[string]*nodeScope    // tailnet name -> scoped subnet routes
 	servers     map[string]*tsnet.Server // keyed by tailnet name
+	nodeStarts  map[string]int           // how many times each tailnet's node has been started
 	apiClients  map[string]*tsclient.Client
 	forwarders  map[string]*Forwarder         // keyed by bridge entry ID (rule/dest/fqdn)
 	dnsCleanups map[string]func(remove bool)  // keyed by bridge entry ID; tears down per-device DNS
@@ -94,6 +95,7 @@ func New(store *state.Store, logger *slog.Logger, ui http.Handler) *Manager {
 		ui:            ui,
 		cfg:           &config.Config{Tailnets: map[string]config.TailnetConfig{}, Bridges: []config.BridgeRule{}},
 		servers:       make(map[string]*tsnet.Server),
+		nodeStarts:    make(map[string]int),
 		apiClients:    make(map[string]*tsclient.Client),
 		forwarders:    make(map[string]*Forwarder),
 		dnsCleanups:   make(map[string]func(bool)),
@@ -128,6 +130,21 @@ func (m *Manager) SetMetrics(mt *metrics.Metrics) {
 		return counts
 	})
 	mt.TrackVIPServices(m.vipCounts)
+	mt.TrackNodes(func() map[string]float64 {
+		out := map[string]float64{}
+		for _, tn := range m.store.GetStatus().Tailnets {
+			label := tn.Name
+			if label == "" {
+				label = tn.ID
+			}
+			if tn.Connected {
+				out[label] = 1
+			} else {
+				out[label] = 0
+			}
+		}
+		return out
+	})
 }
 
 // Ready is process-wide. It returns nil once the config has been applied,
@@ -148,6 +165,9 @@ func (m *Manager) Ready() error {
 	defer m.mu.Unlock()
 	if !m.applied {
 		return errors.New("config not applied yet")
+	}
+	if m.cfg != nil && m.cfg.SharedNodes {
+		return m.readySharedLocked()
 	}
 	var dests, upDests int
 	for _, name := range slices.Sorted(maps.Keys(m.cfg.Tailnets)) {
@@ -190,6 +210,79 @@ func (m *Manager) Ready() error {
 		}
 	}
 	return nil
+}
+
+// readySharedLocked is readiness for a mesh. The caller holds m.mu.
+//
+// The process is ready when at least one bridge is fully up. A bridge is
+// fully up when its source node is connected (local links have no source),
+// at least one destination node is connected, and a non-local link has
+// polled within three poll intervals. A destination that has already failed
+// does not block a destination that is up. A destination that is still
+// starting does not block a different bridge that is already fully up, and
+// it does not block the same bridge when another of its destinations is up.
+// With no bridge fully up, the first concrete reason is returned.
+func (m *Manager) readySharedLocked() error {
+	poll := m.cfg.PollInterval.Duration
+	if poll <= 0 {
+		poll = 30 * time.Second
+	}
+	var reasons []string
+	up := 0
+	for _, rule := range m.cfg.Bridges {
+		ok, why := m.bridgeUpLocked(rule, poll)
+		if ok {
+			up++
+			continue
+		}
+		if why != "" {
+			reasons = append(reasons, why)
+		}
+	}
+	if up > 0 {
+		return nil
+	}
+	if len(reasons) > 0 {
+		return errors.New(reasons[0])
+	}
+	return errors.New("no bridge is up")
+}
+
+func (m *Manager) bridgeUpLocked(rule config.BridgeRule, poll time.Duration) (bool, string) {
+	if src := rule.SourceTailnet; src != "" && m.servers[src] == nil {
+		return false, fmt.Sprintf("tailnet %q is not connected", src)
+	}
+	destUp := 0
+	pending := ""
+	for _, dest := range rule.DestTailnets {
+		if m.servers[dest] != nil {
+			destUp++
+			continue
+		}
+		if _, failed := m.tailnetErr[dest]; failed {
+			continue
+		}
+		if pending == "" {
+			pending = fmt.Sprintf("tailnet %q is not connected", dest)
+		}
+	}
+	if destUp == 0 {
+		if pending != "" {
+			return false, pending
+		}
+		return false, "no destination tailnet is connected"
+	}
+	if len(rule.LocalSources) > 0 {
+		return true, ""
+	}
+	last, ok := m.lastPoll[rule.Name]
+	if !ok {
+		return false, fmt.Sprintf("rule %q has not polled yet", rule.Name)
+	}
+	if age := time.Since(last); age > 3*poll {
+		return false, fmt.Sprintf("rule %q last polled %s ago", rule.Name, age.Round(time.Second))
+	}
+	return true, ""
 }
 
 func (m *Manager) pollDone(rule string, d time.Duration, err error) {
@@ -297,29 +390,46 @@ func (m *Manager) Reconcile(ctx context.Context, newCfg *config.Config) {
 		m.mu.Unlock()
 	}
 
+	newByName := make(map[string]config.BridgeRule, len(newCfg.Bridges))
+	for _, r := range newCfg.Bridges {
+		newByName[r.Name] = r
+	}
+	oldByName := make(map[string]config.BridgeRule, len(old.Bridges))
+	for _, r := range old.Bridges {
+		oldByName[r.Name] = r
+	}
+
 	// ── Tailnets ─────────────────────────────────────────────────────────────
 
 	// A tailnet whose config changed is restarted: its rules stop and come
 	// back, and nothing is deleted. A tailnet that left the config is removed:
 	// its rules delete what they own first, while the tailnet is still
-	// reachable.
+	// reachable. A rule that is leaving with that tailnet is deleted in full.
+	// Stopping it only for the dropped destination would leave its other
+	// destinations behind, because a rule goroutine only runs its cleanup once.
 	for name, oldTC := range old.Tailnets {
 		newTC, still := newCfg.Tailnets[name]
 		if still && reflect.DeepEqual(oldTC, newTC) {
 			continue
 		}
 		for _, rule := range old.Bridges {
-			switch {
-			case rule.SourceTailnet == name:
-				m.stopRule(rule.Name, !still)
-			case slices.Contains(rule.DestTailnets, name):
-				// Dropping one destination deletes only that destination's
-				// services. The rule restarts and keeps the others.
-				if !still {
-					m.markDropDest(rule.Name, name)
-				}
-				m.stopRule(rule.Name, false)
+			if !ruleTouches(rule, name) {
+				continue
 			}
+			if _, ruleStays := newByName[rule.Name]; !ruleStays {
+				m.stopRule(rule.Name, true)
+				continue
+			}
+			if rule.SourceTailnet == name || rule.From == name {
+				m.stopRule(rule.Name, !still)
+				continue
+			}
+			// Dropping one destination deletes only that destination's
+			// services. The rule restarts and keeps the others.
+			if !still {
+				m.markDropDest(rule.Name, name)
+			}
+			m.stopRule(rule.Name, false)
 		}
 		m.stopTailnet(name, !still)
 		m.mu.Lock()
@@ -355,22 +465,13 @@ func (m *Manager) Reconcile(ctx context.Context, newCfg *config.Config) {
 	// into it. Nothing is deleted: the destinations already serving stay.
 	for _, name := range broughtUp {
 		for _, rule := range newCfg.Bridges {
-			if rule.SourceTailnet == name || slices.Contains(rule.DestTailnets, name) {
+			if ruleTouches(rule, name) {
 				m.stopRule(rule.Name, false)
 			}
 		}
 	}
 
 	// ── Bridge rules ─────────────────────────────────────────────────────────
-
-	newByName := make(map[string]config.BridgeRule, len(newCfg.Bridges))
-	for _, r := range newCfg.Bridges {
-		newByName[r.Name] = r
-	}
-	oldByName := make(map[string]config.BridgeRule, len(old.Bridges))
-	for _, r := range old.Bridges {
-		oldByName[r.Name] = r
-	}
 
 	// A changed rule restarts without deleting anything; a removed rule
 	// deletes the services it owns.
@@ -425,6 +526,11 @@ func (m *Manager) Reconcile(ctx context.Context, newCfg *config.Config) {
 	for _, name := range names {
 		m.syncTailnetDial(ctx, name)
 	}
+}
+
+// ruleTouches reports whether rule dials from name or publishes into it.
+func ruleTouches(rule config.BridgeRule, name string) bool {
+	return rule.SourceTailnet == name || rule.From == name || slices.Contains(rule.DestTailnets, name)
 }
 
 // RouteAll reports whether the node was told to accept every subnet route.
@@ -555,7 +661,18 @@ func hasNodeState(dir string) bool {
 	return err == nil && fi.Size() > 0
 }
 
+// NodeStarts reports how many times this process has started the node for
+// name. A hot reload that keeps the node does not increase it.
+func (m *Manager) NodeStarts(name string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.nodeStarts[name]
+}
+
 func (m *Manager) startTailnet(ctx context.Context, name string, tc config.TailnetConfig, stateDir string) error {
+	m.mu.Lock()
+	m.nodeStarts[name]++
+	m.mu.Unlock()
 	apiClient := m.newAPIClient(tc)
 	dir, err := m.nodeDir(name, tc, stateDir)
 	if err != nil {
@@ -828,8 +945,16 @@ func (m *Manager) sweepIdleDrops(rule string) {
 	delete(m.dropDest, rule)
 	owner := m.owner
 	clients := make(map[string]*tsclient.Client, len(drop))
+	refs := make(map[string]string, len(drop))
 	for dest := range drop {
 		clients[dest] = m.apiClients[dest]
+		if m.cfg != nil {
+			for _, r := range m.cfg.Bridges {
+				if r.Name == rule {
+					refs[dest] = r.BridgeRef(dest)
+				}
+			}
+		}
 	}
 	m.mu.Unlock()
 	if len(drop) == 0 {
@@ -843,7 +968,7 @@ func (m *Manager) sweepIdleDrops(rule string) {
 		m.forgetVIP(dest, b.ServiceName)
 		m.stopBridge(b.ID, true)
 		if c := clients[dest]; c != nil && b.ServiceName != "" {
-			if err := deleteOwnedVIPService(context.Background(), c, owner, b.ServiceName); err != nil {
+			if err := deleteOwnedBridge(context.Background(), c, owner, refs[dest], b.ServiceName); err != nil {
 				m.logger.Warn("drop dest: VIP delete failed", "rule", rule, "dest", dest, "service", b.ServiceName, "err", err)
 			}
 		}

@@ -12,12 +12,10 @@ import (
 	"time"
 )
 
-// Border is the config file: one tailnetlink process bridging one source
-// tailnet into one destination, or into several with dests. Run one process
-// per border.
-//
-// The file is parsed into a Border and then compiled into a Config, which
-// is what the rest of tailnetlink works with.
+// Border is the config file for one direction: a source tailnet bridged
+// into one destination, or into several with dests. A file that names
+// several tailnets and the bridges between them is a Mesh instead. Parse
+// accepts either shape and compiles both into a Config.
 type Border struct {
 	// Name identifies this border. It is the owner written to every VIP
 	// service the border creates, and part of its node hostnames.
@@ -151,23 +149,43 @@ func (az AuthzConfig) validate() error {
 
 var borderNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$`)
 
-// v1Keys are top-level fields only the old multi-tailnet format had.
-var v1Keys = []string{"tailnets", "bridges", "instance_id"}
-
-// errV1 is what a v1 file gets: there is no reader or converter for it.
+// errV1 is what a leftover v1 file gets: there is no reader or converter
+// for it. A v1 file sets instance_id, or bridges without tailnets. A mesh
+// sets tailnets and bridges and does not set instance_id.
 var errV1 = errors.New("this is a v1 config (it has tailnets/bridges), which is no longer supported; " +
-	"tailnetlink now takes one border per file. See the Configuration section of the README for the new format")
+	"tailnetlink now takes one border per file, or a mesh of tailnets and bridges. See the Configuration section of the README for the new format")
 
-// Parse reads a border config and compiles it.
+// Parse reads a border or a mesh and compiles it.
+//
+// A border has source and dest (or dests). A mesh has tailnets and bridges
+// and no instance_id. A file that sets instance_id, or bridges without
+// tailnets, is the old format and is rejected. The two current shapes are
+// not mixed.
 func Parse(data []byte) (*Config, error) {
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(data, &probe); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
-	for _, k := range v1Keys {
-		if _, ok := probe[k]; ok {
-			return nil, errV1
+	_, hasTailnets := probe["tailnets"]
+	_, hasBridges := probe["bridges"]
+	_, hasInstance := probe["instance_id"]
+	if hasInstance || (hasBridges && !hasTailnets) {
+		return nil, errV1
+	}
+	_, hasSource := probe["source"]
+	_, hasDest := probe["dest"]
+	_, hasDests := probe["dests"]
+	if hasTailnets && (hasSource || hasDest || hasDests) {
+		return nil, errors.New("set tailnets and bridges, or source and dest, not both")
+	}
+	if hasTailnets {
+		var m Mesh
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&m); err != nil {
+			return nil, fmt.Errorf("parse config: %w", err)
 		}
+		return m.Compile()
 	}
 	var b Border
 	dec := json.NewDecoder(bytes.NewReader(data))

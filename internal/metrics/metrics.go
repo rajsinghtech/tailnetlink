@@ -130,6 +130,41 @@ func (c *bridgeCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
+// TrackNodes exports tailnetlink_node_up{tailnet}. up returns 1 or 0 per
+// tailnet label. Labels come from the configured tailnets, not from
+// discovered devices.
+func (m *Metrics) TrackNodes(up func() map[string]float64) {
+	if m == nil {
+		return
+	}
+	m.reg.MustRegister(&nodeCollector{up: up})
+}
+
+var nodeDesc = prometheus.NewDesc(
+	"tailnetlink_node_up",
+	"1 when this process's node in the tailnet is connected.",
+	[]string{"tailnet"},
+	nil,
+)
+
+type nodeCollector struct {
+	up func() map[string]float64
+}
+
+func (c *nodeCollector) Describe(ch chan<- *prometheus.Desc) { ch <- nodeDesc }
+
+func (c *nodeCollector) Collect(ch chan<- prometheus.Metric) {
+	states := c.up()
+	names := make([]string, 0, len(states))
+	for name := range states {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		ch <- prometheus.MustNewConstMetric(nodeDesc, prometheus.GaugeValue, states[name], name)
+	}
+}
+
 // TrackVIPServices exports tailnetlink_vip_services{tailnet,state}. state is
 // desired (a listen was started) or advertised (the name was then found in
 // the node's AdvertiseServices). count is read at scrape time.
