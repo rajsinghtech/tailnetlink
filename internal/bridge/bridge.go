@@ -45,6 +45,7 @@ type Manager struct {
 	ephemeral       map[string]bool   // tailnet name -> node is ephemeral
 
 	servers     map[string]*tsnet.Server // keyed by tailnet name
+	nodeStarts  map[string]int           // how many times each tailnet's node has been started
 	apiClients  map[string]*tsclient.Client
 	forwarders  map[string]*Forwarder         // keyed by bridge entry ID (rule/dest/fqdn)
 	dnsCleanups map[string]func(remove bool)  // keyed by bridge entry ID; tears down per-device DNS
@@ -93,6 +94,7 @@ func New(store *state.Store, logger *slog.Logger, ui http.Handler) *Manager {
 		ui:            ui,
 		cfg:           &config.Config{Tailnets: map[string]config.TailnetConfig{}, Bridges: []config.BridgeRule{}},
 		servers:       make(map[string]*tsnet.Server),
+		nodeStarts:    make(map[string]int),
 		apiClients:    make(map[string]*tsclient.Client),
 		forwarders:    make(map[string]*Forwarder),
 		dnsCleanups:   make(map[string]func(bool)),
@@ -627,7 +629,18 @@ func hasNodeState(dir string) bool {
 	return err == nil && fi.Size() > 0
 }
 
+// NodeStarts reports how many times this process has started the node for
+// name. A hot reload that keeps the node does not increase it.
+func (m *Manager) NodeStarts(name string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.nodeStarts[name]
+}
+
 func (m *Manager) startTailnet(ctx context.Context, name string, tc config.TailnetConfig, stateDir string) error {
+	m.mu.Lock()
+	m.nodeStarts[name]++
+	m.mu.Unlock()
 	apiClient := m.newAPIClient(tc)
 	dir, err := m.nodeDir(name, tc, stateDir)
 	if err != nil {

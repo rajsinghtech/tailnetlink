@@ -2,8 +2,10 @@ package e2e
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -14,28 +16,27 @@ import (
 	"tailscale.com/types/key"
 )
 
-// TestMeshSharesNodes runs one process across three tailnets. Each tailnet
-// gets one node, which dials for bridges that leave and hosts VIP services
-// for bridges that arrive. Services, devices and split-DNS that this
-// process did not create stay as they were, including a service whose name
-// is the one a link would have published.
-func TestMeshSharesNodes(t *testing.T) {
+// TestMeshUserJSON loads a mesh the way a user does: a JSON file with
+// tailnets and bridges, including one bridge whose to list has two keys.
+// Subtests then prove bytes on every bridge, a reverse broad selector, and
+// a file edit that adds a fourth tailnet without restarting the others.
+func TestMeshUserJSON(t *testing.T) {
 	ctx := e2eSetup(t)
 	g := newMeshRig(t)
-
 	homeAPI, workAPI, partnerAPI := g.apis["home"], g.apis["work"], g.apis["partner"]
-	unrelatedHome := homeAPI.PutService(foreignVIP("svc:unrelated", "100.80.1.1"))
-	unrelatedWork := workAPI.PutService(foreignVIP("svc:unrelated", "100.80.1.2"))
+
+	unrelated := map[string]tsclient.VIPService{}
+	for key, addr := range map[string]string{"home": "100.80.1.1", "work": "100.80.1.2", "partner": "100.80.1.4", "lab": "100.80.1.5"} {
+		unrelated[key] = g.apis[key].PutService(foreignVIP("svc:unrelated", addr))
+	}
 	taken := workAPI.PutService(foreignVIP("svc:taken", "100.80.1.3"))
 	real := workAPI.PutService(tsclient.VIPService{
 		Name: "svc:real-loop", Addrs: []string{"100.90.0.8"}, Tags: []string{"tag:tailnetlink"}, Comment: "already there",
 	})
-	unrelatedPartner := partnerAPI.PutService(foreignVIP("svc:unrelated", "100.80.1.4"))
 	for _, api := range g.apis {
 		api.SetSplitDNS("other.example.com", []string{"9.9.9.9"})
 		api.ResetCalls()
 	}
-
 	colleague := map[string]nodeSnap{}
 	for key, tn := range g.nets {
 		n := tn.node(t, ctx, "colleague")
@@ -45,99 +46,123 @@ func TestMeshSharesNodes(t *testing.T) {
 	echoBackend(t, ctx, g.nets["home"], "api", 8080)
 	echoBackend(t, ctx, g.nets["work"], "build", 8022)
 	echoBackend(t, ctx, g.nets["partner"], "billing", 8443)
+	echoBackend(t, ctx, g.nets["lab"], "labbox", 9090)
 	g.nets["home"].node(t, ctx, "other")
 	homeClient := client(t, ctx, g.nets["home"], "home-client")
 	workClient := client(t, ctx, g.nets["work"], "work-client")
 	partnerClient := client(t, ctx, g.nets["partner"], "partner-client")
 
-	r := startManager(t, g.mustParse(t, g.bridges(true, true, false)), "")
-	if !r.config().SharedNodes {
-		t.Fatal("mesh did not compile to one node per tailnet")
+	path := filepath.Join(t.TempDir(), "tailnetlink.json")
+	body := g.meshJSON([]string{"home", "work", "partner"}, g.coreBridges(false, false, true))
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
 	}
-
-	apiOnWork := waitVIP(t, workAPI, "svc:tnl-home-api")
-	apiOnPartner := waitVIP(t, partnerAPI, "svc:tnl-home-api")
-	buildOnHome := waitVIP(t, homeAPI, "svc:tnl-work-build")
-	billOnWork := waitVIP(t, workAPI, "svc:tnl-partner-billing")
-	echoVia(t, ctx, workClient, netip.AddrPortFrom(apiOnWork, 8080), "home to work")
-	echoVia(t, ctx, partnerClient, netip.AddrPortFrom(apiOnPartner, 8080), "home to partner")
-	echoVia(t, ctx, homeClient, netip.AddrPortFrom(buildOnHome, 8022), "work to home")
-	echoVia(t, ctx, workClient, netip.AddrPortFrom(billOnWork, 8443), "partner to work")
-
-	for key, host := range map[string]string{"home": "tailnetlink-home", "work": "tailnetlink-work", "partner": "tailnetlink-partner"} {
-		if n := hostnameCount(g.nets[key], host); n != 1 {
-			t.Errorf("%s nodes named %s = %d, want 1", key, host, n)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SharedNodes || len(cfg.Tailnets) != 3 {
+		t.Fatalf("loaded mesh = shared %v tailnets %d", cfg.SharedNodes, len(cfg.Tailnets))
+	}
+	var fanOut bool
+	for _, b := range cfg.Bridges {
+		if b.Name == "home/api" && len(b.DestTailnets) == 2 {
+			fanOut = true
 		}
 	}
-	waitFor(t, 20*time.Second, "short_name conflict", func() bool {
-		_, errText := r.bridgeStatus("home/taken/work/other." + g.nets["home"].domain)
-		return strings.Contains(errText, "conflict")
-	})
-	assertMeshForeign(t, g, colleague, map[*ctlBridge][]tsclient.VIPService{
-		homeAPI:    {unrelatedHome},
-		workAPI:    {unrelatedWork, taken, real},
-		partnerAPI: {unrelatedPartner},
-	})
+	if !fanOut {
+		t.Fatalf("loaded file has no fan-out bridge: %+v", cfg.Bridges)
+	}
 
-	// A return selector that matches the VIP just published must not mirror it.
-	r.reconcile(g.mustParse(t, g.bridges(true, true, true)))
-	waitFor(t, 20*time.Second, "unmanaged tagged service exported", func() bool {
-		_, ok := homeAPI.Service("svc:tnl-work-real-loop")
-		return ok
-	})
-	if _, ok := homeAPI.Service("svc:tnl-work-tnl-home-api"); ok {
-		t.Fatal("managed VIP was published back into the tailnet it came from")
-	}
-	if logCount(r, `disconnected from tailnet "home"`) != 0 || logCount(r, `disconnected from tailnet "work"`) != 0 || logCount(r, `disconnected from tailnet "partner"`) != 0 {
-		t.Fatal("adding a bridge disconnected a node")
-	}
-	assertMeshForeign(t, g, colleague, map[*ctlBridge][]tsclient.VIPService{
-		homeAPI:    {unrelatedHome},
-		workAPI:    {unrelatedWork, taken, real},
-		partnerAPI: {unrelatedPartner},
-	})
+	r := startManager(t, cfg, "")
+	g.watch(t, r, path)
 
-	// Removing partner drops its node and the services this process published
-	// there. The other nodes stay up.
-	r.reconcile(g.mustParse(t, g.bridges(false, false, false)))
-	waitFor(t, 20*time.Second, "partner node removed", func() bool {
-		return logCount(r, `disconnected from tailnet "partner"`) >= 1
-	})
-	if logCount(r, `disconnected from tailnet "home"`) != 0 || logCount(r, `disconnected from tailnet "work"`) != 0 {
-		t.Fatal("removing partner disconnected another node")
+	flow := func() {
+		t.Helper()
+		echoVia(t, ctx, workClient, netip.AddrPortFrom(waitVIP(t, workAPI, "svc:tnl-home-api"), 8080), "home to work")
+		echoVia(t, ctx, partnerClient, netip.AddrPortFrom(waitVIP(t, partnerAPI, "svc:tnl-home-api"), 8080), "home to partner")
+		echoVia(t, ctx, homeClient, netip.AddrPortFrom(waitVIP(t, homeAPI, "svc:tnl-work-build"), 8022), "work to home")
+		echoVia(t, ctx, workClient, netip.AddrPortFrom(waitVIP(t, workAPI, "svc:tnl-partner-billing"), 8443), "partner to work")
 	}
-	if _, ok := partnerAPI.Service("svc:tnl-home-api"); ok {
-		t.Fatal("partner still has a VIP this process published")
-	}
-	if _, ok := workAPI.Service("svc:tnl-partner-billing"); ok {
-		t.Fatal("work still has the removed partner bridge")
-	}
-	if _, ok := workAPI.Service("svc:tnl-home-api"); !ok {
-		t.Fatal("removing partner deleted the VIP on work")
-	}
-	assertMeshForeign(t, g, colleague, map[*ctlBridge][]tsclient.VIPService{
-		homeAPI:    {unrelatedHome},
-		workAPI:    {unrelatedWork, taken, real},
-		partnerAPI: {unrelatedPartner},
-	})
 
-	r.stop(t)
-	if _, ok := workAPI.Service("svc:tnl-home-api"); !ok {
-		t.Fatal("shutdown deleted an owned VIP")
-	}
-	assertMeshForeign(t, g, colleague, map[*ctlBridge][]tsclient.VIPService{
-		homeAPI:    {unrelatedHome},
-		workAPI:    {unrelatedWork, taken, real},
-		partnerAPI: {unrelatedPartner},
-	})
-	for _, api := range g.apis {
-		for _, c := range api.Writes() {
-			if strings.Contains(c, "svc:unrelated") || strings.Contains(c, "svc:taken") || strings.Contains(c, "svc:real-loop") ||
-				strings.Contains(c, "split-dns") || strings.Contains(c, "/acl") || strings.Contains(c, "/policy") || strings.Contains(c, "/routes") || strings.Contains(c, "/devices") {
-				t.Errorf("%s write touched a resource this process does not own: %s", api.tn.domain, c)
+	t.Run("every bridge carries bytes", func(t *testing.T) {
+		flow()
+		for _, key := range []string{"home", "work", "partner"} {
+			if n := hostnameCount(g.nets[key], "tailnetlink-"+key); n != 1 {
+				t.Errorf("%s has %d tailnetlink nodes", key, n)
+			}
+			if got := r.m.NodeStarts(key); got != 1 {
+				t.Errorf("%s node starts = %d, want 1", key, got)
 			}
 		}
-	}
+		if r.m.NodeStarts("lab") != 0 {
+			t.Errorf("lab started before it was in the file: %d", r.m.NodeStarts("lab"))
+		}
+		waitFor(t, 20*time.Second, "short_name conflict", func() bool {
+			_, errText := r.bridgeStatus("home/taken/work/other." + g.nets["home"].domain)
+			return strings.Contains(errText, "conflict")
+		})
+		g.assertForeign(t, colleague, map[string][]tsclient.VIPService{
+			"home": {unrelated["home"]}, "work": {unrelated["work"], taken, real},
+			"partner": {unrelated["partner"]}, "lab": {unrelated["lab"]},
+		})
+	})
+
+	t.Run("reverse broad selector", func(t *testing.T) {
+		g.rewrite(t, path, g.meshJSON([]string{"home", "work", "partner"}, g.coreBridges(true, false, true)))
+		waitFor(t, 20*time.Second, "unmanaged tagged service exported", func() bool {
+			_, ok := homeAPI.Service("svc:tnl-work-real-loop")
+			return ok
+		})
+		if _, ok := homeAPI.Service("svc:tnl-work-tnl-home-api"); ok {
+			t.Fatal("managed VIP was published back into the tailnet it came from")
+		}
+		if _, ok := homeAPI.Service("svc:tnl-work-unrelated"); ok {
+			t.Fatal("foreign service was re-exported")
+		}
+		flow()
+		for _, key := range []string{"home", "work", "partner"} {
+			if got := r.m.NodeStarts(key); got != 1 {
+				t.Errorf("reverse bridge restarted %s (%d starts)", key, got)
+			}
+		}
+	})
+
+	t.Run("fourth tailnet without node restart", func(t *testing.T) {
+		g.rewrite(t, path, g.meshJSON([]string{"home", "work", "partner", "lab"}, g.coreBridges(true, true, true)))
+		waitFor(t, 30*time.Second, "lab node started once", func() bool {
+			return r.m.NodeStarts("lab") == 1 && hostnameCount(g.nets["lab"], "tailnetlink-lab") == 1
+		})
+		for _, key := range []string{"home", "work", "partner"} {
+			if got := r.m.NodeStarts(key); got != 1 {
+				t.Errorf("adding lab restarted %s (%d starts)", key, got)
+			}
+		}
+		labVIP := waitVIP(t, homeAPI, "svc:tnl-lab-labbox")
+		echoVia(t, ctx, homeClient, netip.AddrPortFrom(labVIP, 9090), "lab to home")
+		flow()
+
+		// Drop the partner billing bridge. The partner node stays, and the
+		// bridges that were not removed keep moving bytes.
+		g.rewrite(t, path, g.meshJSON([]string{"home", "work", "partner", "lab"}, g.coreBridges(true, true, false)))
+		waitFor(t, 20*time.Second, "billing bridge removed", func() bool {
+			_, ok := workAPI.Service("svc:tnl-partner-billing")
+			return !ok
+		})
+		for _, key := range []string{"home", "work", "partner", "lab"} {
+			if got := r.m.NodeStarts(key); got != 1 {
+				t.Errorf("removing a bridge restarted %s (%d starts)", key, got)
+			}
+		}
+		echoVia(t, ctx, workClient, netip.AddrPortFrom(waitVIP(t, workAPI, "svc:tnl-home-api"), 8080), "home to work after removal")
+		echoVia(t, ctx, partnerClient, netip.AddrPortFrom(waitVIP(t, partnerAPI, "svc:tnl-home-api"), 8080), "home to partner after removal")
+		echoVia(t, ctx, homeClient, netip.AddrPortFrom(waitVIP(t, homeAPI, "svc:tnl-work-build"), 8022), "work to home after removal")
+		echoVia(t, ctx, homeClient, netip.AddrPortFrom(labVIP, 9090), "lab to home after removal")
+		g.assertForeign(t, colleague, map[string][]tsclient.VIPService{
+			"home": {unrelated["home"]}, "work": {unrelated["work"], taken, real},
+			"partner": {unrelated["partner"]}, "lab": {unrelated["lab"]},
+		})
+	})
 }
 
 type meshRig struct {
@@ -159,6 +184,7 @@ func newMeshRig(t *testing.T) *meshRig {
 		"home":    "keiretsu.ts.net",
 		"work":    "example.ts.net",
 		"partner": "partner.example.com",
+		"lab":     "lab.example.com",
 	}
 	dir := t.TempDir()
 	for key, domain := range domains {
@@ -181,75 +207,76 @@ func writeSecret(path, sec string) error {
 	return os.WriteFile(path, []byte(sec+"\n"), 0o600)
 }
 
-func (g *meshRig) side(key string) config.MeshTailnet {
-	tn, api := g.nets[key], g.apis[key]
-	return config.MeshTailnet{Side: config.Side{
-		Tailnet:    tn.domain,
-		OAuth:      config.OAuthCreds{ClientID: "mesh", ClientSecretFile: g.secrets[key]},
-		Tags:       []string{"tag:tailnetlink"},
-		ControlURL: tn.url,
-		APIBaseURL: api.URL(),
-	}}
+// meshJSON is the file a user would write. keys are the tailnets in the
+// file. bridges is the raw JSON array body.
+func (g *meshRig) meshJSON(keys []string, bridges string) string {
+	var tails []string
+	for _, key := range keys {
+		tn, api := g.nets[key], g.apis[key]
+		tails = append(tails, fmt.Sprintf(`%q: {
+			"tailnet": %q,
+			"oauth": {"client_id": "mesh", "client_secret_file": %q},
+			"tags": ["tag:tailnetlink"],
+			"control_url": %q,
+			"api_base_url": %q
+		}`, key, tn.domain, g.secrets[key], tn.url, api.URL()))
+	}
+	return fmt.Sprintf(`{
+		"name": "mesh",
+		"dns": {"enabled": false},
+		"poll_interval": "200ms",
+		"dial_timeout": "5s",
+		"node": {"state_dir": %q},
+		"tailnets": {%s},
+		"bridges": [%s]
+	}`, g.stateDir, strings.Join(tails, ",\n"), bridges)
 }
 
-// bridges builds the mesh links. withPartner keeps the partner tailnet.
-// withLoop adds the return tag selector used to check that managed VIPs
-// are not exported again.
-func (g *meshRig) bridges(withPartner, withTaken, withLoop bool) *config.Mesh {
-	off := false
-	poll := config.Duration{Duration: 200 * time.Millisecond}
-	dial := config.Duration{Duration: 5 * time.Second}
-	homeTo := []string{"work"}
-	if withPartner {
-		homeTo = []string{"work", "partner"}
+// coreBridges is the directional set. withLoop adds the broad return tag.
+// withBilling keeps partner to work. withLab adds lab to home.
+func (g *meshRig) coreBridges(withLoop, withLab, withBilling bool) string {
+	home, work, partner := g.nets["home"].domain, g.nets["work"].domain, g.nets["partner"].domain
+	parts := []string{
+		fmt.Sprintf(`{"from":"home","to":["work","partner"],"links":[{"name":"api","devices":[{"fqdn":"api.%s"}],"ports":[8080]}]}`, home),
+		fmt.Sprintf(`{"from":"work","to":["home"],"links":[{"name":"builds","devices":[{"fqdn":"build.%s"}],"ports":[8022]}]}`, work),
+		fmt.Sprintf(`{"from":"home","to":["work"],"links":[{"name":"taken","devices":[{"fqdn":"other.%s","short_name":"taken"}],"ports":[9]}]}`, home),
 	}
-	tailnets := map[string]config.MeshTailnet{
-		"home": g.side("home"),
-		"work": g.side("work"),
-	}
-	links := []config.MeshBridge{
-		{From: "home", To: homeTo, Links: []config.Link{{
-			Name: "api", Devices: []config.DeviceSpec{{FQDN: "api." + g.nets["home"].domain}}, Ports: []int{8080},
-		}}},
-		{From: "work", To: []string{"home"}, Links: []config.Link{{
-			Name: "builds", Devices: []config.DeviceSpec{{FQDN: "build." + g.nets["work"].domain}}, Ports: []int{8022},
-		}}},
-	}
-	if withTaken {
-		links = append(links, config.MeshBridge{From: "home", To: []string{"work"}, Links: []config.Link{{
-			Name: "taken", Devices: []config.DeviceSpec{{FQDN: "other." + g.nets["home"].domain, ShortName: "taken"}}, Ports: []int{9},
-		}}})
+	if withBilling {
+		parts = append(parts, fmt.Sprintf(`{"from":"partner","to":["work"],"links":[{"name":"billing","devices":[{"fqdn":"billing.%s"}],"ports":[8443]}]}`, partner))
 	}
 	if withLoop {
-		links = append(links, config.MeshBridge{From: "work", To: []string{"home"}, Links: []config.Link{{
-			Name: "loop", Tag: "tag:tailnetlink", Ports: []int{443},
-		}}})
+		parts = append(parts, `{"from":"work","to":["home"],"links":[{"name":"loop","tag":"tag:tailnetlink","ports":[443]}]}`)
 	}
-	if withPartner {
-		tailnets["partner"] = g.side("partner")
-		links = append(links, config.MeshBridge{From: "partner", To: []string{"work"}, Links: []config.Link{{
-			Name: "billing", Devices: []config.DeviceSpec{{FQDN: "billing." + g.nets["partner"].domain}}, Ports: []int{8443},
-		}}})
+	if withLab {
+		parts = append(parts, fmt.Sprintf(`{"from":"lab","to":["home"],"links":[{"name":"box","devices":[{"fqdn":"labbox.%s"}],"ports":[9090]}]}`, g.nets["lab"].domain))
 	}
-	return &config.Mesh{
-		Name: "mesh", Node: config.NodeConfig{StateDir: g.stateDir},
-		DNS:          config.DNSConfig{Enabled: &off},
-		PollInterval: &poll, DialTimeout: &dial,
-		Tailnets: tailnets, Bridges: links,
-	}
+	return strings.Join(parts, ",\n")
 }
 
-func (g *meshRig) mustParse(t *testing.T, m *config.Mesh) *config.Config {
+// watch reloads the file the way the process does: a mtime change is parsed
+// and reconciled. The interval is short so the test does not wait out the
+// production default.
+func (g *meshRig) watch(t *testing.T, r *running, path string) {
 	t.Helper()
-	data, err := json.Marshal(m)
+	st, err := config.NewStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := config.Parse(data)
-	if err != nil {
-		t.Fatalf("parse mesh: %v\n%s", err, data)
+	st.SetWatchInterval(30 * time.Millisecond)
+	st.OnChange(func(cfg *config.Config) { r.reconcile(cfg) })
+	go st.Watch(r.ctx, r.logger)
+}
+
+func (g *meshRig) rewrite(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	return cfg
+	// Force the mtime forward. A same-second rewrite can look unchanged.
+	stamp := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(path, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func foreignVIP(name, addr string) tsclient.VIPService {
@@ -306,23 +333,28 @@ func logCount(r *running, sub string) int {
 	return n
 }
 
-func assertMeshForeign(t *testing.T, g *meshRig, colleagues map[string]nodeSnap, svcs map[*ctlBridge][]tsclient.VIPService) {
+func (g *meshRig) assertForeign(t *testing.T, colleagues map[string]nodeSnap, svcs map[string][]tsclient.VIPService) {
 	t.Helper()
 	for key, want := range colleagues {
 		got := snapNode(g.nets[key], want.key)
 		if !want.same(got) {
 			t.Errorf("%s device changed\n got %+v\nwant %+v", key, got, want)
 		}
-	}
-	for api, list := range svcs {
-		for _, want := range list {
-			got, ok := api.Service(want.Name)
-			if !ok || !reflect.DeepEqual(got, want) {
-				t.Errorf("%s service %s = %+v, want %+v", api.tn.domain, want.Name, got, want)
+		api := g.apis[key]
+		for _, svc := range svcs[key] {
+			gotSvc, ok := api.Service(svc.Name)
+			if !ok || !reflect.DeepEqual(gotSvc, svc) {
+				t.Errorf("%s service %s = %+v, want %+v", key, svc.Name, gotSvc, svc)
 			}
 		}
-		if got := api.SplitDNS("other.example.com"); !reflect.DeepEqual(got, []string{"9.9.9.9"}) {
-			t.Errorf("%s split-DNS = %v", api.tn.domain, got)
+		if gotDNS := api.SplitDNS("other.example.com"); !reflect.DeepEqual(gotDNS, []string{"9.9.9.9"}) {
+			t.Errorf("%s split-DNS = %v", key, gotDNS)
+		}
+		for _, c := range api.Writes() {
+			if strings.Contains(c, "/vip-services/svc:unrelated") || strings.Contains(c, "/vip-services/svc:taken") || strings.Contains(c, "/vip-services/svc:real-loop") ||
+				strings.Contains(c, "split-dns") || strings.Contains(c, "/acl") || strings.Contains(c, "/policy") || strings.Contains(c, "/routes") || strings.Contains(c, "/devices") {
+				t.Errorf("%s write touched a resource this process does not own: %s", key, c)
+			}
 		}
 	}
 }
