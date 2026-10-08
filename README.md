@@ -37,9 +37,9 @@ Or with make: `make dev`, `make build && make run`. See [CONTRIBUTING.md](CONTRI
 
 ## Configuration
 
-Config is a JSON file (default: `tailnetlink.json`). One file describes one **border**: one source tailnet bridged into one destination, or into several. Run one process per border. The file is the only way to change it: tailnetlink checks it every few seconds and applies changes without a restart. It never writes the file.
+Config is a JSON file (default: `tailnetlink.json`). One file describes one **border** (one source tailnet bridged into one destination, or into several) or one **mesh** (every tailnet joined once, bridged in any direction). The file is the only way to change it: tailnetlink checks it every few seconds and applies changes without a restart. It never writes the file.
 
-Older multi-tailnet configs (`tailnets` / `bridges` / `instance_id`) are no longer read. There is no converter. Rewrite them as a border; see below.
+A file that sets `instance_id`, or `bridges` without `tailnets`, is the old format and is rejected. There is no converter. A mesh uses `tailnets` and `bridges` and does not set `instance_id`. A border uses `source` and `dest` or `dests`. The two shapes are not mixed.
 
 ```json
 {
@@ -121,11 +121,81 @@ A destination that fails to authenticate, call the API, or start its node does n
 
 The source node state stays at `<name>-src`. A single `dest` stays at `<name>-dst` (`tailnetlink-<name>-dst`). Each `dests` entry, including a list of one, uses `<name>-dst-` plus a short hash of the tailnet name. Adding or removing a destination does not rename the others, and those directories do not collide with `<name>-dst`.
 
+### One node per tailnet
+
+A mesh file names every tailnet once and lists the bridges between them. One process joins each tailnet with a single node. That node dials for bridges that leave the tailnet and hosts VIP services for bridges that arrive. Any number of tailnets and directions is one deployment, with one node per tailnet key.
+
+`tailnets` maps a key to the same fields a border side has (`tailnet`, `oauth`, `tags`, and optional `control_url` and `api_base_url`), plus optional `node`, `dns` and `authz`. `bridges` is a list of `{from, to, links}`. `from` is a key. `to` is a list of other keys. `links` uses the same fields as a border link. `name` is the owner, the same way a border's name is.
+
+```json
+{
+  "name": "mesh",
+  "tailnets": {
+    "home": {
+      "tailnet": "keiretsu.ts.net",
+      "oauth": {"client_id": "...", "client_secret_file": "/run/secrets/home"},
+      "tags": ["tag:tailnetlink"]
+    },
+    "work": {
+      "tailnet": "example.ts.net",
+      "oauth": {"client_id": "...", "client_secret_env": "TAILNETLINK_WORK_SECRET"},
+      "tags": ["tag:tailnetlink"]
+    },
+    "partner": {
+      "tailnet": "partner.example.com",
+      "oauth": {"client_id": "...", "client_secret_file": "/run/secrets/partner"},
+      "tags": ["tag:tailnetlink"],
+      "dns": {"enabled": false}
+    }
+  },
+  "bridges": [
+    {
+      "from": "home",
+      "to": ["work", "partner"],
+      "links": [{"name": "api", "tag": "tag:api-server", "ports": [8080, 8443]}]
+    },
+    {
+      "from": "work",
+      "to": ["home"],
+      "links": [{"name": "builds", "tag": "tag:build-runner", "ports": [22, 443]}]
+    },
+    {
+      "from": "partner",
+      "to": ["work"],
+      "links": [{"name": "billing", "services": [{"name": "svc:billing"}], "ports": [443]}]
+    }
+  ]
+}
+```
+
+```mermaid
+flowchart LR
+  home["home<br/>keiretsu.ts.net"]
+  work["work<br/>example.ts.net"]
+  partner["partner<br/>partner.example.com"]
+  home -->|api| work
+  home -->|api| partner
+  work -->|builds| home
+  partner -->|billing| work
+```
+
+Each key has its own state directory under `node.state_dir` (`home`, `work`, `partner`) and the hostname `tailnetlink-<key>`. Two keys cannot name the same tailnet. Links that leave one tailnet share one device list and one service list. Each direction reconciles on its own queue. Listens on a node stay serialized, so the same node can host every VIP that arrives there.
+
+`node.ephemeral` on one tailnet makes that node ephemeral. A top-level `node.ephemeral` of true applies to every tailnet and cannot be turned off for just one. `dns.enabled` false on a tailnet turns split-DNS off for services published into it. A top-level `dns.enabled` false turns it off everywhere.
+
+Adding or removing a bridge does not restart the other bridges or the shared nodes. A tailnet's node stops only when that key leaves the file, which is allowed only when no bridge still names it. Removing a bridge or a tailnet deletes the VIP services and the split-DNS resolver addresses that bridge owned. Services, devices, routes, DNS settings and policy that this process did not create are left alone. A service that already exists without this process's owner annotation, including one whose name is the `short_name` a link would publish, is not overwritten. The bridge reports a name conflict.
+
+`/readyz` for a mesh is ready when at least one bridge is fully up. A bridge is fully up when its source node is connected (a local link has no source node), at least one destination node is connected, and a non-local link has polled within three poll intervals. A destination that has already failed does not block one that is up. A tailnet that is still starting does not block a different bridge that is already fully up. With no bridge fully up, the endpoint says why.
+
+Local addresses on bridges that leave a tailnet are collected by `config.AcceptedRouteAddrs` and passed to the node after every reload, including a reload that does not restart the node. Nothing programs routes from that list yet. A change that dials subnet-routed addresses should replace `acceptNodeRoutes` and accept only advertised routes that cover those addresses. The link fields, including `local`, stay as they are so extra ports can be added beside `addr`.
+
+See `config.mesh.example.json`.
+
 ### Ownership
 
 `name` is required. It is the owner written to every VIP service this process creates (`tailnetlink/owner=<name>`), and part of its node hostnames (`tailnetlink-<name>-src`, `tailnetlink-<name>-dst`, and `tailnetlink-<name>-dst-<hash>` when a border has several destinations). 1 to 40 lowercase letters, digits or dashes. Two borders that share a tailnet need different names, and one of them should set `"ui": {"service_name": "svc:..."}` so their UI services don't collide.
 
-tailnetlink only ever changes or deletes a service that carries its own owner annotation. That covers bridged services, the shared DNS VIP, the web UI VIP and local sources. Services made by older versions that only carry `tailnetlink/managed=true` are treated as foreign and never adopted.
+tailnetlink only ever changes or deletes a service that carries its own owner annotation. That covers bridged services, the shared DNS VIP, the web UI VIP and local sources. Services made by older versions that only carry `tailnetlink/managed=true` are treated as foreign and never adopted. A mesh also writes `tailnetlink/bridge=<from>/<to>/<link>` on each bridged service. A second bridge that wants that name gets a conflict instead of taking it over. Prune still removes every service this process owns, whichever bridge published it.
 
 ### Restarts and node state
 
@@ -157,7 +227,7 @@ A link has a `name` and exactly one of `tag`, `devices`, `services` or `local`, 
 
 `short_name` must be a DNS label: 1 to 63 lowercase letters, digits or dashes, not starting or ending with a dash. Two entries that would end up with the same short name are rejected when the config loads. Names tailnetlink generates itself are cut to fit and get a short hash suffix.
 
-When a link discovers by `tag`, it skips anything it made itself: VIP services annotated `tailnetlink/managed=true` and devices whose hostname starts with `tailnetlink-`.
+When a link discovers by `tag`, or by an explicit service name, it skips VIP services annotated `tailnetlink/managed=true`. Tag mode also skips devices whose hostname starts with `tailnetlink-`. A VIP published into a tailnet is not discovered again by a bridge leaving that tailnet.
 
 ### Authorization
 
@@ -302,13 +372,14 @@ See `deploy/` for a compose example. Build locally with `make docker-build` (tag
 `/healthz`, `/readyz` and `/metrics` are served on their own listener, `127.0.0.1:9090` by default (`metrics_addr` in the config or `-metrics-listen`; `off` disables it). They are never on the UI port or the UI service, and they stay up with the UI off. In a container set the address to `:9090` so probes can reach it.
 
 - `/healthz` is 200 while the process is running.
-- `/readyz` is 200 once the config has been applied, every configured tailnet's node is up, and every tailnet rule has polled successfully within the last three poll intervals. Otherwise it is 503 with the reason.
+- `/readyz` is 200 once the config has been applied and the border or mesh is up, using the rules in the configuration section above. Otherwise it is 503 with the reason.
 - `/metrics` is Prometheus text. Labels only carry rule names, tailnet keys and fixed values, never device names or client addresses.
 
 Each tailnet's admin API client has its own token bucket: 20 requests per second, burst 40. HTTP 429 and 5xx are retried (POST is not retried on 5xx, because creating a key or exchanging a token may already have succeeded). A `Retry-After` header is honored, with a little jitter, and a call gives up after 4 attempts or 30 seconds of waiting.
 
 | Metric | Labels | |
 |---|---|---|
+| `tailnetlink_node_up` | `tailnet` | 1 when this process's node in that tailnet is connected |
 | `tailnetlink_bridges` | `status` | Bridges by status (pending, active, error) |
 | `tailnetlink_vip_services` | `tailnet`, `state` | VIP services this process has started hosting (`desired`) and verified in the node's advertised set (`advertised`). A gap means a listen did not stick. |
 | `tailnetlink_connections_active` | `rule` | Connections being forwarded right now |
@@ -368,7 +439,7 @@ make dev       # run with debug logging (reloads the config file when it changes
 
 ## Further reading
 
-- [docs/architecture.md](docs/architecture.md) — one border, VIP forward path, DNS
+- [docs/architecture.md](docs/architecture.md) — mesh and border, VIP forward path, DNS
 - [docs/security.md](docs/security.md) — secrets, UI, ownership, authz
 - [docs/testing.md](docs/testing.md) — unit / testcontrol / real-tailnet layers
 - [CONTRIBUTING.md](CONTRIBUTING.md) — local gates, PRs, coverage ratchet

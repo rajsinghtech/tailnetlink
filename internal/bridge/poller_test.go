@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rajsinghtech/tailnetlink/internal/config"
+	"github.com/rajsinghtech/tailnetlink/internal/state"
 	tsclient "tailscale.com/client/tailscale/v2"
 )
 
@@ -66,10 +67,23 @@ func TestSharedDiscoveryOneListPerTailnet(t *testing.T) {
 		rule.Ports = []int{443 + i}
 		tm.startRule(t, rule, time.Hour)
 	}
-	waitFor(t, 5*time.Second, "every link active", func() bool {
-		a, _, _ := bridgeCounts(tm.m.store)
-		return a == 3*5 // 4 devices + 1 service, three links
+	// The three links discover the same names, so they want the same VIP
+	// services. The first bridge to claim a name owns it. The others stop
+	// with a conflict instead of overwriting it. Every link still consumes
+	// the one shared poll.
+	waitFor(t, 5*time.Second, "every link settled", func() bool {
+		a, e, p := bridgeCounts(tm.m.store)
+		return p == 0 && a+e == 3*5
 	})
+	active, errs, _ := bridgeCounts(tm.m.store)
+	if active < 5 || errs == 0 {
+		t.Fatalf("active=%d errors=%d, want the first bridge to own each name and the others to conflict", active, errs)
+	}
+	for _, b := range tm.m.store.GetBridges() {
+		if b.Status == state.BridgeStatusError && !strings.Contains(b.Error, "conflict") {
+			t.Errorf("bridge %s error = %s, want a name conflict", b.ID, b.Error)
+		}
+	}
 	if got := listCalls(t, tm, "/devices"); got != 1 {
 		t.Fatalf("device lists = %d, want 1 for 3 links", got)
 	}

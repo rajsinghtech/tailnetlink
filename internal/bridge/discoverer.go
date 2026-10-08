@@ -26,9 +26,11 @@ type Device struct {
 // source_devices/source_services only act as DNS/name overrides in that case.
 // Without a tag: source_services takes priority, then source_devices.
 //
-// Tag mode never picks up tailnetlink's own output: services carrying the
-// tailnetlink/managed annotation and tailnetlink's own nodes are skipped,
-// so two instances bridging A to B and B to A with the same tag don't loop.
+// Tag mode and explicit service mode never pick up tailnetlink's own VIP
+// services (tailnetlink/managed). Tag mode also skips tailnetlink's own
+// nodes. A VIP this process published into a tailnet is not discovered
+// again by a bridge leaving that tailnet, including a selector that names
+// the service or a tag broad enough to match it.
 //
 // Every change is announced: sends block until the rule reads them or ctx
 // is done, and a device only counts as seen once its add went out.
@@ -262,6 +264,11 @@ func (d *Discoverer) applyServices(ctx context.Context, svcs []tsclient.VIPServi
 	found := make(map[string]Device)
 	for _, svc := range svcs {
 		if _, ok := d.services[svc.Name]; !ok {
+			continue
+		}
+		// A managed VIP is one tailnetlink published. Exporting it again
+		// would mirror our own service back into the tailnet it came from.
+		if svc.Annotations[annotationManaged] == "true" {
 			continue
 		}
 		ip, ok := firstIP(svc.Addrs)

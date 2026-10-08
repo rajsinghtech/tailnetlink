@@ -56,7 +56,7 @@ func pruneTailnet(ctx context.Context, name string, client *tsclient.Client, own
 	var actions []PruneAction
 	var addrs []string
 	for _, svc := range svcs {
-		if !ownedBy(&svc, owner) {
+		if !ownedBy(&svc, owner, "") {
 			continue
 		}
 		actions = append(actions, PruneAction{Tailnet: name, What: "delete service", Name: svc.Name})

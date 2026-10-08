@@ -161,6 +161,14 @@ func (b *ctlBridge) SplitDNS(zone string) []string {
 	return slices.Clone(b.splitDNS[zone])
 }
 
+// SetSplitDNS seeds a zone the way another client of the tailnet would.
+// It does not record an API call.
+func (b *ctlBridge) SetSplitDNS(zone string, resolvers []string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.splitDNS[zone] = slices.Clone(resolvers)
+}
+
 func (b *ctlBridge) putLocked(svc tsclient.VIPService) tsclient.VIPService {
 	if len(svc.Addrs) == 0 {
 		if old, ok := b.services[svc.Name]; ok {

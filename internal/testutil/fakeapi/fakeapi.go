@@ -118,6 +118,13 @@ func (s *Server) SetDevices(ds []tsclient.Device) {
 	s.devices = append([]tsclient.Device(nil), ds...)
 }
 
+// Devices returns a copy of the device list.
+func (s *Server) Devices() []tsclient.Device {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]tsclient.Device(nil), s.devices...)
+}
+
 // PutService seeds a VIP service directly, without recording a call.
 func (s *Server) PutService(svc tsclient.VIPService) {
 	s.mu.Lock()

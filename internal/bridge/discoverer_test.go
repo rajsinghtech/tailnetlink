@@ -160,6 +160,22 @@ func TestDiscovererDeviceModeIsCaseInsensitive(t *testing.T) {
 	}
 }
 
+func TestServiceModeSkipsManaged(t *testing.T) {
+	api := fakeapi.New(t)
+	api.PutService(tsclient.VIPService{
+		Name:        "svc:api",
+		Addrs:       []string{"100.100.1.1"},
+		Annotations: map[string]string{annotationManaged: "true", annotationOwner: testOwner},
+	})
+	api.PutService(tsclient.VIPService{Name: "svc:billing", Addrs: []string{"100.100.1.2"}})
+	d := NewDiscoverer(api.Client(), "", nil, []string{"svc:api", "svc:billing"}, 0, discardLogger())
+	d.poll1(context.Background())
+	added := names(drain(d.Added()))
+	if len(added) != 1 || !added["svc:billing"] || added["svc:api"] {
+		t.Errorf("added = %v, want only svc:billing", added)
+	}
+}
+
 func TestDiscovererServiceMode(t *testing.T) {
 	api := fakeapi.New(t)
 	api.PutService(tsclient.VIPService{Name: "svc:ai", Addrs: []string{"100.100.1.1"}})

@@ -59,6 +59,9 @@ type Config struct {
 	// DNSDisabled turns off the DNS VIP and split-DNS (border dns.enabled
 	// false).
 	DNSDisabled bool `json:"dns_disabled,omitempty"`
+	// SharedNodes is true for a mesh: one node per tailnet key, used both
+	// to dial and to host VIPs. A border leaves it false.
+	SharedNodes bool `json:"shared_nodes,omitempty"`
 	// AuthKeyExpiry is how long the auth keys minted for new nodes last.
 	AuthKeyExpiry Duration `json:"auth_key_expiry"`
 }
@@ -290,6 +293,37 @@ type BridgeRule struct {
 	LocalSources   []LocalSourceSpec `json:"local_sources,omitempty"`
 	Ports          []int             `json:"ports,omitempty"`
 	Authz          AuthzConfig       `json:"authz,omitzero"`
+	// From is the tailnet key this rule leaves. Mesh compile sets it on
+	// every rule. A border sets it on local links so route selection can
+	// see them. Non-local border rules leave it empty and use SourceTailnet.
+	From string `json:"from,omitempty"`
+	// Link is the link name inside a mesh bridge. The rule Name is
+	// from/link, so Link keeps the short name for the ownership id.
+	Link string `json:"link,omitempty"`
+}
+
+// FromTailnet is the tailnet key this rule leaves: From, or else
+// SourceTailnet. Local border links have From set to the source key.
+func (r BridgeRule) FromTailnet() string {
+	if r.From != "" {
+		return r.From
+	}
+	return r.SourceTailnet
+}
+
+// BridgeRef identifies the bridge that owns VIP services this rule publishes
+// into dest. It is from/dest/link, so two bridges that want the same name
+// in one tailnet conflict instead of overwriting each other.
+func (r BridgeRule) BridgeRef(dest string) string {
+	from := r.FromTailnet()
+	if from == "" {
+		from = "local"
+	}
+	link := r.Link
+	if link == "" {
+		link = r.Name
+	}
+	return from + "/" + dest + "/" + link
 }
 
 // DefaultListenAddr is where the web UI listens unless the config or
