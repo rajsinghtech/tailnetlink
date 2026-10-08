@@ -5,7 +5,7 @@ go 1.26.1
 require (
 	github.com/miekg/dns v1.1.72
 	github.com/prometheus/client_golang v1.24.1
-	golang.org/x/oauth2 v0.36.0
+	golang.org/x/oauth2 v0.37.0
 	tailscale.com v1.96.5
 	tailscale.com/client/tailscale/v2 v2.9.0
 )
