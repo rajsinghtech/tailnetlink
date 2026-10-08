@@ -37,7 +37,7 @@ Or with make: `make dev`, `make build && make run`. See [CONTRIBUTING.md](CONTRI
 
 ## Configuration
 
-Config is a JSON file (default: `tailnetlink.json`). One file describes one **border**: one source tailnet bridged into one destination. Run one process per border. The file is the only way to change it: tailnetlink checks it every few seconds and applies changes without a restart. It never writes the file.
+Config is a JSON file (default: `tailnetlink.json`). One file describes one **border**: one source tailnet bridged into one destination, or into several. Run one process per border. The file is the only way to change it: tailnetlink checks it every few seconds and applies changes without a restart. It never writes the file.
 
 Older multi-tailnet configs (`tailnets` / `bridges` / `instance_id`) are no longer read. There is no converter. Rewrite them as a border; see below.
 
@@ -70,11 +70,60 @@ Older multi-tailnet configs (`tailnets` / `bridges` / `instance_id`) are no long
 }
 ```
 
-`links` can start empty (`[]` or left out). tailnetlink still logs both nodes in and reports ready once they are up. It creates no VIP services until a link is added. A later edit to the file is picked up without a restart.
+`links` can start empty (`[]` or left out). tailnetlink still logs the nodes in and reports ready once they are up. It creates no VIP services until a link is added. A later edit to the file is picked up without a restart.
+
+`dest` and `dests` are mutually exclusive. A single `dest` is unchanged. `dests` is a list of destinations.
+
+```json
+{
+  "name": "home-to-work",
+  "source": {
+    "tailnet": "keiretsu.ts.net",
+    "oauth": {
+      "client_id": "...",
+      "client_secret_file": "/run/secrets/source-oauth-secret"
+    },
+    "tags": ["tag:tailnetlink"]
+  },
+  "dests": [
+    {
+      "tailnet": "example.ts.net",
+      "oauth": {
+        "client_id": "...",
+        "client_secret_file": "/run/secrets/example-oauth-secret"
+      },
+      "tags": ["tag:tailnetlink"],
+      "authz": { "mode": "allow_logins", "allow_logins": ["alice@example.com"] }
+    },
+    {
+      "tailnet": "partner.example.com",
+      "oauth": {
+        "client_id": "...",
+        "client_secret_env": "TAILNETLINK_PARTNER_OAUTH_SECRET"
+      },
+      "tags": ["tag:tailnetlink"],
+      "dns": { "enabled": false }
+    }
+  ],
+  "links": [
+    {
+      "name": "api-servers",
+      "tag": "tag:api-server",
+      "ports": [8080, 8443]
+    }
+  ]
+}
+```
+
+One source node does the dialing. Each destination gets its own node, VIP services, split DNS and authz, so allow lists can differ. Links are written once and published into every destination. Adding or removing a destination in the file is picked up without a restart: the destination that left loses only its own services.
+
+A destination that fails to authenticate, call the API, or start its node does not stop the others. `/readyz` is process-wide. It is ready when the config is applied, the source node is up, at least one destination is up, and each non-local link has polled within three poll intervals. A destination whose start already failed does not block that. A destination that is still starting does. If every destination has failed, the process is not ready. A failed destination is tried again on the next config reload. It is not retried in the background.
+
+The source node state stays at `<name>-src`. A single `dest` stays at `<name>-dst` (`tailnetlink-<name>-dst`). Each `dests` entry, including a list of one, uses `<name>-dst-` plus a short hash of the tailnet name. Adding or removing a destination does not rename the others, and those directories do not collide with `<name>-dst`.
 
 ### Ownership
 
-`name` is required. It is the owner written to every VIP service this process creates (`tailnetlink/owner=<name>`), and part of its node hostnames (`tailnetlink-<name>-src`, `tailnetlink-<name>-dst`). 1 to 40 lowercase letters, digits or dashes. Two borders that share a tailnet need different names, and one of them should set `"ui": {"service_name": "svc:..."}` so their UI services don't collide.
+`name` is required. It is the owner written to every VIP service this process creates (`tailnetlink/owner=<name>`), and part of its node hostnames (`tailnetlink-<name>-src`, `tailnetlink-<name>-dst`, and `tailnetlink-<name>-dst-<hash>` when a border has several destinations). 1 to 40 lowercase letters, digits or dashes. Two borders that share a tailnet need different names, and one of them should set `"ui": {"service_name": "svc:..."}` so their UI services don't collide.
 
 tailnetlink only ever changes or deletes a service that carries its own owner annotation. That covers bridged services, the shared DNS VIP, the web UI VIP and local sources. Services made by older versions that only carry `tailnetlink/managed=true` are treated as foreign and never adopted.
 
@@ -82,7 +131,7 @@ tailnetlink only ever changes or deletes a service that carries its own owner an
 
 Stopping tailnetlink (SIGTERM, a restart, a deploy) does not delete anything in your tailnets. VIP services, the DNS VIP and split-DNS stay in place. tailnetlink only deletes a service when the link or side that made it is removed from the config while it is running.
 
-Each node keeps its state in `node.state_dir/<name>-src` and `<name>-dst` (mode 0700). `state_dir` defaults to a `tailnetlink-state` directory next to the config file. Keep that directory on persistent storage; if it is lost, the next start registers new nodes. Borders must not share a `state_dir`. Set `"node": {"ephemeral": true}` to get a new ephemeral device every start.
+Each node keeps its state in `node.state_dir` (mode 0700): `<name>-src` for the source and `<name>-dst` for a single `dest`. Entries in `dests` get `<name>-dst-<hash>`. `state_dir` defaults to a `tailnetlink-state` directory next to the config file. Keep that directory on persistent storage; if it is lost, the next start registers new nodes. Borders must not share a `state_dir`. Set `"node": {"ephemeral": true}` to get a new ephemeral device every start.
 
 To remove everything a border created, stop it and run:
 

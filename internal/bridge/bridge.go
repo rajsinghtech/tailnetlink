@@ -51,6 +51,8 @@ type Manager struct {
 	rules       map[string]context.CancelFunc // keyed by bridge rule name
 	ruleDone    map[string]chan struct{}      // closed when the rule goroutine fully exits
 	ruleRemove  map[string]bool               // set by stopRule: true means delete what the rule owns
+	dropDest    map[string]map[string]bool    // rule -> dest keys whose services to delete on the next stop
+	tailnetErr  map[string]error              // tailnet key -> last start failure
 	webServers  map[string]*http.Server       // UI server on the VIP, keyed by tailnet name
 
 	dnsOff        bool          // split-DNS is off for this border
@@ -89,6 +91,8 @@ func New(store *state.Store, logger *slog.Logger, ui http.Handler) *Manager {
 		rules:       make(map[string]context.CancelFunc),
 		ruleDone:    make(map[string]chan struct{}),
 		ruleRemove:  make(map[string]bool),
+		dropDest:    make(map[string]map[string]bool),
+		tailnetErr:  make(map[string]error),
 		webServers:  make(map[string]*http.Server),
 		nodeDirs:    make(map[string]string),
 		ephemeral:   make(map[string]bool),
@@ -113,19 +117,48 @@ func (m *Manager) SetMetrics(mt *metrics.Metrics) {
 	})
 }
 
-// Ready returns nil once the config has been applied, every configured
-// tailnet's node is up and every tailnet rule has polled recently (within
-// three poll intervals). Otherwise it says what is missing.
+// Ready is process-wide. It returns nil once the config has been applied,
+// the source node is up, at least one destination is up, and every
+// non-local rule has polled within three poll intervals.
+//
+// A destination whose start already failed (recorded in tailnetErr) does
+// not block the source or the destinations that are up. A destination that
+// is still starting, with no node and no error yet, does block. If every
+// destination has failed, Ready reports that none is connected. A source
+// that is down always blocks. Tailnets with an empty role stay required,
+// which is how hand-built configs behave.
+//
+// A failed destination is retried on the next Reconcile. It is not retried
+// in the background.
 func (m *Manager) Ready() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.applied {
 		return errors.New("config not applied yet")
 	}
+	var dests, upDests int
 	for _, name := range slices.Sorted(maps.Keys(m.cfg.Tailnets)) {
-		if m.servers[name] == nil {
+		tc := m.cfg.Tailnets[name]
+		up := m.servers[name] != nil
+		if tc.Role == "dest" {
+			dests++
+			if up {
+				upDests++
+				continue
+			}
+			// A destination that already failed to start does not block
+			// readiness of the source and the destinations that are up.
+			if _, failed := m.tailnetErr[name]; failed {
+				continue
+			}
 			return fmt.Errorf("tailnet %q is not connected", name)
 		}
+		if !up {
+			return fmt.Errorf("tailnet %q is not connected", name)
+		}
+	}
+	if dests > 0 && upDests == 0 {
+		return errors.New("no destination tailnet is connected")
 	}
 	poll := m.cfg.PollInterval.Duration
 	if poll <= 0 {
@@ -161,6 +194,9 @@ func (m *Manager) conflict(tailnet string, err error) {
 	if errors.Is(err, ErrNameConflict) {
 		m.mu.Lock()
 		mt := m.metrics
+		if m.cfg != nil && m.cfg.Tailnets[tailnet].Tailnet != "" {
+			tailnet = m.cfg.Tailnets[tailnet].Tailnet
+		}
 		m.mu.Unlock()
 		mt.Conflict(tailnet)
 	}
@@ -257,24 +293,58 @@ func (m *Manager) Reconcile(ctx context.Context, newCfg *config.Config) {
 	// reachable.
 	for name, oldTC := range old.Tailnets {
 		newTC, still := newCfg.Tailnets[name]
-		if !still || !reflect.DeepEqual(oldTC, newTC) {
-			for _, rule := range old.Bridges {
-				if rule.SourceTailnet == name || slices.Contains(rule.DestTailnets, name) {
-					m.stopRule(rule.Name, !still)
-				}
-			}
-			m.stopTailnet(name, !still)
+		if still && reflect.DeepEqual(oldTC, newTC) {
+			continue
 		}
+		for _, rule := range old.Bridges {
+			switch {
+			case rule.SourceTailnet == name:
+				m.stopRule(rule.Name, !still)
+			case slices.Contains(rule.DestTailnets, name):
+				// Dropping one destination deletes only that destination's
+				// services. The rule restarts and keeps the others.
+				if !still {
+					m.markDropDest(rule.Name, name)
+				}
+				m.stopRule(rule.Name, false)
+			}
+		}
+		m.stopTailnet(name, !still)
+		m.mu.Lock()
+		delete(m.tailnetErr, name)
+		m.mu.Unlock()
 	}
 
+	var broughtUp []string
 	for name, tc := range newCfg.Tailnets {
 		m.mu.Lock()
 		_, running := m.servers[name]
 		m.mu.Unlock()
-		if !running {
-			if err := m.startTailnet(ctx, name, tc, newCfg.StateDir); err != nil {
-				m.logger.Error("failed to start tailnet", "name", name, "err", err)
-				m.store.Log("error", fmt.Sprintf("tailnet %q failed to connect: %v", name, err), nil)
+		if running {
+			continue
+		}
+		if err := m.startTailnet(ctx, name, tc, newCfg.StateDir); err != nil {
+			m.logger.Error("failed to start tailnet", "name", name, "tailnet", tc.Tailnet, "err", err)
+			m.store.Log("error", fmt.Sprintf("tailnet %q (%s) failed to connect: %v", name, tc.Tailnet, err), nil)
+			m.store.SetTailnet(name, state.TailnetStatus{
+				ID: name, Name: tailnetLabel(tc, name), Role: tailnetRole(tc, name), Connected: false,
+			})
+			m.mu.Lock()
+			m.tailnetErr[name] = err
+			m.mu.Unlock()
+			continue
+		}
+		m.mu.Lock()
+		delete(m.tailnetErr, name)
+		m.mu.Unlock()
+		broughtUp = append(broughtUp, name)
+	}
+	// A tailnet that just came up needs its rules restarted so they publish
+	// into it. Nothing is deleted: the destinations already serving stay.
+	for _, name := range broughtUp {
+		for _, rule := range newCfg.Bridges {
+			if rule.SourceTailnet == name || slices.Contains(rule.DestTailnets, name) {
+				m.stopRule(rule.Name, false)
 			}
 		}
 	}
@@ -500,7 +570,9 @@ func (m *Manager) startTailnet(ctx context.Context, name string, tc config.Tailn
 	m.ephemeral[name] = tc.Ephemeral
 	m.mu.Unlock()
 
-	m.store.SetTailnet(name, state.TailnetStatus{Name: tc.Tailnet, Role: name, Connected: true})
+	m.store.SetTailnet(name, state.TailnetStatus{
+		ID: name, Name: tailnetLabel(tc, name), Role: tailnetRole(tc, name), Connected: true,
+	})
 	m.store.Log("info", fmt.Sprintf("connected to tailnet %q (%s)", name, tc.Tailnet), nil)
 
 	// Publish the web UI as svc:tailnetlink TCP:80 in this tailnet.
@@ -624,6 +696,121 @@ func (m *Manager) removing(rule string) bool {
 	return m.ruleRemove[rule]
 }
 
+// tailnetRole is "source" or "dest" when the config says so. An empty role
+// stays the tailnet key so a hand-built config still has a label.
+func tailnetRole(tc config.TailnetConfig, key string) string {
+	if tc.Role != "" {
+		return tc.Role
+	}
+	return key
+}
+
+// tailnetLabel is the tailnet name shown in the UI and metrics. The key is
+// the fallback when a hand-built config has no name.
+func tailnetLabel(tc config.TailnetConfig, key string) string {
+	if tc.Tailnet != "" {
+		return tc.Tailnet
+	}
+	return key
+}
+
+func (m *Manager) tailnetLabel(key string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cfg == nil {
+		return key
+	}
+	return tailnetLabel(m.cfg.Tailnets[key], key)
+}
+
+// authzFor is the destination's authz when it sets a mode, otherwise the
+// link's. Allow lists can differ per destination.
+func (m *Manager) authzFor(rule config.BridgeRule, dest string) config.AuthzConfig {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cfg != nil {
+		if az := m.cfg.Tailnets[dest].Authz; az.Mode != "" {
+			return az
+		}
+	}
+	return rule.Authz
+}
+
+// markDropDest remembers that dest's services should be deleted the next
+// time rule stops. The other destinations are left alone. If the rule is
+// not running, the services are deleted now.
+func (m *Manager) markDropDest(rule, dest string) {
+	m.mu.Lock()
+	if m.dropDest[rule] == nil {
+		m.dropDest[rule] = map[string]bool{}
+	}
+	m.dropDest[rule][dest] = true
+	_, running := m.rules[rule]
+	m.mu.Unlock()
+	if !running {
+		m.sweepIdleDrops(rule)
+	}
+}
+
+// takeDrops returns and clears the destinations whose services this stop
+// should delete.
+func (m *Manager) takeDrops(rule string) map[string]bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	drop := m.dropDest[rule]
+	delete(m.dropDest, rule)
+	if drop == nil {
+		return map[string]bool{}
+	}
+	return drop
+}
+
+// sweepIdleDrops deletes services for a destination that left while its
+// rule was not running.
+func (m *Manager) sweepIdleDrops(rule string) {
+	m.mu.Lock()
+	if _, running := m.rules[rule]; running {
+		m.mu.Unlock()
+		return
+	}
+	drop := m.dropDest[rule]
+	delete(m.dropDest, rule)
+	owner := m.owner
+	clients := make(map[string]*tsclient.Client, len(drop))
+	for dest := range drop {
+		clients[dest] = m.apiClients[dest]
+	}
+	m.mu.Unlock()
+	if len(drop) == 0 {
+		return
+	}
+	for _, b := range m.store.GetBridges() {
+		if b.RuleName != rule || !drop[destOfBridge(rule, b.ID)] {
+			continue
+		}
+		dest := destOfBridge(rule, b.ID)
+		m.stopBridge(b.ID, true)
+		if c := clients[dest]; c != nil && b.ServiceName != "" {
+			if err := deleteOwnedVIPService(context.Background(), c, owner, b.ServiceName); err != nil {
+				m.logger.Warn("drop dest: VIP delete failed", "rule", rule, "dest", dest, "service", b.ServiceName, "err", err)
+			}
+		}
+		m.store.DeleteBridge(b.ID)
+	}
+}
+
+// destOfBridge is the destination key inside a bridge id
+// ("rule/dest/fqdn" or "rule/local/dest/addr").
+func destOfBridge(rule, id string) string {
+	rest, ok := strings.CutPrefix(id, rule+"/")
+	if !ok {
+		return ""
+	}
+	rest = strings.TrimPrefix(rest, "local/")
+	dest, _, _ := strings.Cut(rest, "/")
+	return dest
+}
+
 // stopBridge stops one bridge's forwarder and DNS records. With remove set
 // the DNS cleanup may delete the shared DNS VIP; the bridge's own VIP
 // service is the caller's to delete.
@@ -677,12 +864,17 @@ func (m *Manager) runRule(ctx context.Context, rule config.BridgeRule, pollInter
 
 		if destSrv == nil {
 			m.logger.Error("bridge rule: dest tailnet not connected", "rule", rule.Name, "dest", destName)
-			m.store.Log("error", fmt.Sprintf("[%s] rule failed: dest tailnet %q not connected", rule.Name, destName), nil)
-			return
+			m.store.Log("error", fmt.Sprintf("[%s] skipping dest tailnet %q: not connected", rule.Name, destName), nil)
+			continue
 		}
 
 		rec := NewReconciler(destClient, rule.Ports, destTags, m.ownerID(), m.logger)
 		dests = append(dests, destCtx{name: destName, srv: destSrv, client: destClient, tags: destTags, rec: rec})
+	}
+	if len(dests) == 0 {
+		m.logger.Error("bridge rule: no destination is connected", "rule", rule.Name)
+		m.store.Log("error", fmt.Sprintf("[%s] rule failed: no destination is connected", rule.Name), nil)
+		return
 	}
 
 	deviceFQDNs := make([]string, len(rule.SourceDevices))
@@ -717,6 +909,7 @@ func (m *Manager) runRule(ctx context.Context, rule config.BridgeRule, pollInter
 		case <-ctx.Done():
 			devWg.Wait() // drain in-flight handlers before cleanup
 			remove := m.removing(rule.Name)
+			drop := m.takeDrops(rule.Name)
 			mu.Lock()
 			devs := make([]Device, 0, len(activeDevices))
 			for _, dev := range activeDevices {
@@ -724,17 +917,20 @@ func (m *Manager) runRule(ctx context.Context, rule config.BridgeRule, pollInter
 			}
 			mu.Unlock()
 			for _, dev := range devs {
+				removedHere := false
 				for _, dest := range dests {
 					bridgeID := rule.Name + "/" + dest.name + "/" + dev.FQDN
-					m.stopBridge(bridgeID, remove)
-					if remove {
+					gone := remove || drop[dest.name]
+					m.stopBridge(bridgeID, gone)
+					if gone {
+						removedHere = true
 						if err := dest.rec.Delete(context.Background(), rule.SourceTailnet, dev, shortNameFor(rule, dev.FQDN)); err != nil {
 							m.logger.Warn("reconciler: delete failed", "rule", rule.Name, "dest", dest.name, "device", dev.Name, "err", err)
 						}
 					}
 					m.store.DeleteBridge(bridgeID)
 				}
-				if remove {
+				if removedHere {
 					m.store.Log("info", fmt.Sprintf("[%s] bridge removed: %s", rule.Name, dev.Name), nil)
 				}
 			}
@@ -777,7 +973,7 @@ func (m *Manager) handleDeviceAdded(
 		bridgeID := rule.Name + "/" + dest.name + "/" + dev.FQDN
 
 		m.store.UpsertBridge(state.BridgeEntry{
-			ID: bridgeID, RuleName: rule.Name, DestTailnet: dest.name,
+			ID: bridgeID, RuleName: rule.Name, DestTailnet: m.tailnetLabel(dest.name),
 			ServiceName: svcName,
 			SourceHost:  dev.Name, SourceIP: dev.IP.String(),
 			Ports: rule.Ports, Status: state.BridgeStatusPending, CreatedAt: createdAt,
@@ -788,7 +984,7 @@ func (m *Manager) handleDeviceAdded(
 			m.conflict(dest.name, err)
 			m.logger.Error("reconciler: ensure failed", "rule", rule.Name, "dest", dest.name, "device", dev.Name, "err", err)
 			m.store.UpsertBridge(state.BridgeEntry{
-				ID: bridgeID, RuleName: rule.Name, DestTailnet: dest.name,
+				ID: bridgeID, RuleName: rule.Name, DestTailnet: m.tailnetLabel(dest.name),
 				ServiceName: svcName,
 				SourceHost:  dev.Name, SourceIP: dev.IP.String(),
 				Ports: rule.Ports, Status: state.BridgeStatusError, Error: err.Error(), CreatedAt: createdAt,
@@ -798,11 +994,11 @@ func (m *Manager) handleDeviceAdded(
 		}
 
 		fwd := NewForwarder(dest.srv, srcSrv, vip, bridgeID, dialTimeout, m.store, m.logger)
-		fwd.rule, fwd.metrics, fwd.authz = rule.Name, m.metricsRef(), rule.Authz
+		fwd.rule, fwd.metrics, fwd.authz = rule.Name, m.metricsRef(), m.authzFor(rule, dest.name)
 		if err := startForwarder(fwd, ctx); err != nil {
 			m.logger.Error("forwarder: start failed", "rule", rule.Name, "dest", dest.name, "device", dev.Name, "err", err)
 			m.store.UpsertBridge(state.BridgeEntry{
-				ID: bridgeID, RuleName: rule.Name, DestTailnet: dest.name, ServiceName: vip.ServiceName,
+				ID: bridgeID, RuleName: rule.Name, DestTailnet: m.tailnetLabel(dest.name), ServiceName: vip.ServiceName,
 				SourceHost: dev.Name, SourceIP: dev.IP.String(),
 				Ports: rule.Ports, Status: state.BridgeStatusError, Error: err.Error(), CreatedAt: createdAt,
 			})
@@ -811,7 +1007,7 @@ func (m *Manager) handleDeviceAdded(
 		}
 
 		m.store.UpsertBridge(state.BridgeEntry{
-			ID: bridgeID, RuleName: rule.Name, DestTailnet: dest.name, ServiceName: vip.ServiceName,
+			ID: bridgeID, RuleName: rule.Name, DestTailnet: m.tailnetLabel(dest.name), ServiceName: vip.ServiceName,
 			SourceHost: dev.Name, SourceIP: dev.IP.String(), DestVIP: vip.VIP.String(),
 			Ports: rule.Ports, Status: state.BridgeStatusActive, CreatedAt: createdAt,
 		})
@@ -1074,7 +1270,7 @@ func (m *Manager) releaseSharedDNS(destName, parentDomain, recordLabel string, r
 // A custom dns_name is always attempted independently.
 func (m *Manager) startDeviceDNS(ctx context.Context, bridgeID, ruleName, srcDomain, sourceFQDN, customDNS string, vipIP netip.Addr, dest destCtx) {
 	m.mu.Lock()
-	off := m.dnsOff
+	off := m.dnsOff || (m.cfg != nil && m.cfg.Tailnets[dest.name].DNSDisabled)
 	m.mu.Unlock()
 	if off {
 		return

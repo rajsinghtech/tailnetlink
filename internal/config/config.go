@@ -127,6 +127,15 @@ type TailnetConfig struct {
 	// default. The e2e tests use them to run against testcontrol.
 	ControlURL string `json:"control_url,omitempty"`
 	APIBaseURL string `json:"api_base_url,omitempty"`
+
+	// Role is "source" or "dest" for a tailnet compiled from a border.
+	Role string `json:"role,omitempty"`
+	// DNSDisabled turns split-DNS off on this tailnet. The border-wide
+	// switch turns it off on every tailnet.
+	DNSDisabled bool `json:"dns_disabled,omitempty"`
+	// Authz, when it sets a mode, overrides the link authz for bridges
+	// published into this destination.
+	Authz AuthzConfig `json:"authz,omitzero"`
 }
 
 func (tc TailnetConfig) HasAuth() bool {

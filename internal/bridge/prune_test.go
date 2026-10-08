@@ -62,6 +62,45 @@ func TestPruneDeletesOnlyOwned(t *testing.T) {
 	}
 }
 
+func TestPruneTwoDestinations(t *testing.T) {
+	t.Setenv("TNL_PRUNE_MULTI_SECRET", "secret")
+	a := fakeapi.New(t)
+	a.Tailnet = "example.ts.net"
+	b := fakeapi.New(t)
+	b.Tailnet = "partner.example.com"
+	own := map[string]string{"tailnetlink/owner": testOwner}
+	foreign := map[string]string{"tailnetlink/owner": "other"}
+	a.PutService(tsclient.VIPService{Name: "svc:tnl-src-web-1", Addrs: []string{"100.100.0.1"}, Annotations: own})
+	a.PutService(tsclient.VIPService{Name: "svc:theirs", Addrs: []string{"100.100.0.9"}, Annotations: foreign})
+	a.SetSplitDNS("example.com", []string{"100.100.0.1", "100.99.0.1"})
+	b.PutService(tsclient.VIPService{Name: "svc:tnl-src-web-1", Addrs: []string{"100.100.0.2"}, Annotations: own})
+	b.PutService(tsclient.VIPService{Name: "svc:hand-made", Addrs: []string{"100.100.0.7"}})
+	b.SetSplitDNS("example.com", []string{"100.100.0.2"})
+	oauth := config.OAuthCreds{ClientID: "id", ClientSecretEnv: "TNL_PRUNE_MULTI_SECRET"}
+	cfg := &config.Config{
+		InstanceID: testOwner,
+		Tailnets: map[string]config.TailnetConfig{
+			"edge-dst-aaaa": {Tailnet: a.Tailnet, APIBaseURL: a.URL(), OAuth: oauth, Role: "dest"},
+			"edge-dst-bbbb": {Tailnet: b.Tailnet, APIBaseURL: b.URL(), OAuth: oauth, Role: "dest"},
+		},
+	}
+	if _, err := Prune(context.Background(), cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := a.ServiceNames(), []string{"svc:theirs"}; !slices.Equal(got, want) {
+		t.Errorf("example.ts.net services = %v", got)
+	}
+	if got := a.SplitDNS("example.com"); !slices.Equal(got, []string{"100.99.0.1"}) {
+		t.Errorf("example.ts.net resolvers = %v", got)
+	}
+	if got, want := b.ServiceNames(), []string{"svc:hand-made"}; !slices.Equal(got, want) {
+		t.Errorf("partner services = %v", got)
+	}
+	if b.HasZone("example.com") {
+		t.Error("partner zone with only our resolver is still there")
+	}
+}
+
 func TestPruneDryRunChangesNothing(t *testing.T) {
 	api, cfg := pruneFixture(t)
 	api.ResetCalls()
