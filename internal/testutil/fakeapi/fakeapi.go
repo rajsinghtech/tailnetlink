@@ -42,14 +42,15 @@ type Server struct {
 
 	srv *httptest.Server
 
-	mu       sync.Mutex
-	fail     map[Call]int
-	once     *fault
-	calls    []Call
-	devices  []tsclient.Device
-	services map[string]tsclient.VIPService
-	splitDNS map[string][]string
-	nextIP   int
+	mu            sync.Mutex
+	fail          map[Call]int
+	once          *fault
+	calls         []Call
+	deviceQueries []string
+	devices       []tsclient.Device
+	services      map[string]tsclient.VIPService
+	splitDNS      map[string][]string
+	nextIP        int
 
 	// Token bucket. limitRate <= 0 means unlimited.
 	limitRate   float64
@@ -405,11 +406,19 @@ func (s *Server) patchSplitDNS(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+// DeviceListQueries is the raw query string of each device list, in order.
+func (s *Server) DeviceListQueries() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.deviceQueries...)
+}
+
 func (s *Server) listDevices(w http.ResponseWriter, r *http.Request) {
 	if !s.checkTailnet(w, r) {
 		return
 	}
 	s.mu.Lock()
+	s.deviceQueries = append(s.deviceQueries, r.URL.RawQuery)
 	out := append([]tsclient.Device(nil), s.devices...)
 	s.mu.Unlock()
 	writeJSON(w, map[string]any{"devices": out})
