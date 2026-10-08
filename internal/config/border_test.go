@@ -89,8 +89,11 @@ func TestBorderEverySetting(t *testing.T) {
 		t.Fatalf("bridges = %+v", cfg.Bridges)
 	}
 	loc := cfg.Bridges[2]
-	if loc.SourceTailnet != "" || len(loc.LocalSources) != 1 || loc.DestTailnets[0] != "test-dst" {
+	if loc.SourceTailnet != "" || loc.From != "test-src" || len(loc.LocalSources) != 1 || loc.DestTailnets[0] != "test-dst" {
 		t.Errorf("local link = %+v", loc)
+	}
+	if loc.BridgeRef("test-dst") != "test-src/test-dst/loc" {
+		t.Errorf("bridge ref = %s", loc.BridgeRef("test-dst"))
 	}
 }
 

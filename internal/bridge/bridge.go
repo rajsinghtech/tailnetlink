@@ -51,6 +51,7 @@ type Manager struct {
 	rules       map[string]context.CancelFunc // keyed by bridge rule name
 	ruleDone    map[string]chan struct{}      // closed when the rule goroutine fully exits
 	ruleRemove  map[string]bool               // set by stopRule: true means delete what the rule owns
+	dropDest    map[string]map[string]bool    // rule -> dest keys whose services to delete on the next stop
 	webServers  map[string]*http.Server       // UI server on the VIP, keyed by tailnet name
 
 	dnsOff        bool          // split-DNS is off for this border
@@ -97,6 +98,7 @@ func New(store *state.Store, logger *slog.Logger, ui http.Handler) *Manager {
 		rules:         make(map[string]context.CancelFunc),
 		ruleDone:      make(map[string]chan struct{}),
 		ruleRemove:    make(map[string]bool),
+		dropDest:      make(map[string]map[string]bool),
 		webServers:    make(map[string]*http.Server),
 		nodeDirs:      make(map[string]string),
 		ephemeral:     make(map[string]bool),
@@ -270,8 +272,16 @@ func (m *Manager) Reconcile(ctx context.Context, newCfg *config.Config) {
 		newTC, still := newCfg.Tailnets[name]
 		if !still || !reflect.DeepEqual(oldTC, newTC) {
 			for _, rule := range old.Bridges {
-				if rule.SourceTailnet == name || slices.Contains(rule.DestTailnets, name) {
+				switch {
+				case rule.SourceTailnet == name:
 					m.stopRule(rule.Name, !still)
+				case slices.Contains(rule.DestTailnets, name):
+					// Dropping one destination deletes only that destination's
+					// services. The rule restarts and keeps the others.
+					if !still {
+						m.markDropDest(rule.Name, name)
+					}
+					m.stopRule(rule.Name, false)
 				}
 			}
 			m.stopTailnet(name, !still)
@@ -656,6 +666,99 @@ func (m *Manager) stopBridge(bridgeID string, remove bool) {
 	}
 }
 
+// authzFor is the destination's authz when it sets a mode, otherwise the
+// link's. Allow lists can differ per destination. A single-dest border
+// leaves the tailnet mode empty, so this is the link authz.
+func (m *Manager) authzFor(rule config.BridgeRule, dest string) config.AuthzConfig {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cfg != nil {
+		if az := m.cfg.Tailnets[dest].Authz; az.Mode != "" {
+			return az
+		}
+	}
+	return rule.Authz
+}
+
+// markDropDest remembers that dest's services should be deleted the next
+// time rule stops. The other destinations are left alone. If the rule is
+// not running, the services are deleted now.
+func (m *Manager) markDropDest(rule, dest string) {
+	m.mu.Lock()
+	if m.dropDest == nil {
+		m.dropDest = map[string]map[string]bool{}
+	}
+	if m.dropDest[rule] == nil {
+		m.dropDest[rule] = map[string]bool{}
+	}
+	m.dropDest[rule][dest] = true
+	_, running := m.rules[rule]
+	m.mu.Unlock()
+	if !running {
+		m.sweepIdleDrops(rule)
+	}
+}
+
+// takeDrops returns and clears the destinations whose services this stop
+// should delete.
+func (m *Manager) takeDrops(rule string) map[string]bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	drop := m.dropDest[rule]
+	delete(m.dropDest, rule)
+	if drop == nil {
+		return map[string]bool{}
+	}
+	return drop
+}
+
+// sweepIdleDrops deletes services for a destination that left while its
+// rule was not running.
+func (m *Manager) sweepIdleDrops(rule string) {
+	m.mu.Lock()
+	if _, running := m.rules[rule]; running {
+		m.mu.Unlock()
+		return
+	}
+	drop := m.dropDest[rule]
+	delete(m.dropDest, rule)
+	owner := m.owner
+	clients := make(map[string]*tsclient.Client, len(drop))
+	for dest := range drop {
+		clients[dest] = m.apiClients[dest]
+	}
+	m.mu.Unlock()
+	if len(drop) == 0 {
+		return
+	}
+	for _, b := range m.store.GetBridges() {
+		if b.RuleName != rule || !drop[destOfBridge(rule, b.ID)] {
+			continue
+		}
+		dest := destOfBridge(rule, b.ID)
+		m.forgetVIP(dest, b.ServiceName)
+		m.stopBridge(b.ID, true)
+		if c := clients[dest]; c != nil && b.ServiceName != "" {
+			if err := deleteOwnedVIPService(context.Background(), c, owner, b.ServiceName); err != nil {
+				m.logger.Warn("drop dest: VIP delete failed", "rule", rule, "dest", dest, "service", b.ServiceName, "err", err)
+			}
+		}
+		m.store.DeleteBridge(b.ID)
+	}
+}
+
+// destOfBridge is the destination key inside a bridge id
+// ("rule/dest/fqdn" or "rule/local/dest/addr").
+func destOfBridge(rule, id string) string {
+	rest, ok := strings.CutPrefix(id, rule+"/")
+	if !ok {
+		return ""
+	}
+	rest = strings.TrimPrefix(rest, "local/")
+	dest, _, _ := strings.Cut(rest, "/")
+	return dest
+}
+
 type destCtx struct {
 	name   string
 	srv    *tsnet.Server
@@ -691,12 +794,18 @@ func (m *Manager) runRule(ctx context.Context, rule config.BridgeRule, pollInter
 
 		if destSrv == nil {
 			m.logger.Error("bridge rule: dest tailnet not connected", "rule", rule.Name, "dest", destName)
-			m.store.Log("error", fmt.Sprintf("[%s] rule failed: dest tailnet %q not connected", rule.Name, destName), nil)
-			return
+			m.store.Log("error", fmt.Sprintf("[%s] skipping dest tailnet %q: not connected", rule.Name, destName), nil)
+			continue
 		}
 
 		rec := NewReconciler(destClient, rule.Ports, destTags, m.ownerID(), m.logger)
+		rec.bridge = rule.BridgeRef(destName)
 		dests = append(dests, destCtx{name: destName, srv: destSrv, client: destClient, tags: destTags, rec: rec})
+	}
+	if len(dests) == 0 {
+		m.logger.Error("bridge rule: no destination is connected", "rule", rule.Name)
+		m.store.Log("error", fmt.Sprintf("[%s] rule failed: no destination is connected", rule.Name), nil)
+		return
 	}
 
 	deviceFQDNs := make([]string, len(rule.SourceDevices))
@@ -747,15 +856,17 @@ func (m *Manager) runRule(ctx context.Context, rule config.BridgeRule, pollInter
 	q.wg.Wait()
 
 	remove := m.removing(rule.Name)
+	drop := m.takeDrops(rule.Name)
 	for _, b := range m.store.GetBridges() {
 		if b.RuleName != rule.Name {
 			continue
 		}
+		destName, fqdn, ok := splitBridgeID(rule.Name, b.ID)
+		gone := remove || drop[destName]
 		m.forgetVIP(b.DestTailnet, b.ServiceName)
-		m.stopBridge(b.ID, remove)
-		if remove {
-			destName, fqdn, ok := splitBridgeID(rule.Name, b.ID)
-			if dest, known := destByName[destName]; ok && known {
+		m.stopBridge(b.ID, gone)
+		if gone && ok {
+			if dest, known := destByName[destName]; known {
 				dev := Device{Name: b.SourceHost, FQDN: fqdn}
 				if err := dest.rec.Delete(context.Background(), rule.SourceTailnet, dev, shortNameFor(rule, fqdn)); err != nil {
 					m.logger.Warn("reconciler: delete failed", "rule", rule.Name, "dest", destName, "device", dev.Name, "err", err)
