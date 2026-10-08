@@ -314,7 +314,7 @@ func (m *Manager) converge(ctx context.Context, rule config.BridgeRule, dest des
 	}
 
 	base := state.BridgeEntry{
-		ID: item.bridgeID, RuleName: rule.Name, DestTailnet: dest.name,
+		ID: item.bridgeID, RuleName: rule.Name, DestTailnet: m.tailnetLabel(dest.name),
 		ServiceName: svcName, SourceHost: dev.Name, SourceIP: dev.IP.String(),
 		Ports: slices.Clone(rule.Ports), CreatedAt: item.created,
 	}

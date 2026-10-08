@@ -27,7 +27,7 @@ import (
 //
 // Traffic path:
 //
-//	raj-client → VIP IP:port
+//	client → VIP IP:port
 //	  → Tailscale routes to this tsnet node (via ListenService)
 //	  → forwarder dials source device IP:port through srcSrv
 //	  → bidirectional copy

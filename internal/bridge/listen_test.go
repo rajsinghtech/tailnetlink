@@ -256,3 +256,40 @@ tailnetlink_vip_services{state="desired",tailnet="dest"} 1
 		}
 	}
 }
+
+func TestVIPBookkeepingEdges(t *testing.T) {
+	var none *Manager
+	none.bindNode("dest", &tsnet.Server{})
+	none.noteVIP("dest", "svc:a", true)
+	none.forgetVIP("dest", "svc:a")
+	none.dropAdvertised("dest", "svc:a")
+	none.forgetTailnet("dest")
+
+	m := New(state.New(), discardLogger(), nil)
+	m.bindNode("", &tsnet.Server{})
+	m.bindNode("dest", nil)
+	m.noteVIP("", "svc:a", true)
+	m.noteVIP("dest", "", true)
+	m.forgetVIP("dest", "")
+	m.dropAdvertised("", "svc:a")
+	m.forgetTailnet("")
+
+	m.vipDesired = nil
+	m.vipAdvertised = nil
+	m.noteVIP("dest", "svc:a", true)
+	m.noteVIP("dest", "svc:b", false)
+	desired, advertised := m.vipCounts()
+	if desired["dest"] != 2 || advertised["dest"] != 1 {
+		t.Fatalf("counts = %v %v", desired, advertised)
+	}
+	m.forgetVIP("dest", "svc:a")
+	m.dropAdvertised("dest", "svc:b")
+	desired, advertised = m.vipCounts()
+	if desired["dest"] != 1 || advertised["dest"] != 0 {
+		t.Fatalf("after forget = %v %v", desired, advertised)
+	}
+	m.unbindNode("dest", nil)
+	if _, ok := m.vipDesired["dest"]; ok {
+		t.Fatal("unbind left the tailnet")
+	}
+}
