@@ -289,3 +289,101 @@ func TestDiscovererCancelledPollRetriesLater(t *testing.T) {
 		}
 	}
 }
+
+func TestServiceListFailurePublishesNothing(t *testing.T) {
+	api := fakeapi.New(t)
+	api.SetDevices([]tsclient.Device{dev("web-1", []string{"tag:web"}, "100.64.0.1")})
+	api.PutService(tsclient.VIPService{Name: "svc:ai", Addrs: []string{"100.100.1.1"}, Tags: []string{"tag:web"}})
+	d := NewDiscoverer(api.Client(), "tag:web", nil, nil, time.Hour, discardLogger())
+	var snaps []map[string]Device
+	d.onSnapshot = func(found map[string]Device) {
+		cp := map[string]Device{}
+		for k, v := range found {
+			cp[k] = v
+		}
+		snaps = append(snaps, cp)
+	}
+	d.poll1(context.Background())
+	if len(snaps) != 1 || len(snaps[0]) != 2 {
+		t.Fatalf("first snapshot = %+v", snaps)
+	}
+	api.Fail("GET", "/vip-services", 429)
+	d.poll1(context.Background())
+	if len(snaps) != 1 {
+		t.Fatalf("a failed service list published %d snapshots", len(snaps))
+	}
+}
+
+func TestRemovalWaitsAndIsCapped(t *testing.T) {
+	api := fakeapi.New(t)
+	var devs []tsclient.Device
+	for i := range 30 {
+		devs = append(devs, dev(fmt.Sprintf("web-%02d", i), []string{"tag:web"}, fmt.Sprintf("100.64.1.%d", i+1)))
+	}
+	api.SetDevices(devs)
+	d := NewDiscoverer(api.Client(), "tag:web", nil, nil, time.Hour, discardLogger())
+	d.removeAfterPolls = 1
+	d.removeAfter = time.Hour
+	d.maxDeletes = 10
+	var last map[string]Device
+	d.onSnapshot = func(found map[string]Device) { last = found }
+	d.poll1(context.Background())
+	if len(last) != 30 {
+		t.Fatalf("seen %d, want 30", len(last))
+	}
+	api.SetDevices(nil)
+	d.poll1(context.Background())
+	if len(last) != 20 {
+		t.Fatalf("after one empty poll %d names remain, want 20 (cap 10)", len(last))
+	}
+	d.poll1(context.Background())
+	if len(last) != 10 {
+		t.Fatalf("after two empty polls %d remain, want 10", len(last))
+	}
+	d.poll1(context.Background())
+	if len(last) != 0 {
+		t.Fatalf("after three empty polls %d remain, want 0", len(last))
+	}
+}
+
+func TestRemovalByTimeAndReregister(t *testing.T) {
+	api := fakeapi.New(t)
+	api.SetDevices([]tsclient.Device{dev("web-1", []string{"tag:web"}, "100.64.0.1")})
+	d := NewDiscoverer(api.Client(), "tag:web", nil, nil, time.Hour, discardLogger())
+	now := time.Now()
+	d.nowFn = func() time.Time { return now }
+	d.removeAfterPolls = 100
+	d.removeAfter = time.Minute
+	var last map[string]Device
+	d.onSnapshot = func(found map[string]Device) { last = found }
+	d.poll1(context.Background())
+
+	now = now.Add(time.Minute)
+	api.SetDevices(nil)
+	d.poll1(context.Background())
+	if len(last) != 1 {
+		t.Fatalf("first miss removed the name: %d", len(last))
+	}
+
+	// Same name, new node, comes back before the window ends.
+	api.SetDevices([]tsclient.Device{{
+		NodeID: "n-web-1-new", Name: "web-1.src.example", Hostname: "web-1",
+		Tags: []string{"tag:web"}, Addresses: []string{"100.64.0.9"},
+	}})
+	d.poll1(context.Background())
+	if len(last) != 1 || last["web-1.src.example"].IP.String() != "100.64.0.9" {
+		t.Fatalf("re-register snapshot = %+v", last)
+	}
+
+	now = now.Add(time.Minute)
+	api.SetDevices(nil)
+	d.poll1(context.Background())
+	if len(last) != 1 {
+		t.Fatalf("clock just started, name gone: %d", len(last))
+	}
+	now = now.Add(time.Minute)
+	d.poll1(context.Background())
+	if len(last) != 0 {
+		t.Fatalf("after the time window %d names remain", len(last))
+	}
+}

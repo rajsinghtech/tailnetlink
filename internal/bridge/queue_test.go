@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -336,6 +337,38 @@ func TestDeleteIsRetriedWhenItFails(t *testing.T) {
 		_, ok := tm.dest.Service("svc:tnl-src-h00000")
 		return !ok
 	})
+}
+
+func TestServiceList429DoesNotDeleteVIPs(t *testing.T) {
+	tm := newTestManager(t)
+	tm.src.SetDevices(manyDevices(1))
+	for _, name := range []string{"svc:a", "svc:b", "svc:c"} {
+		tm.src.PutService(tsclient.VIPService{Name: name, Addrs: []string{"100.100.1.1"}, Tags: []string{"tag:web"}})
+	}
+	tm.startRule(t, webRule(), 30*time.Millisecond)
+	waitFor(t, 5*time.Second, "device and services active", func() bool {
+		a, _, _ := bridgeCounts(tm.m.store)
+		return a == 4
+	})
+	before, ok := tm.dest.Service("svc:tnl-src-h00000")
+	if !ok {
+		t.Fatal("device VIP missing")
+	}
+	tm.dest.ResetCalls()
+	tm.src.Fail("GET", "/vip-services", 429)
+	time.Sleep(400 * time.Millisecond)
+	_, _, del := destMethods(t, tm)
+	if del != 0 {
+		t.Fatalf("DELETEs after one 429 = %d, want 0", del)
+	}
+	after, ok := tm.dest.Service("svc:tnl-src-h00000")
+	if !ok || !reflect.DeepEqual(before, after) {
+		t.Fatalf("VIP changed after the failed list: before %+v after %+v ok=%v", before, after, ok)
+	}
+	a, _, _ := bridgeCounts(tm.m.store)
+	if a != 4 {
+		t.Fatalf("active = %d, want 4", a)
+	}
 }
 
 func TestProvisionCallCountAndPeakAtScale(t *testing.T) {
