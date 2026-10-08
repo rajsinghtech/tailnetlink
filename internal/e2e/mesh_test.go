@@ -323,16 +323,6 @@ func hostnameCount(tn *tailnet, host string) int {
 	return n
 }
 
-func logCount(r *running, sub string) int {
-	n := 0
-	for _, l := range r.store.GetLogs(1000) {
-		if strings.Contains(l.Message, sub) {
-			n++
-		}
-	}
-	return n
-}
-
 func (g *meshRig) assertForeign(t *testing.T, colleagues map[string]nodeSnap, svcs map[string][]tsclient.VIPService) {
 	t.Helper()
 	for key, want := range colleagues {
