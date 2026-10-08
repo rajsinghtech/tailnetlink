@@ -95,7 +95,7 @@ tailnetlink prune -data data.json
 
 `links` can be empty or left out. The process still joins both tailnets, and a later edit that adds a link is picked up without a restart.
 
-A link has a `name` and exactly one of `tag`, `devices`, `services` or `local`, plus `ports` (not for local).
+A link has a `name` and exactly one of `tag`, `devices`, `services` or `local`, plus `ports` (not for `local`).
 
 | Field | Description |
 |---|---|
@@ -103,7 +103,7 @@ A link has a `name` and exactly one of `tag`, `devices`, `services` or `local`, 
 | `tag` | Discover devices and VIP services with this ACL tag |
 | `devices` | Explicit device specs (`fqdn`, optional `dns_name`, `dns_zone`, `short_name`) |
 | `services` | Explicit VIP service names from the source (`name`, optional DNS fields) |
-| `local` | Addresses reachable from the host (`addr`, optional `ports`, `expose_port`, `dns_name`, `dns_zone`, `short_name`). See [Local targets](#local-targets) |
+| `local` | Addresses dialed by this process (`addr`, optional `ports`, `expose_port`, `via`, `dns_name`, `dns_zone`, `short_name`). See [Local targets](#local-targets) |
 | `ports` | TCP ports to forward (required except for `local`) |
 
 `short_name` must be a DNS label: 1 to 63 lowercase letters, digits or dashes, not starting or ending with a dash. Two entries that would end up with the same short name are rejected when the config loads. Names tailnetlink generates itself are cut to fit and get a short hash suffix.
@@ -138,6 +138,41 @@ An empty `ports` value, a repeated VIP port, a port outside 1–65535, or a port
 
 ```json
 { "addr": "127.0.0.1:11434", "expose_port": 80, "dns_name": "ollama.example.com", "short_name": "ollama" }
+```
+
+### Dialing through the source tailnet
+
+`via` is per entry. Leave it out, or set `"pod"`, and the dial uses the host network. Name lookup then uses the process resolver (`/etc/resolv.conf`), which is what an in-cluster name such as a Kubernetes Service needs. That is the default, and it is what every existing config does.
+
+`"via": "tailnet"` dials through the source tsnet node instead. A hostname is resolved as a client of that tailnet: MagicDNS names come from the netmap, and any other name is queried with the tailnet's split-DNS config. The query is sent through the userspace netstack, including to a nameserver that is reachable only over a subnet route. The pod resolver is not used.
+
+```json
+{
+  "name": "db",
+  "local": [
+    {
+      "addr": "app.internal.example.com",
+      "via": "tailnet",
+      "dns_name": "db.example.com",
+      "short_name": "db",
+      "ports": [443]
+    }
+  ]
+}
+```
+
+An IP works the same way. `10.20.0.10` with `"via": "tailnet"` is dialed through the source node. A `ports` list or map works as for any other local entry. Pod and tailnet entries can share one link.
+
+Only this node is affected. tailnetlink does not approve routes, change other devices, edit policy, or write tailnet DNS settings. `RouteAll` stays off, so the node does not accept every subnet route the tailnet offers. It installs, in its userspace WireGuard config, the single most specific advertised prefix that covers each configured address (and the prefix that covers a split-DNS nameserver used to resolve a name). Other advertised prefixes are left unused. Removing the entry, or shutting down, takes those prefixes back out. The node has no TUN device and does not change iptables or the host routing table.
+
+The source tailnet's policy still has to allow this node's tag to reach the address. A missing grant drops the packets and the dial fails (`tailnetlink_routed_dial_failures_total` with `reason="denied"`). A missing route fails before a packet is sent (`reason="no_route"`).
+
+```json
+{
+  "src": ["tag:tailnetlink"],
+  "dst": ["10.20.0.10"],
+  "ip": ["443"]
+}
 ```
 
 When a link discovers by `tag`, it skips anything it made itself: VIP services annotated `tailnetlink/managed=true` and devices whose hostname starts with `tailnetlink-`.

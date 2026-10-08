@@ -27,6 +27,7 @@ type Metrics struct {
 	connsTotal   *prometheus.CounterVec
 	bytes        *prometheus.CounterVec
 	dialFailures *prometheus.CounterVec
+	routedDials  *prometheus.CounterVec
 	apiErrors    *prometheus.CounterVec
 	apiRequests  *prometheus.CounterVec
 	apiLatency   *prometheus.HistogramVec
@@ -56,6 +57,10 @@ func New() *Metrics {
 			Name: "tailnetlink_dial_failures_total",
 			Help: "Backend dials that failed.",
 		}, []string{"rule"}),
+		routedDials: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "tailnetlink_routed_dial_failures_total",
+			Help: "Routed dials that failed. reason is no_route (nothing in the source tailnet covers that IP, or this node is not accepting subnet routes) or denied (the dial was filtered or timed out; a missing grant drops the packets).",
+		}, []string{"rule", "reason"}),
 		apiErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "tailnetlink_api_errors_total",
 			Help: "Tailscale API requests that failed or returned an error status (404 is not counted).",
@@ -86,7 +91,7 @@ func New() *Metrics {
 	m.reg.MustRegister(
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
-		m.connsActive, m.connsTotal, m.bytes, m.dialFailures,
+		m.connsActive, m.connsTotal, m.bytes, m.dialFailures, m.routedDials,
 		m.apiErrors, m.apiRequests, m.apiLatency, m.pollDuration, m.pollErrors, m.conflicts,
 	)
 	return m
@@ -193,6 +198,20 @@ func (m *Metrics) DialFailed(rule string) {
 		return
 	}
 	m.dialFailures.WithLabelValues(rule).Inc()
+}
+
+// RoutedDialFailed records a failed dial through a source-tailnet subnet route.
+// reason is no_route, denied, or error.
+func (m *Metrics) RoutedDialFailed(rule, reason string) {
+	if m == nil {
+		return
+	}
+	switch reason {
+	case "no_route", "denied", "error":
+	default:
+		reason = "error"
+	}
+	m.routedDials.WithLabelValues(rule, reason).Inc()
 }
 
 // PollDone records one discovery poll for rule.

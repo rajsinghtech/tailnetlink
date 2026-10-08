@@ -280,6 +280,39 @@ func TestParseLocalMultiPort(t *testing.T) {
 	}
 }
 
+func TestParseViaTailnet(t *testing.T) {
+	body := borderJSON(`"links": [{
+		"name": "db",
+		"local": [
+			{"addr": "10.20.0.10", "dns_name": "db.example.com", "short_name": "db", "via": "tailnet", "ports": [443, 80]},
+			{"addr": "127.0.0.1:8080", "dns_name": "pod.example.com", "short_name": "pod"}
+		]
+	}]`)
+	cfg, err := config.Parse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := cfg.Bridges[0]
+	if rule.SourceTailnet != "test-src" || len(rule.LocalSources) != 2 || rule.DestTailnets[0] != "test-dst" {
+		t.Fatalf("rule = %+v", rule)
+	}
+	if rule.LocalSources[0].DialVia() != config.ViaTailnet || rule.LocalSources[1].DialVia() != config.ViaPod {
+		t.Fatalf("via = %q %q", rule.LocalSources[0].Via, rule.LocalSources[1].Via)
+	}
+	_, fw, err := rule.LocalSources[0].Forwards()
+	if err != nil || len(fw) != 2 || fw[0].Expose != 443 || fw[1].Expose != 80 {
+		t.Fatalf("forwards = %#v, %v", fw, err)
+	}
+	podOnly := borderJSON(`"links": [{"name": "x", "local": [{"addr": "db.lan:1"}]}]`)
+	cfg, err = config.Parse([]byte(podOnly))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Bridges[0].SourceTailnet != "" {
+		t.Fatalf("pod link source = %q", cfg.Bridges[0].SourceTailnet)
+	}
+}
+
 func TestLoadReadError(t *testing.T) {
 	if _, err := config.Load(t.TempDir()); err == nil {
 		t.Error("loading a directory worked")

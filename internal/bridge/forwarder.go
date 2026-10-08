@@ -3,10 +3,12 @@ package bridge
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,19 +32,21 @@ import (
 //	  → forwarder dials source device IP:port through srcSrv
 //	  → bidirectional copy
 type Forwarder struct {
-	listenSrv    *tsnet.Server  // destination tailnet — registered as VIP service host
-	dialSrv      *tsnet.Server  // nil for local-mode forwarders
-	localAddr    string         // when non-empty and localTargets is empty, dials this address for every port
-	localTargets map[int]string // listen port → host:port, dialed via net.DialContext
-	vip          *VIPService
-	bridgeID     string // store key: ruleName/fqdn
-	timeout      time.Duration
-	store        *state.Store
-	logger       *slog.Logger
-	connCounter  atomic.Int64
-	rule         string             // rule name, the metrics label
-	metrics      *metrics.Metrics   // nil means no metrics
-	authz        config.AuthzConfig // who may dial this link
+	listenSrv      *tsnet.Server  // destination tailnet — registered as VIP service host
+	dialSrv        *tsnet.Server  // nil for local-mode forwarders
+	localAddr      string         // when non-empty and localTargets is empty, dials this address for every port
+	localTargets   map[int]string // listen port → host:port
+	viaTailnet     bool           // localTargets are dialed through dialSrv, not the host network
+	prepareTailnet func(ctx context.Context, host string) (netip.Addr, error)
+	vip            *VIPService
+	bridgeID       string // store key: ruleName/fqdn
+	timeout        time.Duration
+	store          *state.Store
+	logger         *slog.Logger
+	connCounter    atomic.Int64
+	rule           string             // rule name, the metrics label
+	metrics        *metrics.Metrics   // nil means no metrics
+	authz          config.AuthzConfig // who may dial this link
 
 	cancel    context.CancelFunc
 	listeners []net.Listener
@@ -151,24 +155,18 @@ func (f *Forwarder) handle(ctx context.Context, client net.Conn, port int) {
 	dialCtx, cancel := context.WithTimeout(ctx, f.timeout)
 	defer cancel()
 
-	var target string
-	var upstream net.Conn
-	var dialErr error
-	if addr, ok := f.localDial(port); ok {
-		target = addr
-		upstream, dialErr = (&net.Dialer{}).DialContext(dialCtx, "tcp", target)
-	} else if f.localAddr != "" || len(f.localTargets) > 0 {
-		target = fmt.Sprintf("port %d", port)
-		dialErr = fmt.Errorf("no local backend for port %d", port)
-	} else {
-		target = net.JoinHostPort(f.vip.SourceIP.String(), strconv.Itoa(port))
-		upstream, dialErr = f.dialSrv.Dial(dialCtx, "tcp", target)
-	}
-	if err := dialErr; err != nil {
-		f.logger.Warn("forwarder: dial failed", "target", target, "err", err)
+	target, upstream, dialErr := f.dialBackend(dialCtx, port)
+	if dialErr != nil {
+		f.logger.Warn("forwarder: dial failed", "target", target, "err", dialErr)
 		f.metrics.DialFailed(f.rule)
-		if ctx.Err() == nil {
-			f.store.Log("warn", fmt.Sprintf("dial failed: %s → %s: %v", f.vip.ServiceName, target, err), nil)
+		if f.viaTailnet {
+			reason := routedFailureReason(dialErr)
+			f.metrics.RoutedDialFailed(f.rule, reason)
+			if ctx.Err() == nil {
+				f.store.Log("warn", routedDialMessage(f.vip.ServiceName, target, reason, dialErr), nil)
+			}
+		} else if ctx.Err() == nil {
+			f.store.Log("warn", fmt.Sprintf("dial failed: %s → %s: %v", f.vip.ServiceName, target, dialErr), nil)
 		}
 		return
 	}
@@ -222,9 +220,39 @@ func (f *Forwarder) handle(ctx context.Context, client net.Conn, port int) {
 	f.store.Log("info", fmt.Sprintf("conn closed: %s — %s in, %s out", f.vip.ServiceName, formatBytes(in), formatBytes(out)), nil)
 }
 
-// localDial is the backend address for a local forwarder. A port map wins
-// over the single localAddr. The second result is false when this forwarder
-// dials through the source tailnet instead.
+// dialBackend opens the connection to the backend for a listened port.
+func (f *Forwarder) dialBackend(ctx context.Context, port int) (string, net.Conn, error) {
+	if addr, ok := f.localDial(port); ok {
+		if f.viaTailnet {
+			host, portStr, err := net.SplitHostPort(addr)
+			if err != nil {
+				return addr, nil, err
+			}
+			if f.prepareTailnet == nil {
+				return addr, nil, errors.New("via tailnet dial is not configured")
+			}
+			ip, err := f.prepareTailnet(ctx, host)
+			if err != nil {
+				return addr, nil, err
+			}
+			target := net.JoinHostPort(ip.String(), portStr)
+			conn, err := tailnetDial(ctx, f.dialSrv, "tcp", target)
+			return target, conn, err
+		}
+		conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+		return addr, conn, err
+	}
+	if f.localAddr != "" || len(f.localTargets) > 0 {
+		return fmt.Sprintf("port %d", port), nil, fmt.Errorf("no local backend for port %d", port)
+	}
+	target := net.JoinHostPort(f.vip.SourceIP.String(), strconv.Itoa(port))
+	conn, err := f.dialSrv.Dial(ctx, "tcp", target)
+	return target, conn, err
+}
+
+// localDial is the backend address for a local or routed forwarder. A port
+// map wins over the single localAddr. The second result is false when this
+// forwarder dials a discovered device through the source tailnet instead.
 func (f *Forwarder) localDial(port int) (string, bool) {
 	if len(f.localTargets) > 0 {
 		addr, ok := f.localTargets[port]

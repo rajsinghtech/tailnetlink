@@ -81,6 +81,24 @@ func TestValidateBridges(t *testing.T) {
 		{"local addr port with ports", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "10.0.0.1:80", DNSName: "app.example.com", Ports: config.LocalPortList(80)})}, "also sets ports"},
 		{"local expose with ports", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "10.0.0.1", DNSName: "app.example.com", ExposePort: 80, Ports: config.LocalPortList(80)})}, "expose_port cannot be combined"},
 		{"local host-only needs ports", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "10.0.0.1", DNSName: "app.example.com"})}, "is invalid"},
+		{"via tailnet", []config.BridgeRule{{
+			Name: "r", SourceTailnet: "a", DestTailnets: []string{"b"},
+			LocalSources: []config.LocalSourceSpec{{Addr: "10.20.0.10", DNSName: "db.example.com", ShortName: "db", Via: config.ViaTailnet, Ports: config.LocalPortList(80, 443)}},
+		}}, ""},
+		{"via tailnet name", []config.BridgeRule{{
+			Name: "r", SourceTailnet: "a", DestTailnets: []string{"b"},
+			LocalSources: []config.LocalSourceSpec{{Addr: "app.example.com", Via: config.ViaTailnet, Ports: config.LocalPortList(443)}},
+		}}, ""},
+		{"via pod is default", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "db.lan:5432"})}, ""},
+		{"via pod rejects source", []config.BridgeRule{{
+			Name: "r", SourceTailnet: "a", DestTailnets: []string{"b"},
+			LocalSources: []config.LocalSourceSpec{{Addr: "db.lan:5432"}},
+		}}, "must not set source_tailnet"},
+		{"via tailnet needs source", []config.BridgeRule{{
+			Name: "r", DestTailnets: []string{"b"},
+			LocalSources: []config.LocalSourceSpec{{Addr: "10.20.0.10", DNSName: "db.example.com", Via: "tailnet", Ports: config.LocalPortList(443)}},
+		}}, "source_tailnet is required"},
+		{"via bad", []config.BridgeRule{local("l", config.LocalSourceSpec{Addr: "db.lan:1", Via: "sidecar"})}, "must be"},
 		{"exact zone", []config.BridgeRule{tag("r", func(r *config.BridgeRule) {
 			r.SourceTag = ""
 			r.SourceDevices = []config.DeviceSpec{{FQDN: "app.example.ts.net", DNSName: "app.corp.example.com", DNSZone: "app.corp.example.com"}}

@@ -44,6 +44,7 @@ type Manager struct {
 	nodeDirs        map[string]string // tailnet name -> node state dir
 	ephemeral       map[string]bool   // tailnet name -> node is ephemeral
 
+	scopes      map[string]*nodeScope    // tailnet name -> scoped subnet routes
 	servers     map[string]*tsnet.Server // keyed by tailnet name
 	apiClients  map[string]*tsclient.Client
 	forwarders  map[string]*Forwarder         // keyed by bridge entry ID (rule/dest/fqdn)
@@ -341,7 +342,34 @@ func (m *Manager) Reconcile(ctx context.Context, newCfg *config.Config) {
 	m.mu.Lock()
 	m.cfg = newCfg
 	m.applied = true
+	names := make([]string, 0, len(m.servers))
+	for name := range m.servers {
+		names = append(names, name)
+	}
 	m.mu.Unlock()
+	for _, name := range names {
+		m.syncTailnetDial(ctx, name)
+	}
+}
+
+// RouteAll reports whether the node was told to accept every subnet route.
+// via:tailnet does not set this; it installs only the prefixes it needs.
+func (m *Manager) RouteAll(ctx context.Context, tailnet string) (bool, error) {
+	m.mu.Lock()
+	srv := m.servers[tailnet]
+	m.mu.Unlock()
+	if srv == nil {
+		return false, fmt.Errorf("tailnet %q is not connected", tailnet)
+	}
+	lc, err := srv.LocalClient()
+	if err != nil {
+		return false, err
+	}
+	prefs, err := lc.GetPrefs(ctx)
+	if err != nil {
+		return false, err
+	}
+	return prefs != nil && prefs.RouteAll, nil
 }
 
 // Close stops every rule, closes every listener and tsnet node, and makes
@@ -582,6 +610,7 @@ func (m *Manager) stopTailnet(name string, remove bool) {
 	if !ok {
 		return
 	}
+	m.dropScope(name)
 	m.unbindNode(name, srv)
 	if remove {
 		if err := deleteOwnedVIPService(context.Background(), client, owner, uiService); err != nil {

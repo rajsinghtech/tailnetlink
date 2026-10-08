@@ -267,6 +267,15 @@ func (s Side) tailnet(ephemeral bool) TailnetConfig {
 	}
 }
 
+func localNeedsTailnet(sources []LocalSourceSpec) bool {
+	for _, src := range sources {
+		if src.DialVia() == ViaTailnet {
+			return true
+		}
+	}
+	return false
+}
+
 func (l Link) rule(src, dst string, borderAuthz AuthzConfig) (BridgeRule, error) {
 	if l.Name == "" {
 		return BridgeRule{}, errors.New("name is required")
@@ -292,6 +301,11 @@ func (l Link) rule(src, dst string, borderAuthz AuthzConfig) (BridgeRule, error)
 			return BridgeRule{}, errors.New("ports doesn't apply to a local link; set addr and ports on each target")
 		}
 		r.LocalSources = append([]LocalSourceSpec(nil), l.Local...)
+		if localNeedsTailnet(r.LocalSources) {
+			// The source node is where via:tailnet dials. Pod entries on the
+			// same link still dial the host network.
+			r.SourceTailnet = src
+		}
 		return r, nil
 	}
 	if len(l.Ports) == 0 {

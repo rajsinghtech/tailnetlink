@@ -85,8 +85,24 @@ func (r BridgeRule) validate() error {
 		return fmt.Errorf("dest_tailnets is required")
 	}
 	if len(r.LocalSources) > 0 {
-		if r.SourceTailnet != "" || r.SourceTag != "" || len(r.SourceDevices) > 0 || len(r.SourceServices) > 0 || len(r.Ports) > 0 {
-			return fmt.Errorf("local rules must not set source_tailnet, source_tag, source_devices, source_services, or ports")
+		if r.SourceTag != "" || len(r.SourceDevices) > 0 || len(r.SourceServices) > 0 || len(r.Ports) > 0 {
+			return fmt.Errorf("local rules must not set source_tag, source_devices, source_services, or ports")
+		}
+		needsTailnet := false
+		for i, src := range r.LocalSources {
+			switch src.DialVia() {
+			case ViaPod:
+			case ViaTailnet:
+				needsTailnet = true
+			default:
+				return fmt.Errorf("local_sources[%d].via %q must be %q or %q", i, src.Via, ViaPod, ViaTailnet)
+			}
+		}
+		if needsTailnet && r.SourceTailnet == "" {
+			return fmt.Errorf("source_tailnet is required when a local source sets via %q", ViaTailnet)
+		}
+		if !needsTailnet && r.SourceTailnet != "" {
+			return fmt.Errorf("local rules must not set source_tailnet unless a source sets via %q", ViaTailnet)
 		}
 		return validateLocalSources(r.LocalSources)
 	}
