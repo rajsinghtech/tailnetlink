@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -281,6 +282,60 @@ func TestDeviceGoneDeletesVIP(t *testing.T) {
 	if del != 1 {
 		t.Fatalf("DELETEs = %d, want 1", del)
 	}
+}
+
+func TestRetryDelayIsCapped(t *testing.T) {
+	if d := retryDelay(0); d < 100*time.Millisecond || d > 200*time.Millisecond {
+		t.Fatalf("attempt 0 delay = %s", d)
+	}
+	if d := retryDelay(30); d < 30*time.Second || d > 45*time.Second {
+		t.Fatalf("capped delay = %s", d)
+	}
+}
+
+func TestQueueTreatsZeroWorkersAsOne(t *testing.T) {
+	q := newReconcileQueue(0, func(context.Context, qItem) error { return nil })
+	if q.workers != 1 {
+		t.Fatalf("workers = %d", q.workers)
+	}
+}
+
+func TestRunningForwarderWithSameIPIsLeftAlone(t *testing.T) {
+	tm := newTestManager(t)
+	tm.src.SetDevices(manyDevices(1))
+	tm.startRule(t, webRule(), time.Hour)
+	waitFor(t, 5*time.Second, "active", func() bool {
+		a, _, _ := bridgeCounts(tm.m.store)
+		return a == 1
+	})
+	tm.dest.ResetCalls()
+	dev := Device{Name: "h00000", FQDN: "h00000.src.example", IP: netip.MustParseAddr("100.64.0.0")}
+	err := tm.m.converge(context.Background(), webRule(), destCtx{name: "dest"}, nil, time.Second, qItem{
+		dev: dev, dest: "dest", bridgeID: "web/dest/" + dev.FQDN, present: true, created: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls := tm.dest.Calls(); len(calls) != 0 {
+		t.Fatalf("reconcile hit the API: %v", callStrings(calls))
+	}
+}
+
+func TestDeleteIsRetriedWhenItFails(t *testing.T) {
+	tm := newTestManager(t)
+	tm.src.SetDevices(manyDevices(1))
+	rule := webRule()
+	tm.startRule(t, rule, 20*time.Millisecond)
+	waitFor(t, 5*time.Second, "active", func() bool {
+		a, _, _ := bridgeCounts(tm.m.store)
+		return a == 1
+	})
+	tm.dest.FailOnce(http.MethodDelete, "/vip-services/svc:tnl-src-h00000", http.StatusInternalServerError)
+	tm.src.SetDevices(nil)
+	waitFor(t, 5*time.Second, "VIP deleted after retry", func() bool {
+		_, ok := tm.dest.Service("svc:tnl-src-h00000")
+		return !ok
+	})
 }
 
 func TestProvisionCallCountAndPeakAtScale(t *testing.T) {

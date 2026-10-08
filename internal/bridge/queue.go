@@ -25,8 +25,8 @@ var retryDelay = func(attempt int) time.Duration {
 		attempt = 1
 	}
 	shift := attempt - 1
-	if shift > 8 {
-		shift = 8
+	if shift > 9 {
+		shift = 9
 	}
 	d := 100 * time.Millisecond << shift
 	if d > 30*time.Second {
