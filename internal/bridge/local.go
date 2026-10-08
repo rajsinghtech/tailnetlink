@@ -162,6 +162,7 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 		go func(lb localBridgeInfo) {
 			defer wg.Done()
 			gone := remove || drop[lb.destName]
+			m.forgetVIP(lb.destName, ServiceName("local", lb.dev.FQDN, lb.shortName))
 			m.stopBridge(lb.bridgeID, gone)
 			if gone {
 				if err := lb.rec.Delete(context.Background(), "local", lb.dev, lb.shortName); err != nil {
