@@ -183,13 +183,12 @@ func (m *Manager) metricsRef() *metrics.Metrics {
 }
 
 func (m *Manager) newAPIClient(tc config.TailnetConfig) *tsclient.Client {
-	m.mu.Lock()
-	mt := m.metrics
-	m.mu.Unlock()
-	if mt == nil {
-		return newAPIClient(tc)
+	mt := m.metricsRef()
+	var obs tsapi.APIObserver
+	if mt != nil {
+		obs = mt
 	}
-	return tsapi.NewClient(tc, mt.Transport(nil))
+	return tsapi.NewClient(tc, tsapi.LimitedTransport(nil, tsapi.DefaultAPIRatePerSec, tsapi.DefaultAPIBurst, obs))
 }
 
 // Reconcile diffs newCfg against the running config and applies the minimum

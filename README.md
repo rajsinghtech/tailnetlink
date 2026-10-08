@@ -240,6 +240,8 @@ See `deploy/` for a compose example. Build locally with `make docker-build` (tag
 - `/readyz` is 200 once the config has been applied, every configured tailnet's node is up, and every tailnet rule has polled successfully within the last three poll intervals. Otherwise it is 503 with the reason.
 - `/metrics` is Prometheus text. Labels only carry rule names, tailnet keys and fixed values, never device names or client addresses.
 
+Each tailnet's admin API client has its own token bucket: 20 requests per second, burst 40. HTTP 429 and 5xx are retried (POST is not retried on 5xx, because creating a key or exchanging a token may already have succeeded). A `Retry-After` header is honored, with a little jitter, and a call gives up after 4 attempts or 30 seconds of waiting.
+
 | Metric | Labels | |
 |---|---|---|
 | `tailnetlink_bridges` | `status` | Bridges by status (pending, active, error) |
@@ -249,6 +251,8 @@ See `deploy/` for a compose example. Build locally with `make docker-build` (tag
 | `tailnetlink_bytes_total` | `rule`, `direction` | Bytes forwarded; `in` is client to backend |
 | `tailnetlink_dial_failures_total` | `rule` | Failed backend dials |
 | `tailnetlink_api_errors_total` | `endpoint` | Failed Tailscale API calls (devices, services, keys, dns, oauth, other); 404s are not counted |
+| `tailnetlink_api_requests_total` | `endpoint`, `code` | Every API attempt. `code` is the HTTP status, or `error` when there was no response. 429 is its own value, so it can be alerted on. |
+| `tailnetlink_api_request_duration_seconds` | `endpoint` | How long one API attempt took |
 | `tailnetlink_poll_duration_seconds` | `rule` | Discovery poll time |
 | `tailnetlink_poll_errors_total` | `rule` | Failed discovery polls |
 | `tailnetlink_ownership_conflicts_total` | `tailnet` | Wanted service names taken by something this instance doesn't own |
