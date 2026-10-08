@@ -1,6 +1,9 @@
 package e2e
 
 import (
+	"context"
+	"errors"
+	"net"
 	"net/netip"
 	"testing"
 	"time"
@@ -25,6 +28,11 @@ func TestManagerAuthzRequireCap(t *testing.T) {
 
 	if err := tryEcho(ctx, cl, addr, "denied"); err == nil {
 		t.Fatal("echo succeeded without the capability")
+	} else if dialTimedOut(err) {
+		// A kernel timeout means the VIP was never installed in the
+		// userspace route table. Authz closes the connection only after
+		// the handshake, so a timeout is not a denial.
+		t.Fatalf("denied dial never reached the forwarder: %v", err)
 	}
 	select {
 	case p := <-peers:
@@ -39,12 +47,25 @@ func TestManagerAuthzRequireCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	b.dst.control.SetGlobalAppCaps(tailcfg.PeerCapMap{bridge.CapName: {raw}})
+	// The grant is one wake. Replay it so a poll with a full buffer still
+	// builds a map that contains the capability.
+	b.dstAPI.keepWaking(routeWakeFor)
 	echoVia(t, ctx, cl, addr, "allowed")
 	select {
 	case <-peers:
 	case <-time.After(5 * time.Second):
 		t.Fatal("backend never saw the allowed connection")
 	}
+}
+
+// dialTimedOut reports a dial that never entered the tailnet. The kernel
+// dialer returns this when the VIP prefix is not in the userspace route table.
+func dialTimedOut(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // A client that is already streaming a netmap when the VIP appears must
