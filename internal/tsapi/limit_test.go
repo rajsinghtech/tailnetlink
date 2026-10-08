@@ -1,6 +1,7 @@
 package tsapi
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -165,6 +166,57 @@ func TestLimitedTransportHonorsRetryAfter(t *testing.T) {
 	}
 	if n.Load() != 2 || resp.StatusCode != 200 {
 		t.Fatalf("attempts=%d status=%d", n.Load(), resp.StatusCode)
+	}
+}
+
+func TestRetryAfterParsingAndBudget(t *testing.T) {
+	past := time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat)
+	if d, ok := parseRetryAfter(past); !ok || d != 0 {
+		t.Fatalf("past date = %s ok=%v", d, ok)
+	}
+	if _, ok := parseRetryAfter("not-a-date"); ok {
+		t.Fatal("garbage parsed")
+	}
+	if _, ok := parseRetryAfter(""); ok {
+		t.Fatal("empty parsed")
+	}
+	if d, ok := parseRetryAfter("2"); !ok || d != 2*time.Second {
+		t.Fatalf("seconds = %s ok=%v", d, ok)
+	}
+
+	// A huge Retry-After exceeds the wait budget, so the 429 is returned
+	// without sleeping.
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		w.Header().Set("Retry-After", "100")
+		http.Error(w, "later", http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	rt := LimitedTransport(http.DefaultTransport, 0, 0, nil)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v2/tailnet/-/devices", nil)
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if n.Load() != 1 || resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("attempts=%d status=%d", n.Load(), resp.StatusCode)
+	}
+
+	// burst < 1 is raised to 1, and a cancelled context stops the wait.
+	paced := LimitedTransport(http.DefaultTransport, 1, 0, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req, _ = http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/x", nil)
+	if _, err := paced.RoundTrip(req); err == nil {
+		t.Fatal("cancelled request succeeded")
+	}
+
+	big := bytes.Repeat([]byte("a"), 8<<20+1)
+	req, _ = http.NewRequest(http.MethodPut, srv.URL+"/x", io.NopCloser(bytes.NewReader(big)))
+	if _, err := rt.RoundTrip(req); err == nil {
+		t.Fatal("oversized body was accepted")
 	}
 }
 
