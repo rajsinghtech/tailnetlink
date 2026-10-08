@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"slices"
 	"strconv"
 	"sync"
@@ -41,8 +42,8 @@ func newLocalForwarder(
 // localBridgeID keys one local target in one destination. The classic
 // host:port form keeps the historical id. A host with no port would otherwise
 // collide when two targets share that host, so the short name is part of the id.
-func localBridgeID(rule, dest, addr, shortName string) string {
-	id := rule + "/local/" + dest + "/" + addr
+func localBridgeID(kind, rule, dest, addr, shortName string) string {
+	id := rule + "/" + kind + "/" + dest + "/" + addr
 	if _, _, err := net.SplitHostPort(addr); err != nil {
 		id += "/" + shortName
 	}
@@ -60,6 +61,28 @@ type localBridgeInfo struct {
 // runLocalRule handles bridge rules with local_sources. It creates a VIP service and
 // Forwarder for each local_source in each dest tailnet, then blocks until ctx is cancelled.
 func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dialTimeout time.Duration) {
+	var srcSrv *tsnet.Server
+	for _, src := range rule.LocalSources {
+		if src.DialVia() != config.ViaTailnet {
+			continue
+		}
+		m.mu.Lock()
+		srcSrv = m.servers[rule.SourceTailnet]
+		m.mu.Unlock()
+		if srcSrv == nil {
+			m.logger.Error("local rule: source tailnet not connected", "rule", rule.Name, "source", rule.SourceTailnet)
+			m.store.Log("error", fmt.Sprintf("[%s] rule failed: source tailnet %q not connected", rule.Name, rule.SourceTailnet), nil)
+			return
+		}
+		m.syncTailnetDial(ctx, rule.SourceTailnet)
+		break
+	}
+	m.runEndpointRule(ctx, rule, dialTimeout, "local", rule.LocalSources, srcSrv)
+}
+
+// runEndpointRule publishes one VIP per static target. srcSrv nil dials the
+// host network; a non-nil srcSrv dials through that tailnet.
+func (m *Manager) runEndpointRule(ctx context.Context, rule config.BridgeRule, dialTimeout time.Duration, kind string, sources []config.LocalSourceSpec, srcSrv *tsnet.Server) {
 	dests := make([]destCtx, 0, len(rule.DestTailnets))
 	for _, destName := range rule.DestTailnets {
 		m.mu.Lock()
@@ -68,33 +91,33 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 		destTags := m.cfg.Tailnets[destName].Tags
 		m.mu.Unlock()
 		if destSrv == nil {
-			m.logger.Error("local rule: dest tailnet not connected", "rule", rule.Name, "dest", destName)
+			m.logger.Error(kind+" rule: dest tailnet not connected", "rule", rule.Name, "dest", destName)
 			m.store.Log("error", fmt.Sprintf("[%s] skipping dest tailnet %q: not connected", rule.Name, destName), nil)
 			continue
 		}
 		dests = append(dests, destCtx{name: destName, srv: destSrv, client: destClient, tags: destTags})
 	}
 	if len(dests) == 0 {
-		m.logger.Error("local rule: no destination is connected", "rule", rule.Name)
+		m.logger.Error(kind+" rule: no destination is connected", "rule", rule.Name)
 		m.store.Log("error", fmt.Sprintf("[%s] rule failed: no destination is connected", rule.Name), nil)
 		return
 	}
 
-	m.logger.Info("local rule started", "rule", rule.Name, "sources", len(rule.LocalSources))
-	m.store.Log("info", fmt.Sprintf("[%s] local rule started: %d sources", rule.Name, len(rule.LocalSources)), nil)
+	m.logger.Info(kind+" rule started", "rule", rule.Name, "sources", len(sources))
+	m.store.Log("info", fmt.Sprintf("[%s] %s rule started: %d sources", rule.Name, kind, len(sources)), nil)
 
 	var bridges []localBridgeInfo
 
-	for _, src := range rule.LocalSources {
+	for _, src := range sources {
 		dnsName, err := src.EffectiveDNSName()
 		if err != nil {
-			m.logger.Error("local rule: invalid source", "rule", rule.Name, "addr", src.Addr, "err", err)
+			m.logger.Error(kind+" rule: invalid source", "rule", rule.Name, "addr", src.Addr, "err", err)
 			m.store.Log("error", fmt.Sprintf("[%s] skipping %s: %v", rule.Name, src.Addr, err), nil)
 			continue
 		}
 		host, forwards, err := src.Forwards()
 		if err != nil {
-			m.logger.Error("local rule: invalid ports", "rule", rule.Name, "addr", src.Addr, "err", err)
+			m.logger.Error(kind+" rule: invalid ports", "rule", rule.Name, "addr", src.Addr, "err", err)
 			m.store.Log("error", fmt.Sprintf("[%s] skipping %s: %v", rule.Name, src.Addr, err), nil)
 			continue
 		}
@@ -106,12 +129,12 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 		}
 
 		shortName := src.EffectiveShortName()
-		svcName := ServiceName("local", dnsName, shortName)
+		svcName := ServiceName(kind, dnsName, shortName)
 		syntheticDev := Device{Name: src.Addr, FQDN: dnsName}
 		createdAt := time.Now()
 
 		for _, dest := range dests {
-			bridgeID := localBridgeID(rule.Name, dest.name, src.Addr, shortName)
+			bridgeID := localBridgeID(kind, rule.Name, dest.name, src.Addr, shortName)
 			srcRec := NewReconciler(dest.client, exposePorts, dest.tags, m.ownerID(), m.logger)
 			srcRec.bridge = rule.BridgeRef(dest.name)
 
@@ -122,10 +145,10 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 				Ports: slices.Clone(exposePorts), Status: state.BridgeStatusPending, CreatedAt: createdAt,
 			})
 
-			vip, err := srcRec.Ensure(ctx, "local", syntheticDev, shortName)
+			vip, err := srcRec.Ensure(ctx, kind, syntheticDev, shortName)
 			if err != nil {
 				m.conflict(dest.name, err)
-				m.logger.Error("local rule: VIP ensure failed", "rule", rule.Name, "dest", dest.name, "addr", src.Addr, "err", err)
+				m.logger.Error(kind+" rule: VIP ensure failed", "rule", rule.Name, "dest", dest.name, "addr", src.Addr, "err", err)
 				m.store.UpsertBridge(state.BridgeEntry{
 					ID: bridgeID, RuleName: rule.Name, DestTailnet: m.tailnetLabel(dest.name),
 					ServiceName: svcName,
@@ -138,10 +161,29 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 
 			fwd := newLocalForwarder(dest.srv, "", vip, bridgeID, dialTimeout, m.store, m.logger)
 			fwd.localTargets = targets
+			if src.DialVia() == config.ViaTailnet {
+				if srcSrv == nil {
+					m.logger.Error("local rule: via tailnet without a source node", "rule", rule.Name, "addr", src.Addr)
+					continue
+				}
+				fwd.dialSrv = srcSrv
+				fwd.viaTailnet = true
+				tailnet, node := rule.SourceTailnet, srcSrv
+				fwd.prepareTailnet = func(ctx context.Context, host string) (netip.Addr, error) {
+					ip, err := m.resolveTailnetHost(ctx, tailnet, node, host)
+					if err != nil {
+						return netip.Addr{}, err
+					}
+					if err := m.scopeFor(tailnet, node).cover(ctx, ip); err != nil {
+						return netip.Addr{}, err
+					}
+					return ip, nil
+				}
+			}
 			fwd.rule, fwd.metrics, fwd.authz = rule.Name, m.metricsRef(), m.authzFor(rule, dest.name)
 			if err := startForwarder(fwd, ctx); err != nil {
-				m.logger.Error("local rule: forwarder start failed", "rule", rule.Name, "dest", dest.name, "addr", src.Addr, "err", err)
-				_ = srcRec.Delete(context.Background(), "local", syntheticDev, shortName)
+				m.logger.Error(kind+" rule: forwarder start failed", "rule", rule.Name, "dest", dest.name, "addr", src.Addr, "err", err)
+				_ = srcRec.Delete(context.Background(), kind, syntheticDev, shortName)
 				m.store.DeleteBridge(bridgeID)
 				continue
 			}
@@ -152,7 +194,7 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 				DestVIP: vip.VIP.String(), Ports: slices.Clone(exposePorts),
 				Status: state.BridgeStatusActive, CreatedAt: createdAt,
 			})
-			m.store.Log("info", fmt.Sprintf("[%s] local bridge active: %s → %s (%s) ports %v", rule.Name, src.Addr, vip.VIP, dest.name, exposePorts), nil)
+			m.store.Log("info", fmt.Sprintf("[%s] %s bridge active: %s → %s (%s) ports %v", rule.Name, kind, src.Addr, vip.VIP, dest.name, exposePorts), nil)
 
 			m.mu.Lock()
 			m.forwarders[bridgeID] = fwd
@@ -185,16 +227,16 @@ func (m *Manager) runLocalRule(ctx context.Context, rule config.BridgeRule, dial
 		go func(lb localBridgeInfo) {
 			defer wg.Done()
 			gone := remove || drop[lb.destName]
-			m.forgetVIP(lb.destName, ServiceName("local", lb.dev.FQDN, lb.shortName))
+			m.forgetVIP(lb.destName, ServiceName(kind, lb.dev.FQDN, lb.shortName))
 			m.stopBridge(lb.bridgeID, gone)
 			if gone {
-				if err := lb.rec.Delete(context.Background(), "local", lb.dev, lb.shortName); err != nil {
-					m.logger.Warn("local rule: VIP delete failed", "bridge", lb.bridgeID, "err", err)
+				if err := lb.rec.Delete(context.Background(), kind, lb.dev, lb.shortName); err != nil {
+					m.logger.Warn(kind+" rule: VIP delete failed", "bridge", lb.bridgeID, "err", err)
 				}
 			}
 			m.store.DeleteBridge(lb.bridgeID)
 		}(lb)
 	}
 	wg.Wait()
-	m.store.Log("info", fmt.Sprintf("[%s] local rule stopped", rule.Name), nil)
+	m.store.Log("info", fmt.Sprintf("[%s] %s rule stopped", rule.Name, kind), nil)
 }

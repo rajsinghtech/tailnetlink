@@ -44,6 +44,7 @@ type Manager struct {
 	nodeDirs        map[string]string // tailnet name -> node state dir
 	ephemeral       map[string]bool   // tailnet name -> node is ephemeral
 
+	scopes      map[string]*nodeScope    // tailnet name -> scoped subnet routes
 	servers     map[string]*tsnet.Server // keyed by tailnet name
 	apiClients  map[string]*tsclient.Client
 	forwarders  map[string]*Forwarder         // keyed by bridge entry ID (rule/dest/fqdn)
@@ -380,6 +381,13 @@ func (m *Manager) Reconcile(ctx context.Context, newCfg *config.Config) {
 		}
 	}
 
+	// Store the config before any rule starts. via:tailnet reads it to
+	// decide which prefixes to install, including from the goroutine below.
+	m.mu.Lock()
+	m.cfg = newCfg
+	m.applied = true
+	m.mu.Unlock()
+
 	for name, rule := range newByName {
 		m.mu.Lock()
 		_, running := m.rules[name]
@@ -409,9 +417,34 @@ func (m *Manager) Reconcile(ctx context.Context, newCfg *config.Config) {
 	}
 
 	m.mu.Lock()
-	m.cfg = newCfg
-	m.applied = true
+	names := make([]string, 0, len(m.servers))
+	for name := range m.servers {
+		names = append(names, name)
+	}
 	m.mu.Unlock()
+	for _, name := range names {
+		m.syncTailnetDial(ctx, name)
+	}
+}
+
+// RouteAll reports whether the node was told to accept every subnet route.
+// via:tailnet does not set this; it installs only the prefixes it needs.
+func (m *Manager) RouteAll(ctx context.Context, tailnet string) (bool, error) {
+	m.mu.Lock()
+	srv := m.servers[tailnet]
+	m.mu.Unlock()
+	if srv == nil {
+		return false, fmt.Errorf("tailnet %q is not connected", tailnet)
+	}
+	lc, err := srv.LocalClient()
+	if err != nil {
+		return false, err
+	}
+	prefs, err := lc.GetPrefs(ctx)
+	if err != nil {
+		return false, err
+	}
+	return prefs != nil && prefs.RouteAll, nil
 }
 
 // Close stops every rule, closes every listener and tsnet node, and makes
@@ -654,6 +687,7 @@ func (m *Manager) stopTailnet(name string, remove bool) {
 	if !ok {
 		return
 	}
+	m.dropScope(name)
 	m.unbindNode(name, srv)
 	if remove {
 		if err := deleteOwnedVIPService(context.Background(), client, owner, uiService); err != nil {
@@ -755,6 +789,9 @@ func (m *Manager) authzFor(rule config.BridgeRule, dest string) config.AuthzConf
 // not running, the services are deleted now.
 func (m *Manager) markDropDest(rule, dest string) {
 	m.mu.Lock()
+	if m.dropDest == nil {
+		m.dropDest = map[string]map[string]bool{}
+	}
 	if m.dropDest[rule] == nil {
 		m.dropDest[rule] = map[string]bool{}
 	}

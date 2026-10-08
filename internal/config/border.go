@@ -353,6 +353,19 @@ func (s Side) tailnet(ephemeral bool) TailnetConfig {
 	}
 }
 
+func localNeedsTailnet(sources []LocalSourceSpec) bool {
+	for _, src := range sources {
+		if src.DialVia() == ViaTailnet {
+			return true
+		}
+	}
+	return false
+}
+
+// rule compiles one link. src is the tailnet key the link leaves: a border's
+// source key, or a mesh bridge's from key. dsts is copied so the caller can
+// reuse its slice. A local entry with via:tailnet sets SourceTailnet to src
+// because the dialer looks that field up, not From.
 func (l Link) rule(src string, dsts []string, borderAuthz AuthzConfig) (BridgeRule, error) {
 	if l.Name == "" {
 		return BridgeRule{}, errors.New("name is required")
@@ -378,6 +391,11 @@ func (l Link) rule(src string, dsts []string, borderAuthz AuthzConfig) (BridgeRu
 			return BridgeRule{}, errors.New("ports doesn't apply to a local link; set addr and ports on each target")
 		}
 		r.LocalSources = append([]LocalSourceSpec(nil), l.Local...)
+		if localNeedsTailnet(r.LocalSources) {
+			// src is the bridge's from key. Pod entries on the same link
+			// still dial the host network and leave SourceTailnet empty.
+			r.SourceTailnet = src
+		}
 		return r, nil
 	}
 	if len(l.Ports) == 0 {

@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,6 +62,49 @@ func TestLocalShutdownDeletesOnlyTheDestThatLeft(t *testing.T) {
 	}
 }
 
+func TestViaTailnetSkipsWhenSourceOrDestIsDown(t *testing.T) {
+	m := New(state.New(), discardLogger(), nil)
+	m.cfg = &config.Config{}
+	m.runLocalRule(context.Background(), config.BridgeRule{
+		Name: "db", SourceTailnet: "src", DestTailnets: []string{"dst"},
+		LocalSources: []config.LocalSourceSpec{{
+			Addr: "10.20.0.10", Via: config.ViaTailnet, DNSName: "db.example.com", Ports: config.LocalPortList(80),
+		}},
+	}, time.Second)
+	m.runLocalRule(context.Background(), config.BridgeRule{
+		Name: "pod", DestTailnets: []string{"missing"},
+		LocalSources: []config.LocalSourceSpec{{Addr: "10.0.0.1:80", DNSName: "app.example.com"}},
+	}, time.Second)
+	var sawSource, sawDest bool
+	for _, l := range m.store.GetLogs(20) {
+		if strings.Contains(l.Message, `source tailnet "src" not connected`) {
+			sawSource = true
+		}
+		if strings.Contains(l.Message, "no destination is connected") {
+			sawDest = true
+		}
+	}
+	if !sawSource || !sawDest {
+		t.Fatalf("logs source=%v dest=%v", sawSource, sawDest)
+	}
+
+	bare := &Manager{store: state.New(), logger: discardLogger()}
+	bare.markDropDest("loc", "gone")
+	if len(bare.takeDrops("loc")) != 0 {
+		t.Fatal("idle sweep left a drop behind")
+	}
+	bare.sweepIdleDrops("missing")
+	cancel := func() {}
+	bare.rules = map[string]context.CancelFunc{"loc": cancel}
+	bare.dropDest = map[string]map[string]bool{"loc": {"gone": true}}
+	bare.sweepIdleDrops("loc")
+	if !bare.dropDest["loc"]["gone"] {
+		t.Fatal("sweep cleared a drop for a running rule")
+	}
+	if destOfBridge("loc", "nope") != "" || destOfBridge("loc", "loc/local/keep/10.0.0.1:80") != "keep" || destOfBridge("web", "web/dest/host.example") != "dest" {
+		t.Fatal("destOfBridge")
+	}
+}
 func TestAuthzForUsesTheLinkWhenDestSetsNoMode(t *testing.T) {
 	m := New(state.New(), discardLogger(), nil)
 	m.cfg = &config.Config{Tailnets: map[string]config.TailnetConfig{

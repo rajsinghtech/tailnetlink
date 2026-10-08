@@ -36,4 +36,17 @@ func TestLinkRuleKeepsTheDestinationSlice(t *testing.T) {
 	if local.SourceTailnet != "" || len(local.DestTailnets) != 1 || local.DestTailnets[0] != "work" {
 		t.Fatalf("local rule = %+v", local)
 	}
+
+	routed, err := (Link{
+		Name: "db",
+		Local: []LocalSourceSpec{{
+			Addr: "app.internal.example.com", DNSName: "db.example.com", Via: ViaTailnet, Ports: LocalPortList(443),
+		}},
+	}).rule("home", []string{"work", "partner"}, AuthzConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if routed.SourceTailnet != "home" || !slices.Equal(routed.DestTailnets, []string{"work", "partner"}) {
+		t.Fatalf("via tailnet rule = %+v", routed)
+	}
 }
