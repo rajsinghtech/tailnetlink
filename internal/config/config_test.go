@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/rajsinghtech/tailnetlink/internal/config"
@@ -44,6 +45,13 @@ func TestLocalSourceSpecRoundtrip(t *testing.T) {
 	}
 	if got.LocalSources[2].ShortName != "app" {
 		t.Errorf("ShortName[2] = %q, want %q", got.LocalSources[2].ShortName, "app")
+	}
+	classic, err := json.Marshal(config.LocalSourceSpec{Addr: "db.lan:80"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(classic), "ports") {
+		t.Fatalf("classic addr marshaled ports: %s", classic)
 	}
 }
 

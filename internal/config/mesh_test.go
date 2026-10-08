@@ -117,6 +117,35 @@ func TestMeshLocalLinkSetsFrom(t *testing.T) {
 	}
 }
 
+func TestMeshViaTailnetSetsSourceTailnet(t *testing.T) {
+	body := `{
+		"name": "mesh",
+		"tailnets": {
+			"home": ` + meshSide("keiretsu.ts.net", "home", "/run/home") + `,
+			"work": ` + meshSide("example.ts.net", "work", "/run/work") + `
+		},
+		"bridges": [{
+			"from": "home",
+			"to": ["work"],
+			"links": [{"name": "db", "local": [
+				{"addr": "app.internal.example.com", "via": "tailnet", "dns_name": "db.example.com", "short_name": "db", "ports": [443]},
+				{"addr": "10.1.0.5:5432", "dns_name": "pod.example.com"}
+			]}]
+		}]
+	}`
+	cfg, err := config.Parse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := cfg.Bridges[0]
+	if r.SourceTailnet != "home" || r.From != "home" || r.Link != "db" || len(r.DestTailnets) != 1 || r.DestTailnets[0] != "work" {
+		t.Fatalf("via rule = %+v", r)
+	}
+	if r.LocalSources[0].DialVia() != config.ViaTailnet || r.LocalSources[1].DialVia() != config.ViaPod {
+		t.Fatalf("via = %q %q", r.LocalSources[0].Via, r.LocalSources[1].Via)
+	}
+}
+
 func TestMeshErrors(t *testing.T) {
 	ok := meshExample()
 	cases := map[string]struct{ body, want string }{

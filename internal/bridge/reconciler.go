@@ -27,7 +27,7 @@ type Reconciler struct {
 	ports  []int
 	tags   []string // ACL tags applied to the VIP service (must match dest tsnet node tags)
 	owner  string   // instance id written to and checked against tailnetlink/owner
-	bridge string   // from/dest/link; empty keeps the owner-only check
+	bridge string   // from/dest/link; empty keeps the owner-only annotation
 	logger *slog.Logger
 
 	mu       sync.RWMutex

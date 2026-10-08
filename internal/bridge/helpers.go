@@ -33,7 +33,7 @@ func firstIP(addrs []string) (netip.Addr, bool) {
 
 // Annotations tailnetlink puts on every VIP service it creates. The owner
 // annotation is what the ownership guard checks. The bridge annotation names
-// the from/to/link that published the service, so two bridges in one
+// the from/dest/link that published the service, so two bridges in one
 // tailnet do not overwrite each other. managed is informational.
 const (
 	annotationManaged = "tailnetlink/managed"

@@ -105,21 +105,25 @@ func TestCounters(t *testing.T) {
 	m.ConnOpened("web")
 	m.ConnClosed("web", 10, 20)
 	m.DialFailed("web")
+	m.RoutedDialFailed("web", "no_route")
+	m.RoutedDialFailed("web", "nope")
 	m.PollDone("web", 50*time.Millisecond, nil)
 	m.PollDone("web", 50*time.Millisecond, errors.New("api down"))
 	m.Conflict("dst")
 	m.TrackBridges([]string{"active", "error"}, func() map[string]int { return map[string]int{"active": 3} })
 
 	checks := map[string]float64{
-		"active":   testutil.ToFloat64(m.connsActive.WithLabelValues("web")),
-		"total":    testutil.ToFloat64(m.connsTotal.WithLabelValues("web")),
-		"in":       testutil.ToFloat64(m.bytes.WithLabelValues("web", "in")),
-		"out":      testutil.ToFloat64(m.bytes.WithLabelValues("web", "out")),
-		"dial":     testutil.ToFloat64(m.dialFailures.WithLabelValues("web")),
-		"pollerrs": testutil.ToFloat64(m.pollErrors.WithLabelValues("web")),
-		"conflict": testutil.ToFloat64(m.conflicts.WithLabelValues("dst")),
+		"active":    testutil.ToFloat64(m.connsActive.WithLabelValues("web")),
+		"total":     testutil.ToFloat64(m.connsTotal.WithLabelValues("web")),
+		"in":        testutil.ToFloat64(m.bytes.WithLabelValues("web", "in")),
+		"out":       testutil.ToFloat64(m.bytes.WithLabelValues("web", "out")),
+		"dial":      testutil.ToFloat64(m.dialFailures.WithLabelValues("web")),
+		"noroute":   testutil.ToFloat64(m.routedDials.WithLabelValues("web", "no_route")),
+		"routederr": testutil.ToFloat64(m.routedDials.WithLabelValues("web", "error")),
+		"pollerrs":  testutil.ToFloat64(m.pollErrors.WithLabelValues("web")),
+		"conflict":  testutil.ToFloat64(m.conflicts.WithLabelValues("dst")),
 	}
-	want := map[string]float64{"active": 1, "total": 2, "in": 10, "out": 20, "dial": 1, "pollerrs": 1, "conflict": 1}
+	want := map[string]float64{"active": 1, "total": 2, "in": 10, "out": 20, "dial": 1, "pollerrs": 1, "conflict": 1, "noroute": 1, "routederr": 1}
 	for k, v := range want {
 		if checks[k] != v {
 			t.Errorf("%s = %v, want %v", k, checks[k], v)

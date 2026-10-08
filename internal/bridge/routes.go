@@ -1,42 +1,69 @@
 package bridge
 
 import (
-	"net/netip"
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"strings"
 
-	"github.com/rajsinghtech/tailnetlink/internal/config"
 	"tailscale.com/tsnet"
 )
 
-// acceptNodeRoutes programs subnet-route acceptance on one node. The default
-// does nothing, so this process never accepts, rejects or rewrites routes
-// or policy. A later change should replace it with a function that accepts
-// only advertised routes covering addrs.
+// Scoped subnet acceptance lives in syncTailnetDial and installSubnetRoutes.
+// Those run after Reconcile stores the config. They change only this node's
+// userspace WireGuard allowed IPs.
 //
-// refreshAcceptedRoutes calls it after every Reconcile, including a hot
-// reload that did not restart the node. The replacement must not call
-// Reconcile.
-var acceptNodeRoutes = func(*tsnet.Server, []netip.Addr) error { return nil }
+// The shared-node branch has a no-op acceptNodeRoutes hook and
+// refreshAcceptedRoutes in this file. That hook is not used. Do not bring it
+// back: it would hide the scoped install, and accepting or approving routes
+// through it would change the tailnet for everyone else.
 
-// refreshAcceptedRoutes recomputes the local addresses each live node may
-// accept routes for. Nodes that did not restart still see the new set.
-func (m *Manager) refreshAcceptedRoutes() {
-	m.mu.Lock()
-	cfg := m.cfg
-	type live struct {
-		name string
-		srv  *tsnet.Server
+// errNoSubnetRoute means no peer in the source tailnet is advertising a
+// route that covers the address.
+var errNoSubnetRoute = errors.New("no subnet route to that address")
+
+// routedFailureReason classifies a routed dial error for metrics.
+// A timeout counts as denied: the source tailnet drops packets a grant
+// does not allow, and that looks like a dial that never completes.
+func routedFailureReason(err error) string {
+	if err == nil {
+		return ""
 	}
-	nodes := make([]live, 0, len(m.servers))
-	for name, srv := range m.servers {
-		if srv != nil {
-			nodes = append(nodes, live{name, srv})
-		}
+	if errors.Is(err, errNoSubnetRoute) {
+		return "no_route"
 	}
-	m.mu.Unlock()
-	for _, n := range nodes {
-		addrs := config.AcceptedRouteAddrs(cfg, n.name)
-		if err := acceptNodeRoutes(n.srv, addrs); err != nil {
-			m.logger.Warn("accept routes", "tailnet", n.name, "err", err)
-		}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "denied"),
+		strings.Contains(msg, "filtered"),
+		strings.Contains(msg, "not allowed"),
+		strings.Contains(msg, "acl"),
+		strings.Contains(msg, "rejected"),
+		errors.Is(err, context.DeadlineExceeded),
+		strings.Contains(msg, "timeout"),
+		strings.Contains(msg, "i/o timeout"):
+		return "denied"
+	default:
+		return "error"
 	}
+}
+
+func routedDialMessage(svc, target, reason string, err error) string {
+	switch reason {
+	case "no_route":
+		return fmt.Sprintf("routed dial: no subnet route for %s (%s): %v", target, svc, err)
+	case "denied":
+		return fmt.Sprintf("routed dial denied: %s → %s: %v; grant this node's tag access to that IP and port in the source tailnet (filtered packets are dropped)", svc, target, err)
+	default:
+		return fmt.Sprintf("routed dial failed: %s → %s: %v", svc, target, err)
+	}
+}
+
+// tailnetDial dials through a tsnet node. Tests replace it.
+var tailnetDial = func(ctx context.Context, srv *tsnet.Server, network, addr string) (net.Conn, error) {
+	if srv == nil {
+		return nil, errors.New("no source node")
+	}
+	return srv.Dial(ctx, network, addr)
 }

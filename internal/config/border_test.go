@@ -95,6 +95,9 @@ func TestBorderEverySetting(t *testing.T) {
 	if loc.SourceTailnet != "" || loc.From != "test-src" || len(loc.LocalSources) != 1 || loc.DestTailnets[0] != "test-dst" {
 		t.Errorf("local link = %+v", loc)
 	}
+	if loc.BridgeRef("test-dst") != "test-src/test-dst/loc" {
+		t.Errorf("bridge ref = %s", loc.BridgeRef("test-dst"))
+	}
 }
 
 func TestCompileEmptyLinks(t *testing.T) {
@@ -249,6 +252,72 @@ func TestExampleConfigsParse(t *testing.T) {
 	}
 }
 
+func TestParseLocalMultiPort(t *testing.T) {
+	body := borderJSON(`"links": [{
+		"name": "app",
+		"local": [
+			{"addr": "10.0.0.1", "dns_name": "app.example.com", "short_name": "app", "ports": [80, 443]},
+			{"addr": "db.lan", "ports": {"80": 8080, "443": 8443}}
+		]
+	}]`)
+	cfg, err := config.Parse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	srcs := cfg.Bridges[0].LocalSources
+	if len(srcs) != 2 {
+		t.Fatalf("sources = %+v", srcs)
+	}
+	_, app, err := srcs[0].Forwards()
+	if err != nil || len(app) != 2 || app[0].Expose != 80 || app[1].Backend != 443 {
+		t.Fatalf("app forwards = %#v, %v", app, err)
+	}
+	_, db, err := srcs[1].Forwards()
+	if err != nil || db[0] != (config.LocalForward{Expose: 80, Backend: 8080}) || db[1].Backend != 8443 {
+		t.Fatalf("db forwards = %#v, %v", db, err)
+	}
+
+	bad := borderJSON(`"links": [{"name": "app", "local": [{"addr": "10.0.0.1", "dns_name": "app.example.com", "port_map": {"80": 8080}}]}]`)
+	if _, err := config.Parse([]byte(bad)); err == nil {
+		t.Fatal("port_map is not a field; want an unknown-field error")
+	}
+}
+
+func TestParseViaTailnet(t *testing.T) {
+	body := borderJSON(`"links": [{
+		"name": "db",
+		"local": [
+			{"addr": "10.20.0.10", "dns_name": "db.example.com", "short_name": "db", "via": "tailnet", "ports": [443, 80]},
+			{"addr": "127.0.0.1:8080", "dns_name": "pod.example.com", "short_name": "pod"}
+		]
+	}]`)
+	cfg, err := config.Parse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := cfg.Bridges[0]
+	if rule.SourceTailnet != "test-src" || rule.From != "test-src" || len(rule.LocalSources) != 2 || rule.DestTailnets[0] != "test-dst" {
+		t.Fatalf("rule = %+v", rule)
+	}
+	if rule.LocalSources[0].DialVia() != config.ViaTailnet || rule.LocalSources[1].DialVia() != config.ViaPod {
+		t.Fatalf("via = %q %q", rule.LocalSources[0].Via, rule.LocalSources[1].Via)
+	}
+	_, fw, err := rule.LocalSources[0].Forwards()
+	if err != nil || len(fw) != 2 || fw[0].Expose != 443 || fw[1].Expose != 80 {
+		t.Fatalf("forwards = %#v, %v", fw, err)
+	}
+	podOnly := borderJSON(`"links": [{"name": "x", "local": [{"addr": "db.lan:1"}]}]`)
+	cfg, err = config.Parse([]byte(podOnly))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Bridges[0].SourceTailnet != "" || cfg.Bridges[0].From != "test-src" {
+		t.Fatalf("pod link = %+v", cfg.Bridges[0])
+	}
+}
 func sideJSON(tailnet, id string, extra string) string {
 	s := fmt.Sprintf(`"tailnet": %q, "oauth": {"client_id": %q, "client_secret_file": "/run/s"}, "tags": ["tag:tailnetlink"]`, tailnet, id)
 	if extra != "" {

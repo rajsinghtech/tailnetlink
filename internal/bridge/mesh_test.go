@@ -2,10 +2,8 @@ package bridge
 
 import (
 	"context"
-	"net/netip"
 	"reflect"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -110,16 +108,6 @@ func TestSharedNodesLeaveForeignResources(t *testing.T) {
 	m.apiClients["work"] = workAPI.Client()
 	m.apiClients["partner"] = partnerAPI.Client()
 
-	var routeMu sync.Mutex
-	routes := map[*tsnet.Server][]netip.Addr{}
-	origRoutes := acceptNodeRoutes
-	acceptNodeRoutes = func(srv *tsnet.Server, addrs []netip.Addr) error {
-		routeMu.Lock()
-		routes[srv] = append([]netip.Addr(nil), addrs...)
-		routeMu.Unlock()
-		return nil
-	}
-	t.Cleanup(func() { acceptNodeRoutes = origRoutes })
 	t.Cleanup(func() { _ = m.Close(context.Background()) })
 
 	initial := parseMesh(t, `
@@ -178,11 +166,8 @@ func TestSharedNodesLeaveForeignResources(t *testing.T) {
 	assertNoForeignWrites(t, workAPI)
 	assertNoForeignWrites(t, partnerAPI)
 
-	routeMu.Lock()
-	gotRoutes := append([]netip.Addr(nil), routes[homeSrv]...)
-	routeMu.Unlock()
-	if len(gotRoutes) != 1 || gotRoutes[0] != netip.MustParseAddr("10.1.0.5") {
-		t.Fatalf("home accepted routes = %v", gotRoutes)
+	if got := m.AcceptedRoutes("home"); len(got) != 0 {
+		t.Fatalf("pod local entries installed subnet routes: %v", got)
 	}
 
 	// Adding a bridge reuses the nodes and recomputes route acceptance.
@@ -223,11 +208,8 @@ func TestSharedNodesLeaveForeignResources(t *testing.T) {
 	if m.servers["home"] != homeSrv || m.servers["work"] != workSrv || m.servers["partner"] != partnerSrv {
 		t.Fatal("adding a bridge restarted a node")
 	}
-	routeMu.Lock()
-	gotRoutes = append([]netip.Addr(nil), routes[homeSrv]...)
-	routeMu.Unlock()
-	if len(gotRoutes) != 2 || gotRoutes[0] != netip.MustParseAddr("10.1.0.5") || gotRoutes[1] != netip.MustParseAddr("10.9.9.9") {
-		t.Fatalf("home routes after reload = %v", gotRoutes)
+	if got := m.AcceptedRoutes("home"); len(got) != 0 {
+		t.Fatalf("pod local entries installed subnet routes after reload: %v", got)
 	}
 	assertForeign(t, homeAPI, homeDevs, map[string]tsclient.VIPService{"svc:unrelated": homeForeign}, map[string][]string{"other.example.com": {"9.9.9.9"}})
 	assertForeign(t, workAPI, workDevs, map[string]tsclient.VIPService{

@@ -291,9 +291,11 @@ func (b *Border) Compile() (*Config, error) {
 			}
 			return nil, fmt.Errorf("link %q: %w", l.Name, err)
 		}
-		// Local links do not dial through the source, but the source node is
-		// the one that would accept subnet routes for their addresses.
 		if len(l.Local) > 0 {
+			// From is the tailnet key this link leaves. A border's key is
+			// the source tailnet. The shared-node mesh passes the bridge's
+			// from key into rule the same way, and the VIP annotation is
+			// from/dest/link.
 			rule.From = src
 		}
 		cfg.Bridges = append(cfg.Bridges, rule)
@@ -369,6 +371,19 @@ func (s Side) tailnet(ephemeral bool) TailnetConfig {
 	}
 }
 
+func localNeedsTailnet(sources []LocalSourceSpec) bool {
+	for _, src := range sources {
+		if src.DialVia() == ViaTailnet {
+			return true
+		}
+	}
+	return false
+}
+
+// rule compiles one link. src is the tailnet key the link leaves: a border's
+// source key, or a mesh bridge's from key. dsts is copied so the caller can
+// reuse its slice. A local entry with via:tailnet sets SourceTailnet to src
+// because the dialer looks that field up, not From.
 func (l Link) rule(src string, dsts []string, borderAuthz AuthzConfig) (BridgeRule, error) {
 	if l.Name == "" {
 		return BridgeRule{}, errors.New("name is required")
@@ -391,9 +406,14 @@ func (l Link) rule(src string, dsts []string, borderAuthz AuthzConfig) (BridgeRu
 	r := BridgeRule{Name: l.Name, DestTailnets: append([]string(nil), dsts...), Authz: l.Authz.Effective(borderAuthz)}
 	if len(l.Local) > 0 {
 		if len(l.Ports) > 0 {
-			return BridgeRule{}, errors.New("ports doesn't apply to a local link; set addr (and expose_port) on each target")
+			return BridgeRule{}, errors.New("ports doesn't apply to a local link; set addr and ports on each target")
 		}
 		r.LocalSources = append([]LocalSourceSpec(nil), l.Local...)
+		if localNeedsTailnet(r.LocalSources) {
+			// src is the bridge's from key. Pod entries on the same link
+			// still dial the host network and leave SourceTailnet empty.
+			r.SourceTailnet = src
+		}
 		return r, nil
 	}
 	if len(l.Ports) == 0 {

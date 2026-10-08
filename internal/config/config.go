@@ -272,15 +272,44 @@ type ServiceSpec struct {
 }
 
 // LocalSourceSpec identifies a service on the local machine (or host-reachable network)
-// to proxy into a destination tailnet. Addr is "host:port" dialed directly via net.DialContext.
-// ExposePort is the VIP-side listen port (defaults to addr's port if zero). DNSName is required
-// when host is localhost or a bare IP; auto-derived from addr hostname otherwise.
+// to proxy into a destination tailnet. One spec is one VIP service: one DNS name
+// and one short name.
+//
+// Addr is either "host:port" or a host with no port. The host:port form dials
+// that address; ExposePort is the VIP listen port and defaults to addr's port.
+// A host with no port uses Ports: a list (exposed port equals backend port) or
+// a map of exposed port to backend port. DNSName is required when host is
+// localhost or a bare IP; it is taken from the addr hostname otherwise.
+//
+// Via chooses the dial path. Empty and "pod" (the default) use the host
+// network and the process's system resolver, which is what existing configs
+// do and what an in-cluster name such as a Kubernetes Service needs.
+// "tailnet" dials through the source tsnet node: names are resolved with
+// that tailnet's MagicDNS and split DNS, and subnet addresses use only the
+// advertised routes that cover the configured targets.
 type LocalSourceSpec struct {
-	Addr       string `json:"addr"`
-	ExposePort int    `json:"expose_port,omitempty"`
-	DNSName    string `json:"dns_name,omitempty"`
-	DNSZone    string `json:"dns_zone,omitempty"` // split-DNS zone; empty means the parent of dns_name
-	ShortName  string `json:"short_name,omitempty"`
+	Addr       string     `json:"addr"`
+	ExposePort int        `json:"expose_port,omitempty"`
+	Ports      LocalPorts `json:"ports,omitzero"`
+	Via        string     `json:"via,omitempty"`
+	DNSName    string     `json:"dns_name,omitempty"`
+	DNSZone    string     `json:"dns_zone,omitempty"` // split-DNS zone; empty means the parent of dns_name
+	ShortName  string     `json:"short_name,omitempty"`
+}
+
+// ViaPod dials from the host network. ViaTailnet dials through the source node.
+const (
+	ViaPod     = "pod"
+	ViaTailnet = "tailnet"
+)
+
+// DialVia returns pod or tailnet. Empty means pod, so older configs keep
+// dialing the host network.
+func (l LocalSourceSpec) DialVia() string {
+	if l.Via == "" {
+		return ViaPod
+	}
+	return l.Via
 }
 
 type BridgeRule struct {
@@ -293,12 +322,13 @@ type BridgeRule struct {
 	LocalSources   []LocalSourceSpec `json:"local_sources,omitempty"`
 	Ports          []int             `json:"ports,omitempty"`
 	Authz          AuthzConfig       `json:"authz,omitzero"`
-	// From is the tailnet key this rule leaves. Mesh compile sets it on
-	// every rule. A border sets it on local links so route selection can
-	// see them. Non-local border rules leave it empty and use SourceTailnet.
+	// From is the tailnet key this rule leaves. Border compile sets it on
+	// local links. Mesh compile sets it on every rule to the bridge's from
+	// key. Non-local border rules leave it empty and use SourceTailnet.
 	From string `json:"from,omitempty"`
-	// Link is the link name inside a mesh bridge. The rule Name is
-	// from/link, so Link keeps the short name for the ownership id.
+	// Link is the link name inside a mesh bridge. The rule Name there is
+	// from/link, so Link keeps the short name for the ownership id. A
+	// border leaves it empty and BridgeRef uses Name.
 	Link string `json:"link,omitempty"`
 }
 
@@ -467,6 +497,8 @@ func (c *Config) Clone() *Config {
 		cp.Tailnets = make(map[string]TailnetConfig, len(c.Tailnets))
 		for k, tc := range c.Tailnets {
 			tc.Tags = slices.Clone(tc.Tags)
+			tc.Authz.AllowLogins = slices.Clone(tc.Authz.AllowLogins)
+			tc.Authz.AllowTags = slices.Clone(tc.Authz.AllowTags)
 			cp.Tailnets[k] = tc
 		}
 	}
@@ -476,7 +508,7 @@ func (c *Config) Clone() *Config {
 			b.DestTailnets = slices.Clone(b.DestTailnets)
 			b.SourceDevices = slices.Clone(b.SourceDevices)
 			b.SourceServices = slices.Clone(b.SourceServices)
-			b.LocalSources = slices.Clone(b.LocalSources)
+			b.LocalSources = cloneLocalSources(b.LocalSources)
 			b.Ports = slices.Clone(b.Ports)
 			b.Authz.AllowLogins = slices.Clone(b.Authz.AllowLogins)
 			b.Authz.AllowTags = slices.Clone(b.Authz.AllowTags)
@@ -484,6 +516,14 @@ func (c *Config) Clone() *Config {
 		}
 	}
 	return &cp
+}
+
+func cloneLocalSources(in []LocalSourceSpec) []LocalSourceSpec {
+	out := slices.Clone(in)
+	for i := range out {
+		out[i].Ports.entries = slices.Clone(out[i].Ports.entries)
+	}
+	return out
 }
 
 // PublicJSON returns the config as indented JSON with every tailnet's oauth
