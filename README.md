@@ -103,10 +103,42 @@ A link has a `name` and exactly one of `tag`, `devices`, `services` or `local`, 
 | `tag` | Discover devices and VIP services with this ACL tag |
 | `devices` | Explicit device specs (`fqdn`, optional `dns_name`, `dns_zone`, `short_name`) |
 | `services` | Explicit VIP service names from the source (`name`, optional DNS fields) |
-| `local` | Addresses reachable from the host (`addr`, optional `expose_port`, `dns_name`, `dns_zone`, `short_name`) |
+| `local` | Addresses reachable from the host (`addr`, optional `ports`, `expose_port`, `dns_name`, `dns_zone`, `short_name`). See [Local targets](#local-targets) |
 | `ports` | TCP ports to forward (required except for `local`) |
 
 `short_name` must be a DNS label: 1 to 63 lowercase letters, digits or dashes, not starting or ending with a dash. Two entries that would end up with the same short name are rejected when the config loads. Names tailnetlink generates itself are cut to fit and get a short hash suffix.
+
+### Local targets
+
+A local target is one VIP service: one DNS name and one short name. `addr` as `host:port` dials that address. `expose_port` is the VIP port when it should differ from the port in `addr`.
+
+To put several ports on that same service, give `addr` as a host with no port and set `ports`. A list exposes each number and dials the same number. An object maps the VIP port to a different backend port. Do not set `expose_port` in either case, and do not put a port in `addr`.
+
+```json
+{
+  "name": "app",
+  "local": [
+    {
+      "addr": "10.0.0.1",
+      "dns_name": "app.example.com",
+      "short_name": "app",
+      "ports": [80, 443]
+    }
+  ]
+}
+```
+
+That is one service, `svc:app`, advertising `tcp:80` and `tcp:443` and dialing `10.0.0.1:80` and `10.0.0.1:443`. To expose 80 and 443 while the process listens on 8080 and 8443:
+
+```json
+"ports": { "80": 8080, "443": 8443 }
+```
+
+An empty `ports` value, a repeated VIP port, a port outside 1–65535, or a port in `addr` together with `ports` is rejected when the config loads. The single-address form is unchanged:
+
+```json
+{ "addr": "127.0.0.1:11434", "expose_port": 80, "dns_name": "ollama.example.com", "short_name": "ollama" }
+```
 
 When a link discovers by `tag`, it skips anything it made itself: VIP services annotated `tailnetlink/managed=true` and devices whose hostname starts with `tailnetlink-`.
 

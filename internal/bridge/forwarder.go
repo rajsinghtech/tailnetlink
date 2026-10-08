@@ -30,18 +30,19 @@ import (
 //	  → forwarder dials source device IP:port through srcSrv
 //	  → bidirectional copy
 type Forwarder struct {
-	listenSrv   *tsnet.Server // destination tailnet — registered as VIP service host
-	dialSrv     *tsnet.Server // nil for local-mode forwarders
-	localAddr   string        // when non-empty, dials via net.DialContext instead of dialSrv
-	vip         *VIPService
-	bridgeID    string // store key: ruleName/fqdn
-	timeout     time.Duration
-	store       *state.Store
-	logger      *slog.Logger
-	connCounter atomic.Int64
-	rule        string             // rule name, the metrics label
-	metrics     *metrics.Metrics   // nil means no metrics
-	authz       config.AuthzConfig // who may dial this link
+	listenSrv    *tsnet.Server  // destination tailnet — registered as VIP service host
+	dialSrv      *tsnet.Server  // nil for local-mode forwarders
+	localAddr    string         // when non-empty and localTargets is empty, dials this address for every port
+	localTargets map[int]string // listen port → host:port, dialed via net.DialContext
+	vip          *VIPService
+	bridgeID     string // store key: ruleName/fqdn
+	timeout      time.Duration
+	store        *state.Store
+	logger       *slog.Logger
+	connCounter  atomic.Int64
+	rule         string             // rule name, the metrics label
+	metrics      *metrics.Metrics   // nil means no metrics
+	authz        config.AuthzConfig // who may dial this link
 
 	cancel    context.CancelFunc
 	listeners []net.Listener
@@ -71,13 +72,19 @@ func NewForwarder(
 	}
 }
 
+// openServiceListener is ListenService with its retry. Tests replace it
+// to watch every port a forwarder binds and to close those listeners.
+var openServiceListener = func(srv *tsnet.Server, name string, mode tsnet.ServiceMode) (net.Listener, error) {
+	return listenServiceWithRetry(srv, name, mode)
+}
+
 func (f *Forwarder) Start(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	f.cancel = cancel
 
 	for _, port := range f.vip.Ports {
 		// PROXYProtocolVersion:1 prepends "PROXY TCP4 <real-src> ..." so we can WhoIs the actual peer.
-		ln, err := listenServiceWithRetry(f.listenSrv, f.vip.ServiceName, tsnet.ServiceModeTCP{
+		ln, err := openServiceListener(f.listenSrv, f.vip.ServiceName, tsnet.ServiceModeTCP{
 			Port:                 uint16(port),
 			PROXYProtocolVersion: 1,
 		})
@@ -147,9 +154,12 @@ func (f *Forwarder) handle(ctx context.Context, client net.Conn, port int) {
 	var target string
 	var upstream net.Conn
 	var dialErr error
-	if f.localAddr != "" {
-		target = f.localAddr
-		upstream, dialErr = (&net.Dialer{}).DialContext(dialCtx, "tcp", f.localAddr)
+	if addr, ok := f.localDial(port); ok {
+		target = addr
+		upstream, dialErr = (&net.Dialer{}).DialContext(dialCtx, "tcp", target)
+	} else if f.localAddr != "" || len(f.localTargets) > 0 {
+		target = fmt.Sprintf("port %d", port)
+		dialErr = fmt.Errorf("no local backend for port %d", port)
 	} else {
 		target = net.JoinHostPort(f.vip.SourceIP.String(), strconv.Itoa(port))
 		upstream, dialErr = f.dialSrv.Dial(dialCtx, "tcp", target)
@@ -210,6 +220,20 @@ func (f *Forwarder) handle(ctx context.Context, client net.Conn, port int) {
 	f.store.IncrBridgeConn(f.bridgeID, -1)
 	f.metrics.ConnClosed(f.rule, in, out)
 	f.store.Log("info", fmt.Sprintf("conn closed: %s — %s in, %s out", f.vip.ServiceName, formatBytes(in), formatBytes(out)), nil)
+}
+
+// localDial is the backend address for a local forwarder. A port map wins
+// over the single localAddr. The second result is false when this forwarder
+// dials through the source tailnet instead.
+func (f *Forwarder) localDial(port int) (string, bool) {
+	if len(f.localTargets) > 0 {
+		addr, ok := f.localTargets[port]
+		return addr, ok
+	}
+	if f.localAddr != "" {
+		return f.localAddr, true
+	}
+	return "", false
 }
 
 // bufferedConn wraps a net.Conn so that bytes already consumed into a

@@ -289,7 +289,7 @@ func (l Link) rule(src, dst string, borderAuthz AuthzConfig) (BridgeRule, error)
 	r := BridgeRule{Name: l.Name, DestTailnets: []string{dst}, Authz: l.Authz.Effective(borderAuthz)}
 	if len(l.Local) > 0 {
 		if len(l.Ports) > 0 {
-			return BridgeRule{}, errors.New("ports doesn't apply to a local link; set addr (and expose_port) on each target")
+			return BridgeRule{}, errors.New("ports doesn't apply to a local link; set addr and ports on each target")
 		}
 		r.LocalSources = append([]LocalSourceSpec(nil), l.Local...)
 		return r, nil

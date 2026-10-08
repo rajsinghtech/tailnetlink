@@ -260,15 +260,21 @@ type ServiceSpec struct {
 }
 
 // LocalSourceSpec identifies a service on the local machine (or host-reachable network)
-// to proxy into a destination tailnet. Addr is "host:port" dialed directly via net.DialContext.
-// ExposePort is the VIP-side listen port (defaults to addr's port if zero). DNSName is required
-// when host is localhost or a bare IP; auto-derived from addr hostname otherwise.
+// to proxy into a destination tailnet. One spec is one VIP service: one DNS name
+// and one short name.
+//
+// Addr is either "host:port" or a host with no port. The host:port form dials
+// that address; ExposePort is the VIP listen port and defaults to addr's port.
+// A host with no port uses Ports: a list (exposed port equals backend port) or
+// a map of exposed port to backend port. DNSName is required when host is
+// localhost or a bare IP; it is taken from the addr hostname otherwise.
 type LocalSourceSpec struct {
-	Addr       string `json:"addr"`
-	ExposePort int    `json:"expose_port,omitempty"`
-	DNSName    string `json:"dns_name,omitempty"`
-	DNSZone    string `json:"dns_zone,omitempty"` // split-DNS zone; empty means the parent of dns_name
-	ShortName  string `json:"short_name,omitempty"`
+	Addr       string     `json:"addr"`
+	ExposePort int        `json:"expose_port,omitempty"`
+	Ports      LocalPorts `json:"ports,omitzero"`
+	DNSName    string     `json:"dns_name,omitempty"`
+	DNSZone    string     `json:"dns_zone,omitempty"` // split-DNS zone; empty means the parent of dns_name
+	ShortName  string     `json:"short_name,omitempty"`
 }
 
 type BridgeRule struct {
@@ -434,6 +440,9 @@ func (c *Config) Clone() *Config {
 			b.SourceDevices = slices.Clone(b.SourceDevices)
 			b.SourceServices = slices.Clone(b.SourceServices)
 			b.LocalSources = slices.Clone(b.LocalSources)
+			for i := range b.LocalSources {
+				b.LocalSources[i].Ports.entries = slices.Clone(b.LocalSources[i].Ports.entries)
+			}
 			b.Ports = slices.Clone(b.Ports)
 			b.Authz.AllowLogins = slices.Clone(b.Authz.AllowLogins)
 			b.Authz.AllowTags = slices.Clone(b.Authz.AllowTags)

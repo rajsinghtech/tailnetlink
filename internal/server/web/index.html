@@ -819,7 +819,7 @@ function renderTopology() {
     const srcLabel = isLocalRule ? 'local' : ((cfgNets[rule.source_tailnet] || {}).tailnet || rule.source_tailnet || '—');
     const dstLabels = (rule.dest_tailnets || []).map(dt => (cfgNets[dt] || {}).tailnet || dt);
     const ports = isLocalRule
-      ? (rule.local_sources || []).map(s => ':' + (s.expose_port || s.addr.split(':').pop())).join(' ')
+      ? (rule.local_sources || []).flatMap(s => localPortLabels(s).map(p => ':' + p)).join(' ')
       : (rule.ports || []).map(p => `:${p}`).join(' ');
     const multiDest = dstLabels.length > 1;
 
@@ -969,7 +969,7 @@ function renderRules() {
   tbody.innerHTML = rules.map(r => {
     const isLocalR = r.local_sources && r.local_sources.length > 0;
     const ports = isLocalR
-      ? (r.local_sources||[]).map(s=>`<span class="port-chip">${s.expose_port || s.addr.split(':').pop()}</span>`).join('')
+      ? (r.local_sources||[]).flatMap(localPortLabels).map(p=>`<span class="port-chip">${esc(p)}</span>`).join('')
       : (r.ports||[]).map(p=>`<span class="port-chip">${p}</span>`).join('');
     const ruleNames = (arr, fn) => {
       const ns = arr.slice(0, 3).map(fn).join(', ');
@@ -1146,6 +1146,18 @@ function filterServices() {
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
+function localPortLabels(s) {
+  if (Array.isArray(s.ports)) return s.ports.map(String);
+  if (s.ports && typeof s.ports === 'object') {
+    return Object.keys(s.ports).sort((a, b) => Number(a) - Number(b)).map(k =>
+      String(s.ports[k]) === k ? k : k + '→' + s.ports[k]);
+  }
+  if (s.expose_port) return [String(s.expose_port)];
+  const addr = String(s.addr || '');
+  const i = addr.lastIndexOf(':');
+  if (i >= 0 && /^\d+$/.test(addr.slice(i + 1))) return [addr.slice(i + 1)];
+  return [];
+}
 function esc(s) {
   return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 }

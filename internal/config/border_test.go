@@ -246,6 +246,40 @@ func TestExampleConfigsParse(t *testing.T) {
 	}
 }
 
+func TestParseLocalMultiPort(t *testing.T) {
+	body := borderJSON(`"links": [{
+		"name": "app",
+		"local": [
+			{"addr": "10.0.0.1", "dns_name": "app.example.com", "short_name": "app", "ports": [80, 443]},
+			{"addr": "db.lan", "ports": {"80": 8080, "443": 8443}}
+		]
+	}]`)
+	cfg, err := config.Parse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	srcs := cfg.Bridges[0].LocalSources
+	if len(srcs) != 2 {
+		t.Fatalf("sources = %+v", srcs)
+	}
+	_, app, err := srcs[0].Forwards()
+	if err != nil || len(app) != 2 || app[0].Expose != 80 || app[1].Backend != 443 {
+		t.Fatalf("app forwards = %#v, %v", app, err)
+	}
+	_, db, err := srcs[1].Forwards()
+	if err != nil || db[0] != (config.LocalForward{Expose: 80, Backend: 8080}) || db[1].Backend != 8443 {
+		t.Fatalf("db forwards = %#v, %v", db, err)
+	}
+
+	bad := borderJSON(`"links": [{"name": "app", "local": [{"addr": "10.0.0.1", "dns_name": "app.example.com", "port_map": {"80": 8080}}]}]`)
+	if _, err := config.Parse([]byte(bad)); err == nil {
+		t.Fatal("port_map is not a field; want an unknown-field error")
+	}
+}
+
 func TestLoadReadError(t *testing.T) {
 	if _, err := config.Load(t.TempDir()); err == nil {
 		t.Error("loading a directory worked")
