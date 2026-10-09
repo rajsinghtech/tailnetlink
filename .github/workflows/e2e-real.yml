@@ -77,7 +77,7 @@ jobs:
       # No secrets in here: tailnet IDs and federated identity client IDs only.
       - name: Upload tailnet state
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ${{ env.STATE_ARTIFACT }}
           path: ${{ runner.temp }}/tailnets.json
@@ -128,7 +128,7 @@ jobs:
 
       - name: Upload test logs
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: e2e-logs-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/e2e-debug/

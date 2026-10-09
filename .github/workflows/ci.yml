@@ -54,7 +54,7 @@ jobs:
           test "$(./tailnetlink -version)" = "ci"
 
       - name: GoReleaser check
-        uses: goreleaser/goreleaser-action@v7
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
         with:
           distribution: goreleaser
           version: '~> v2'
@@ -68,12 +68,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Buildx
         id: buildx
         continue-on-error: true
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
         with:
           # The action pulls moby/buildkit before the Dockerfile runs.
           # Docker Hub times that pull out. The mirror serves the same tag.
@@ -85,7 +85,7 @@ jobs:
 
       - name: Retry Buildx setup
         if: steps.buildx.outcome == 'failure'
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
         with:
           name: buildx-retry
           driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
@@ -93,7 +93,7 @@ jobs:
       - name: Build (no push)
         id: build
         continue-on-error: true
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           platforms: linux/amd64
@@ -115,7 +115,7 @@ jobs:
 
       - name: Retry the image build
         if: steps.build.outcome == 'failure'
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           platforms: linux/amd64
@@ -151,7 +151,7 @@ jobs:
           exit 1
 
       - name: Multi-arch build (no push)
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -178,7 +178,7 @@ jobs:
       - name: Set up Buildx
         id: buildx
         continue-on-error: true
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
         with:
           driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
@@ -188,12 +188,12 @@ jobs:
 
       - name: Retry Buildx setup
         if: steps.buildx.outcome == 'failure'
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
         with:
           name: buildx-retry
           driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
-      - uses: docker/login-action@v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -206,7 +206,7 @@ jobs:
       - name: Build and push
         id: push
         continue-on-error: true
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -226,7 +226,7 @@ jobs:
       - name: Retry the image push
         id: push_retry
         if: steps.push.outcome == 'failure'
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
