@@ -115,30 +115,48 @@ func (b *border) config(rules ...config.BridgeRule) *config.Config {
 	}
 }
 
-func (b *border) side(tn *tailnet, api *ctlBridge, secretFile string) config.Side {
-	tc := b.tailnetConfig(tn, api, secretFile)
-	return config.Side{Tailnet: tc.Tailnet, OAuth: tc.OAuth, Tags: tc.Tags, ControlURL: tc.ControlURL, APIBaseURL: tc.APIBaseURL}
+// fileLink is one device target the way a config file writes it.
+type fileLink struct {
+	Name, Host, Short string
+	Ports             []int
+	Authz             config.AuthzConfig
 }
 
-// border is the config-file form of b.config: the same border, written
-// the way a user would.
-func (b *border) border(links ...config.Link) *config.Border {
-	poll, dial := config.Duration{Duration: 200 * time.Millisecond}, config.Duration{Duration: 5 * time.Second}
-	return &config.Border{
-		Name:         "e2e-" + b.sfx,
-		Source:       b.side(b.src, b.srcAPI, b.secretFiles[0]),
-		Dest:         b.side(b.dst, b.dstAPI, b.secretFiles[1]),
-		Node:         config.NodeConfig{StateDir: b.stateDir},
-		PollInterval: &poll,
-		DialTimeout:  &dial,
-		Links:        links,
+func (b *border) tailnetSpec(tn *tailnet, api *ctlBridge, secretFile string) config.TailnetSpec {
+	tc := b.tailnetConfig(tn, api, secretFile)
+	return config.TailnetSpec{
+		Tailnet: tc.Tailnet, Auth: tc.OAuth, Tags: tc.Tags,
+		ControlURL: tc.ControlURL, APIBaseURL: tc.APIBaseURL,
 	}
 }
 
-// writeBorder writes bd to path as a config file.
-func writeBorder(t *testing.T, path string, bd *config.Border) {
+// fileConfig is the config-file form of b.config.
+func (b *border) fileConfig(links ...fileLink) *config.File {
+	poll, dial := config.Duration{Duration: 200 * time.Millisecond}, config.Duration{Duration: 5 * time.Second}
+	f := &config.File{
+		Name:     "e2e-" + b.sfx,
+		StateDir: b.stateDir,
+		Tailnets: map[string]config.TailnetSpec{
+			b.srcName: b.tailnetSpec(b.src, b.srcAPI, b.secretFiles[0]),
+			b.dstName: b.tailnetSpec(b.dst, b.dstAPI, b.secretFiles[1]),
+		},
+		Targets:      map[string]config.TargetSpec{},
+		PollInterval: &poll,
+		DialTimeout:  &dial,
+	}
+	for _, l := range links {
+		ports := config.LocalPortList(l.Ports...)
+		f.Targets[l.Name] = config.TargetSpec{In: b.srcName, Device: l.Host + "." + b.src.domain, Ports: ports}
+		ex := config.ExportSpec{Target: l.Name, To: []string{b.dstName}, Name: l.Short, Authz: l.Authz}
+		f.Exports = append(f.Exports, ex)
+	}
+	return f
+}
+
+// writeBorder writes f to path as a config file.
+func writeBorder(t *testing.T, path string, f *config.File) {
 	t.Helper()
-	data, err := json.MarshalIndent(bd, "", "  ")
+	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,9 +165,9 @@ func writeBorder(t *testing.T, path string, bd *config.Border) {
 	}
 }
 
-// deviceLink is deviceRule as a config-file link.
-func (b *border) deviceLink(name, host, shortName string, ports ...int) config.Link {
-	return config.Link{Name: name, Devices: []config.DeviceSpec{{FQDN: host + "." + b.src.domain, ShortName: shortName}}, Ports: ports}
+// deviceLink is deviceRule as a config-file target.
+func (b *border) deviceLink(name, host, shortName string, ports ...int) fileLink {
+	return fileLink{Name: name, Host: host, Short: shortName, Ports: ports}
 }
 
 // deviceRule bridges one source device by FQDN.

@@ -303,7 +303,7 @@ func (s *Server) takeToken() bool {
 }
 
 func (s *Server) checkTailnet(w http.ResponseWriter, r *http.Request) bool {
-	if tn := r.PathValue("tn"); tn != s.Tailnet {
+	if tn := r.PathValue("tn"); s.Tailnet != "" && tn != s.Tailnet {
 		writeErr(w, http.StatusNotFound, fmt.Sprintf("unknown tailnet %q", tn))
 		return false
 	}

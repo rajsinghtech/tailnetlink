@@ -32,9 +32,7 @@ func TestManagerEmptyLinksThenHotReload(t *testing.T) {
 	b.dstAPI.ResetCalls()
 
 	path := filepath.Join(t.TempDir(), "tailnetlink.json")
-	empty := b.border()
-	empty.Links = []config.Link{}
-	writeBorder(t, path, empty)
+	writeBorder(t, path, b.fileConfig())
 	cs, err := config.NewStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -49,9 +47,9 @@ func TestManagerEmptyLinksThenHotReload(t *testing.T) {
 	srv := httptest.NewServer(metrics.Handler(r.metrics, r.m.Ready))
 	t.Cleanup(srv.Close)
 
-	waitFor(t, 60*time.Second, "/readyz 200 with no links", func() bool {
+	waitFor(t, 10*time.Second, "/readyz 503 with no exports", func() bool {
 		c, _ := getStatus(t, srv.URL+"/readyz")
-		return c == 200
+		return c == 503
 	})
 	connected := 0
 	for _, tn := range r.store.GetStatus().Tailnets {
@@ -59,11 +57,8 @@ func TestManagerEmptyLinksThenHotReload(t *testing.T) {
 			connected++
 		}
 	}
-	if connected != 2 {
-		t.Fatalf("connected tailnets = %d, want 2", connected)
-	}
-	if !r.logged(`connected to tailnet "`+b.srcName) || !r.logged(`connected to tailnet "`+b.dstName) {
-		t.Fatalf("logs:\n%s", r.logs.String())
+	if connected != 0 {
+		t.Fatalf("connected tailnets = %d, want 0", connected)
 	}
 	if got := vipWrites(b.srcAPI); len(got) != 0 {
 		t.Errorf("source VIP writes with no links: %v", got)
@@ -78,7 +73,7 @@ func TestManagerEmptyLinksThenHotReload(t *testing.T) {
 		t.Errorf("foreign service changed while idle: %+v", got)
 	}
 
-	writeBorder(t, path, b.border(b.deviceLink("web", "backend", "be-"+b.sfx, 8080)))
+	writeBorder(t, path, b.fileConfig(b.deviceLink("web", "backend", "be-"+b.sfx, 8080)))
 	future := time.Now().Add(2 * time.Second)
 	if err := os.Chtimes(path, future, future); err != nil {
 		t.Fatal(err)

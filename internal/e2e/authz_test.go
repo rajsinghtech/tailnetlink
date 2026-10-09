@@ -85,10 +85,10 @@ func TestManagerAuthzLinkOverridesBorder(t *testing.T) {
 	ctx := e2eSetup(t)
 	b := newBorder(t)
 	echoBackend(t, ctx, b.src, "backend", 8080)
-	bd := b.border(b.deviceLink("web", "backend", "", 8080))
+	bd := b.fileConfig(b.deviceLink("web", "backend", "", 8080))
 	bd.Authz = config.AuthzConfig{Mode: config.AuthzRequireCap}
-	bd.Links[0].Authz = config.AuthzConfig{Mode: config.AuthzOff}
+	bd.Exports[0].Authz = config.AuthzConfig{Mode: config.AuthzOff}
 	startManager(t, loadBorder(t, bd), "")
-	vip := waitVIP(t, b.dstAPI, b.serviceName("backend", ""))
+	vip := waitVIP(t, b.dstAPI, "svc:web")
 	echoVia(t, ctx, client(t, ctx, b.dst, "client"), netip.AddrPortFrom(vip, 8080), "open")
 }

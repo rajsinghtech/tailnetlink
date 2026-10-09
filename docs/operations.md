@@ -2,11 +2,11 @@
 
 ## Ownership
 
-`name` is written to every VIP service this process creates as `tailnetlink/owner=<name>`. The service also gets `tailnetlink/managed=true`. A bridge writes `tailnetlink/bridge=<from>/<dest>/<link>`.
+`name` is written to every VIP service this process creates as `tailnetlink/owner=<name>`. The service also gets `tailnetlink/managed=true`. An export writes `tailnetlink/export=<target>/<to>`. The two parts are the target key and the destination tailnet key.
 
-Create, update, and delete apply to a service when the owner matches. With a bridge id set, the existing bridge annotation is empty or equal to that id. The three parts of that id are the source node key, the destination node key, and the link name. A service that already names a different bridge is left in place, and the bridge reports a name conflict (`tailnetlink_ownership_conflicts_total`). A service that has only `tailnetlink/managed=true` is left in place.
+Create, update, and delete apply to a service when the owner matches. With an export id set, the existing export annotation is empty or equal to that id. A service that already names a different export is left in place, and the export reports a name conflict (`tailnetlink_ownership_conflicts_total`). A service that has only `tailnetlink/managed=true` is left in place.
 
-`prune` deletes every service this process owns, whichever bridge published it. The UI VIP and the DNS VIP use the owner check.
+`prune` deletes every service this process owns. The UI VIP and the DNS VIP use the owner check.
 
 Two processes that share a tailnet use different `name` values. One of them sets `ui.service_name` so the UI VIP names differ.
 
@@ -18,18 +18,13 @@ A stop (SIGTERM, a restart, a deploy) leaves VIP services, the DNS VIP, and spli
 
 Each node keeps state under `node.state_dir`, mode `0700`.
 
-| Shape | Directory name |
-|---|---|
-| Mesh key `home` | `home` |
-| Border source | `<name>-src` |
-| Border single `dest` | `<name>-dst` |
-| Each `dests` entry | `<name>-dst-` plus four hex characters of a hash of the tailnet name |
+Each tailnet key has a directory of the same name. The key `home` uses `home`.
 
 The default directory is `tailnetlink-state` next to the config file. Keep it on persistent storage. A lost directory means the next start registers new nodes. Two processes use different state directories.
 
 A saved node that does not come up within one minute is removed and registered again.
 
-`node.ephemeral` true gives that node a new directory under the same state directory on every start, and a new device identity. On a mesh, a top-level true applies to every tailnet. Ephemeral state stays on the state-directory volume, so a read-only root filesystem works when that directory is mounted.
+`node.ephemeral` true gives that node a new directory under the same state directory on every start, and a new device identity. A top-level `ephemeral` true applies to every tailnet. Ephemeral state stays on the state-directory volume, so a read-only root filesystem works when that directory is mounted.
 
 To delete the services a stopped process owns:
 
@@ -90,7 +85,7 @@ Each tailnet's API client has its own token bucket: 20 requests per second, burs
 | `tailnetlink_connections_total` | `rule` | Connections forwarded |
 | `tailnetlink_bytes_total` | `rule`, `direction` | Bytes forwarded. `in` is client to backend. `out` is backend to client |
 | `tailnetlink_dial_failures_total` | `rule` | Failed backend dials |
-| `tailnetlink_routed_dial_failures_total` | `rule`, `reason` | Failed `via:tailnet` dials. `no_route`, `denied`, or `error` |
+| `tailnetlink_routed_dial_failures_total` | `rule`, `reason` | Failed dials through a tailnet node. `no_route`, `denied`, or `error` |
 | `tailnetlink_api_errors_total` | `endpoint` | Failed API calls. A 404 is omitted |
 | `tailnetlink_api_requests_total` | `endpoint`, `code` | Every API attempt. `code` is the HTTP status, or `error` when there was no response |
 | `tailnetlink_api_request_duration_seconds` | `endpoint` | Duration of one API attempt |
@@ -104,7 +99,7 @@ Go runtime and process metrics are included.
 
 The UI is read-only. It listens on `127.0.0.1:8888` unless `-listen` or `ui.listen_addr` says otherwise. It is also published as `svc:tailnetlink` on TCP port 80 in every connected tailnet. That service uses the same ownership check as every other service.
 
-GET and HEAD are served. Every other method receives 405. The config view omits each tailnet's `oauth` block. Responses carry no CORS headers.
+GET and HEAD are served. Every other method receives 405. The config view omits each tailnet's `auth` block. Responses carry no CORS headers.
 
 `"ui": {"enabled": false}` or `-ui=false` turns the UI off. `-ui=false` wins over the file for the life of the process: nothing listens locally and no UI VIP is created. Turning `ui.enabled` off in a running process deletes the UI services it owns. Turning it back on publishes them again. The local listener follows the setting the process started with.
 

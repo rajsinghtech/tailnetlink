@@ -30,7 +30,7 @@ func (b *border) sibling(t *testing.T, domain string) *border {
 }
 
 // loadBorder writes bd as a config file and loads it the way main does.
-func loadBorder(t *testing.T, bd *config.Border) *config.Config {
+func loadBorder(t *testing.T, bd *config.File) *config.Config {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "tailnetlink.json")
 	writeBorder(t, path, bd)
@@ -52,11 +52,11 @@ func TestTwoBordersThreeTailnets(t *testing.T) {
 	clientB := client(t, ctx, ab.dst, "client-b")
 	clientC := client(t, ctx, ac.dst, "client-c")
 
-	rAB := startManager(t, loadBorder(t, ab.border(ab.deviceLink("web", "backend", "", 8080))), "")
-	startManager(t, loadBorder(t, ac.border(ac.deviceLink("web", "backend", "", 8080))), "")
+	rAB := startManager(t, loadBorder(t, ab.fileConfig(ab.deviceLink("web", "backend", "", 8080))), "")
+	startManager(t, loadBorder(t, ac.fileConfig(ac.deviceLink("web", "backend", "", 8080))), "")
 
-	vipB := waitVIP(t, ab.dstAPI, ab.serviceName("backend", ""))
-	vipC := waitVIP(t, ac.dstAPI, ac.serviceName("backend", ""))
+	vipB := waitVIP(t, ab.dstAPI, "svc:web")
+	vipC := waitVIP(t, ac.dstAPI, "svc:web")
 	echoVia(t, ctx, clientB, netip.AddrPortFrom(vipB, 8080), "to B")
 	echoVia(t, ctx, clientC, netip.AddrPortFrom(vipC, 8080), "to C")
 
@@ -85,7 +85,7 @@ func TestTwoBordersThreeTailnets(t *testing.T) {
 	// Stop A-to-B. A-to-C keeps working, and B's services stay put.
 	rAB.stop(t)
 	echoVia(t, ctx, clientC, netip.AddrPortFrom(vipC, 8080), "C after B stopped")
-	if _, ok := ab.dstAPI.Service(ab.serviceName("backend", "")); !ok {
+	if _, ok := ab.dstAPI.Service("svc:web"); !ok {
 		t.Error("stopping A-to-B deleted its service")
 	}
 }
@@ -97,11 +97,10 @@ func TestBorderDNSDisabled(t *testing.T) {
 	b := newBorder(t)
 	echoBackend(t, ctx, b.src, "backend", 8080)
 	cl := client(t, ctx, b.dst, "client")
-	bd := b.border(b.deviceLink("web", "backend", "", 8080))
-	off := false
-	bd.DNS.Enabled = &off
+	bd := b.fileConfig(b.deviceLink("web", "backend", "", 8080))
+	bd.DNS = &config.OnOff{On: false}
 	startManager(t, loadBorder(t, bd), "")
-	vip := waitVIP(t, b.dstAPI, b.serviceName("backend", ""))
+	vip := waitVIP(t, b.dstAPI, "svc:web")
 	echoVia(t, ctx, cl, netip.AddrPortFrom(vip, 8080), "no dns")
 	for _, n := range b.dstAPI.ServiceNames() {
 		if strings.HasPrefix(n, "svc:tnl-dns-") {
@@ -120,17 +119,16 @@ func TestBorderDNSTurnedOff(t *testing.T) {
 	b := newBorder(t)
 	echoBackend(t, ctx, b.src, "backend", 8080)
 	cl := client(t, ctx, b.dst, "client")
-	bd := b.border(b.deviceLink("web", "backend", "", 8080))
+	bd := b.fileConfig(b.deviceLink("web", "backend", "", 8080))
 	r := startManager(t, loadBorder(t, bd), "")
 	waitVIP(t, b.dstAPI, "svc:tnl-dns-src-ts-net-dns")
 
-	off := false
-	bd.DNS.Enabled = &off
+	bd.DNS = &config.OnOff{On: false}
 	r.reconcile(loadBorder(t, bd))
 	waitFor(t, 30*time.Second, "DNS VIP gone", func() bool {
 		_, ok := b.dstAPI.Service("svc:tnl-dns-src-ts-net-dns")
 		return !ok && len(b.dstAPI.SplitDNS("src.ts.net")) == 0
 	})
-	vip := waitVIP(t, b.dstAPI, b.serviceName("backend", ""))
+	vip := waitVIP(t, b.dstAPI, "svc:web")
 	echoVia(t, ctx, cl, netip.AddrPortFrom(vip, 8080), "still up")
 }

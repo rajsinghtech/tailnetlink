@@ -19,22 +19,23 @@ import (
 func meshTailnetJSON(name, id string) string {
 	return `"` + name + `": {
 		"tailnet": "` + id + `",
-		"oauth": {"client_id": "` + name + `", "client_secret_file": "/run/` + name + `"},
+		"auth": {"client_id": "` + name + `", "client_secret_file": "/run/` + name + `"},
 		"tags": ["tag:tailnetlink"]
 	}`
 }
 
-func parseMesh(t *testing.T, bridges string) *config.Config {
+func parseMesh(t *testing.T, targets, exports string) *config.Config {
 	t.Helper()
 	body := `{
 		"name": "mesh",
-		"dns": {"enabled": false},
+		"dns": false,
 		"tailnets": {
 			` + meshTailnetJSON("home", "keiretsu.ts.net") + `,
 			` + meshTailnetJSON("work", "example.ts.net") + `,
 			` + meshTailnetJSON("partner", "partner.example.com") + `
 		},
-		"bridges": [` + bridges + `]
+		"targets": {` + targets + `},
+		"exports": [` + exports + `]
 	}`
 	cfg, err := config.Parse([]byte(body))
 	if err != nil {
@@ -111,45 +112,44 @@ func TestSharedNodesLeaveForeignResources(t *testing.T) {
 	t.Cleanup(func() { _ = m.Close(context.Background()) })
 
 	initial := parseMesh(t, `
-		{"from": "home", "to": ["work", "partner"], "links": [
-			{"name": "api", "devices": [{"fqdn": "api.src.example"}], "ports": [8080]},
-			{"name": "db", "local": [{"addr": "10.1.0.5:5432", "dns_name": "db.example.com"}]}
-		]},
-		{"from": "home", "to": ["work"], "links": [
-			{"name": "taken", "devices": [{"fqdn": "other.src.example", "short_name": "taken"}], "ports": [9]}
-		]},
-		{"from": "partner", "to": ["work"], "links": [
-			{"name": "billing", "devices": [{"fqdn": "billing.src.example"}], "ports": [8443]}
-		]}
+			"api": {"in": "home", "device": "api.src.example", "ports": [8080]},
+			"db": {"in": "pod", "addr": "10.1.0.5", "ports": [5432]},
+			"taken": {"in": "home", "device": "other.src.example", "ports": [9]},
+			"billing": {"in": "partner", "device": "billing.src.example", "ports": [8443]}
+		`, `
+		{"target": "api", "to": ["work", "partner"]},
+		{"target": "db", "to": ["work"], "dns_name": "db.example.com"},
+		{"target": "taken", "to": ["work"], "name": "taken"},
+		{"target": "billing", "to": ["work"]}
 	`)
 	adopt(m, initial)
 	m.cfg = initial.Clone()
 	m.Reconcile(context.Background(), initial)
 
 	waitFor(t, 5*time.Second, "api bridge on work", func() bool {
-		st, _ := bridgeState(m, "home/api/work/api.src.example")
+		st, _ := bridgeState(m, "api/api/work/api.src.example")
 		return st == state.BridgeStatusActive
 	})
 	waitFor(t, 5*time.Second, "api bridge on partner", func() bool {
-		st, _ := bridgeState(m, "home/api/partner/api.src.example")
+		st, _ := bridgeState(m, "api/api/partner/api.src.example")
 		return st == state.BridgeStatusActive
 	})
 	waitFor(t, 5*time.Second, "name conflict", func() bool {
-		_, errText := bridgeState(m, "home/taken/work/other.src.example")
+		_, errText := bridgeState(m, "taken/taken/work/other.src.example")
 		return strings.Contains(errText, "conflict")
 	})
 	waitFor(t, 5*time.Second, "partner billing bridge", func() bool {
-		st, _ := bridgeState(m, "partner/billing/work/billing.src.example")
+		st, _ := bridgeState(m, "billing/billing/work/billing.src.example")
 		return st == state.BridgeStatusActive
 	})
 
 	if m.servers["home"] != homeSrv || m.servers["work"] != workSrv || m.servers["partner"] != partnerSrv {
 		t.Fatal("startup replaced a shared node")
 	}
-	if _, ok := workAPI.Service("svc:tnl-home-api"); !ok {
+	if _, ok := workAPI.Service("svc:api"); !ok {
 		t.Fatal("work did not get the bridged service")
 	}
-	if _, ok := partnerAPI.Service("svc:tnl-home-api"); !ok {
+	if _, ok := partnerAPI.Service("svc:api"); !ok {
 		t.Fatal("partner did not get the bridged service")
 	}
 	if devicePolls(homeAPI) != 1 {
@@ -172,37 +172,35 @@ func TestSharedNodesLeaveForeignResources(t *testing.T) {
 
 	// Adding a bridge reuses the nodes and recomputes route acceptance.
 	withReturn := parseMesh(t, `
-		{"from": "home", "to": ["work", "partner"], "links": [
-			{"name": "api", "devices": [{"fqdn": "api.src.example"}], "ports": [8080]},
-			{"name": "db", "local": [
-				{"addr": "10.1.0.5:5432", "dns_name": "db.example.com"},
-				{"addr": "10.9.9.9:80", "dns_name": "cache.example.com"}
-			]}
-		]},
-		{"from": "home", "to": ["work"], "links": [
-			{"name": "taken", "devices": [{"fqdn": "other.src.example", "short_name": "taken"}], "ports": [9]}
-		]},
-		{"from": "work", "to": ["home"], "links": [
-			{"name": "builds", "devices": [{"fqdn": "build.src.example"}], "ports": [8022]},
-			{"name": "loop", "tag": "tag:tailnetlink", "ports": [443]}
-		]},
-		{"from": "partner", "to": ["work"], "links": [
-			{"name": "billing", "devices": [{"fqdn": "billing.src.example"}], "ports": [8443]}
-		]}
+			"api": {"in": "home", "device": "api.src.example", "ports": [8080]},
+			"db": {"in": "pod", "addr": "10.1.0.5", "ports": [5432]},
+			"cache": {"in": "pod", "addr": "10.9.9.9", "ports": [80]},
+			"taken": {"in": "home", "device": "other.src.example", "ports": [9]},
+			"builds": {"in": "work", "device": "build.src.example", "ports": [8022]},
+			"loop": {"in": "work", "tag": "tag:tailnetlink", "ports": [443]},
+			"billing": {"in": "partner", "device": "billing.src.example", "ports": [8443]}
+		`, `
+		{"target": "api", "to": ["work", "partner"]},
+		{"target": "db", "to": ["work"], "dns_name": "db.example.com"},
+		{"target": "cache", "to": ["work"], "dns_name": "cache.example.com"},
+		{"target": "taken", "to": ["work"], "name": "taken"},
+		{"target": "builds", "to": ["home"]},
+		{"target": "loop", "to": ["home"]},
+		{"target": "billing", "to": ["work"]}
 	`)
 	m.Reconcile(context.Background(), withReturn)
 	waitFor(t, 5*time.Second, "return bridge", func() bool {
-		st, _ := bridgeState(m, "work/builds/home/build.src.example")
+		st, _ := bridgeState(m, "builds/builds/home/build.src.example")
 		return st == state.BridgeStatusActive
 	})
 	waitFor(t, 5*time.Second, "real service exported once", func() bool {
-		_, ok := homeAPI.Service("svc:tnl-work-real")
+		_, ok := homeAPI.Service("svc:loop-real")
 		return ok
 	})
-	if _, ok := homeAPI.Service("svc:tnl-work-tnl-home-api"); ok {
+	if _, ok := homeAPI.Service("svc:loop-api"); ok {
 		t.Fatal("managed VIP was re-exported back to its source tailnet")
 	}
-	if _, ok := homeAPI.Service("svc:tnl-work-unrelated"); ok {
+	if _, ok := homeAPI.Service("svc:loop-unrelated"); ok {
 		t.Fatal("foreign service was re-exported")
 	}
 	if m.servers["home"] != homeSrv || m.servers["work"] != workSrv || m.servers["partner"] != partnerSrv {
@@ -220,16 +218,16 @@ func TestSharedNodesLeaveForeignResources(t *testing.T) {
 
 	// Removing the partner tailnet drops only the bridges that used it.
 	withoutPartner := parseMesh(t, `
-		{"from": "home", "to": ["work"], "links": [
-			{"name": "api", "devices": [{"fqdn": "api.src.example"}], "ports": [8080]},
-			{"name": "db", "local": [{"addr": "10.1.0.5:5432", "dns_name": "db.example.com"}]}
-		]},
-		{"from": "work", "to": ["home"], "links": [
-			{"name": "builds", "devices": [{"fqdn": "build.src.example"}], "ports": [8022]}
-		]}
+			"api": {"in": "home", "device": "api.src.example", "ports": [8080]},
+			"db": {"in": "pod", "addr": "10.1.0.5", "ports": [5432]},
+			"builds": {"in": "work", "device": "build.src.example", "ports": [8022]}
+		`, `
+		{"target": "api", "to": ["work"]},
+		{"target": "db", "to": ["work"], "dns_name": "db.example.com"},
+		{"target": "builds", "to": ["home"]}
 	`)
-	// parseMesh always includes the partner tailnet. Drop it the way a file
-	// that no longer mentions partner compiles.
+	// Nothing references partner, so compile omits it. Drop it again in case
+	// a future compile keeps unused tailnets.
 	delete(withoutPartner.Tailnets, "partner")
 	m.Reconcile(context.Background(), withoutPartner)
 	waitFor(t, 5*time.Second, "partner node stopped", func() bool {
@@ -241,13 +239,13 @@ func TestSharedNodesLeaveForeignResources(t *testing.T) {
 	if m.servers["home"] != homeSrv || m.servers["work"] != workSrv {
 		t.Fatal("removing partner restarted another node")
 	}
-	if _, ok := partnerAPI.Service("svc:tnl-home-api"); ok {
+	if _, ok := partnerAPI.Service("svc:api"); ok {
 		t.Fatal("partner still has a VIP this process published")
 	}
-	if _, ok := workAPI.Service("svc:tnl-partner-billing"); ok {
+	if _, ok := workAPI.Service("svc:billing"); ok {
 		t.Fatal("work still has the partner bridge VIP")
 	}
-	if _, ok := workAPI.Service("svc:tnl-home-api"); !ok {
+	if _, ok := workAPI.Service("svc:api"); !ok {
 		t.Fatal("removing partner deleted the work VIP")
 	}
 	assertForeign(t, partnerAPI, partnerDevs, map[string]tsclient.VIPService{"svc:unrelated": partnerForeign}, map[string][]string{"other.example.com": {"9.9.9.9"}})
@@ -267,7 +265,7 @@ func TestSharedNodesLeaveForeignResources(t *testing.T) {
 		"svc:real":      real,
 	}, map[string][]string{"other.example.com": {"9.9.9.9"}, "app.example.com": {"192.0.2.1"}})
 	assertForeign(t, partnerAPI, partnerDevs, map[string]tsclient.VIPService{"svc:unrelated": partnerForeign}, map[string][]string{"other.example.com": {"9.9.9.9"}})
-	if _, ok := workAPI.Service("svc:tnl-home-api"); !ok {
+	if _, ok := workAPI.Service("svc:api"); !ok {
 		t.Fatal("shutdown deleted an owned VIP; shutdown leaves owned services in place")
 	}
 }

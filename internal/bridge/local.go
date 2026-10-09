@@ -180,7 +180,7 @@ func (m *Manager) runEndpointRule(ctx context.Context, rule config.BridgeRule, d
 					return ip, nil
 				}
 			}
-			fwd.rule, fwd.metrics, fwd.authz = rule.Name, m.metricsRef(), m.authzFor(rule, dest.name)
+			fwd.rule, fwd.grant, fwd.metrics, fwd.authz = rule.Name, rule.GrantName(), m.metricsRef(), m.authzFor(rule, dest.name)
 			if err := startForwarder(fwd, ctx); err != nil {
 				m.logger.Error(kind+" rule: forwarder start failed", "rule", rule.Name, "dest", dest.name, "addr", src.Addr, "err", err)
 				_ = srcRec.Delete(context.Background(), kind, syntheticDev, shortName)

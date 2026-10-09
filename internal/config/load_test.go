@@ -82,9 +82,22 @@ func TestDurationRoundTrip(t *testing.T) {
 // store nor any other snapshot. The bridge manager diffs old against new
 // snapshots, so shared maps or slices would hide changes from it.
 func TestStoreGetIsDeepCopy(t *testing.T) {
-	p := writeFile(t, borderJSON(`"ui": {"enabled": true}, "links": [
-		{"name": "r", "devices": [{"fqdn": "d.one"}], "ports": [1]},
-		{"name": "s", "services": [{"name": "svc:s"}], "ports": [2]}]`))
+	p := writeFile(t, `{
+		"name": "test",
+		"ui": {"enabled": true},
+		"tailnets": {
+			"home": {"tailnet": "keiretsu.ts.net", "auth": {"client_id": "a", "client_secret_file": "/run/a"}},
+			"work": {"tailnet": "example.ts.net", "auth": {"client_id": "b", "client_secret_env": "B"}}
+		},
+		"targets": {
+			"r": {"in": "home", "device": "d.one", "ports": [1]},
+			"s": {"in": "home", "service": "svc:s", "ports": [2]}
+		},
+		"exports": [
+			{"target": "r", "to": ["work"]},
+			{"target": "s", "to": ["work"]}
+		]
+	}`)
 	s, err := config.NewStore(p)
 	if err != nil {
 		t.Fatal(err)
@@ -96,7 +109,7 @@ func TestStoreGetIsDeepCopy(t *testing.T) {
 	old.Bridges[0].SourceDevices[0].FQDN = "x"
 	*old.UI.Enabled = false
 	now := s.Get()
-	if now.Tailnets["test-src"].Tailnet != "a.ts.net" || now.Bridges[0].Ports[0] != 1 || now.Bridges[0].DestTailnets[0] != "test-dst" ||
+	if now.Tailnets["home"].Tailnet != "keiretsu.ts.net" || now.Bridges[0].Ports[0] != 1 || now.Bridges[0].DestTailnets[0] != "work" ||
 		now.Bridges[0].SourceDevices[0].FQDN != "d.one" || !now.UIEnabled() {
 		t.Errorf("editing a snapshot changed the store: %+v / %+v", now.Tailnets, now.Bridges)
 	}
@@ -112,7 +125,7 @@ func TestCloneEmpty(t *testing.T) {
 // Watch reloads the file when it changes, hands each listener its own copy,
 // and ignores a file that no longer loads.
 func TestStoreWatchReloads(t *testing.T) {
-	p := writeFile(t, borderJSON(""))
+	p := writeFile(t, sample(""))
 	s, err := config.NewStore(p)
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +148,7 @@ func TestStoreWatchReloads(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	bump(strings.Replace(borderJSON(`"poll_interval": "5s"`), `"name": "test"`, `"name": "changed"`, 1))
+	bump(strings.Replace(sample(`"poll_interval": "5s"`), `"name": "test"`, `"name": "changed"`, 1))
 	next := func() *config.Config {
 		t.Helper()
 		select {
@@ -222,7 +235,7 @@ func TestSecret(t *testing.T) {
 		{"empty file", config.OAuthCreds{ClientSecretFile: empty}, "", "is empty"},
 		{"unset env", config.OAuthCreds{ClientSecretEnv: "TNL_TEST_UNSET_XYZ"}, "", "$TNL_TEST_UNSET_XYZ is not set"},
 		{"empty env", config.OAuthCreds{ClientSecretEnv: "TNL_TEST_EMPTY"}, "", "is not set"},
-		{"neither", config.OAuthCreds{ClientID: "id"}, "", "set oauth.client_secret_file or oauth.client_secret_env"},
+		{"neither", config.OAuthCreds{ClientID: "id"}, "", "set auth.client_secret_file or auth.client_secret_env"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -261,7 +274,7 @@ func TestIDToken(t *testing.T) {
 		{"empty file", config.OAuthCreds{IDTokenFile: empty}, "", "is empty"},
 		{"unset env", config.OAuthCreds{IDTokenEnv: "TNL_TEST_ID_UNSET"}, "", "$TNL_TEST_ID_UNSET is not set"},
 		{"empty env", config.OAuthCreds{IDTokenEnv: "TNL_TEST_ID_EMPTY"}, "", "is not set"},
-		{"neither", config.OAuthCreds{ClientID: "id"}, "", "oauth.id_token_file or oauth.id_token_env"},
+		{"neither", config.OAuthCreds{ClientID: "id"}, "", "auth.id_token_file or auth.id_token_env"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

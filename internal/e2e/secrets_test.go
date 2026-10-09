@@ -18,7 +18,7 @@ import (
 func TestInlineSecretExitsBeforeContactingControl(t *testing.T) {
 	e2eSetup(t)
 	b := newBorder(t)
-	data, err := json.Marshal(b.border(b.deviceLink("web", "backend", "", 8080)))
+	data, err := json.Marshal(b.fileConfig(b.deviceLink("web", "backend", "", 8080)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestInlineSecretExitsBeforeContactingControl(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() == 0 || ctx.Err() != nil {
 		t.Fatalf("run = %v (ctx %v), want a non-zero exit\n%s", err, ctx.Err(), out.String())
 	}
-	if !strings.Contains(out.String(), "oauth.client_secret is not supported") {
+	if !strings.Contains(out.String(), "auth.client_secret is not supported") {
 		t.Errorf("output does not explain the error:\n%s", out.String())
 	}
 	if strings.Contains(out.String(), b.secrets()[0]) {

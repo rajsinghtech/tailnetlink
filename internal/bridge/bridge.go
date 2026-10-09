@@ -477,6 +477,13 @@ func (m *Manager) Reconcile(ctx context.Context, newCfg *config.Config) {
 	// deletes the services it owns.
 	for name, oldRule := range oldByName {
 		newRule, still := newByName[name]
+		if still {
+			for _, dest := range oldRule.DestTailnets {
+				if !slices.Contains(newRule.DestTailnets, dest) {
+					m.markDropDest(name, dest)
+				}
+			}
+		}
 		if !still || !reflect.DeepEqual(oldRule, newRule) {
 			m.stopRule(name, !still)
 		}
@@ -681,7 +688,7 @@ func (m *Manager) startTailnet(ctx context.Context, name string, tc config.Tailn
 
 	newServer := func(authKey string) *tsnet.Server {
 		return &tsnet.Server{
-			Hostname:   "tailnetlink-" + name,
+			Hostname:   nodeHostname(name, tc),
 			AuthKey:    authKey,
 			Ephemeral:  tc.Ephemeral,
 			Dir:        dir,
@@ -1064,6 +1071,13 @@ func (m *Manager) runRule(ctx context.Context, rule config.BridgeRule, pollInter
 		svcNames[i] = s.Name
 	}
 	disc := NewDiscoverer(srcClient, rule.SourceTag, deviceFQDNs, svcNames, pollInterval, m.logger)
+	m.mu.Lock()
+	tc := config.TailnetConfig{}
+	if m.cfg != nil {
+		tc = m.cfg.Tailnets[rule.SourceTailnet]
+	}
+	m.mu.Unlock()
+	disc.skipHost = nodeHostname(rule.SourceTailnet, tc)
 	disc.OnWarn(func(msg string) {
 		m.store.Log("warn", fmt.Sprintf("[%s] %s", rule.Name, msg), nil)
 	})
@@ -1123,7 +1137,7 @@ func (m *Manager) runRule(ctx context.Context, rule config.BridgeRule, pollInter
 		if gone {
 			if dest, known := destByName[destName]; known {
 				dev := Device{Name: b.SourceHost, FQDN: fqdn}
-				if err := dest.rec.Delete(context.Background(), rule.SourceTailnet, dev, shortNameFor(rule, fqdn)); err != nil {
+				if err := dest.rec.Delete(context.Background(), rule.SourceTailnet, dev, shortNameFor(rule, fqdn, b.SourceHost)); err != nil {
 					m.logger.Warn("reconciler: delete failed", "rule", rule.Name, "dest", destName, "device", dev.Name, "err", err)
 				}
 			}
@@ -1185,7 +1199,24 @@ func (m *Manager) fetchAuthKey(ctx context.Context, client *tsclient.Client, tag
 	return key.Key, nil
 }
 
-func dnsNameFor(rule config.BridgeRule, fqdn string) string {
+func nodeHostname(name string, tc config.TailnetConfig) string {
+	if tc.Hostname != "" {
+		return tc.Hostname
+	}
+	return "tailnetlink-" + name
+}
+
+func dnsNameFor(rule config.BridgeRule, fqdn, host string) string {
+	if rule.Multi {
+		if rule.DNSName == "" {
+			return ""
+		}
+		label := host
+		if label == "" {
+			label = fqdn
+		}
+		return strings.ReplaceAll(rule.DNSName, "{host}", HostLabel(label))
+	}
 	for _, spec := range rule.SourceDevices {
 		if strings.EqualFold(spec.FQDN, fqdn) {
 			return spec.DNSName
@@ -1200,6 +1231,9 @@ func dnsNameFor(rule config.BridgeRule, fqdn string) string {
 }
 
 func dnsZoneFor(rule config.BridgeRule, fqdn string) string {
+	if rule.Multi {
+		return rule.DNSZone
+	}
 	for _, spec := range rule.SourceDevices {
 		if strings.EqualFold(spec.FQDN, fqdn) {
 			return spec.DNSZone
@@ -1213,7 +1247,14 @@ func dnsZoneFor(rule config.BridgeRule, fqdn string) string {
 	return ""
 }
 
-func shortNameFor(rule config.BridgeRule, fqdn string) string {
+func shortNameFor(rule config.BridgeRule, fqdn, host string) string {
+	if rule.Multi && rule.ExportName != "" {
+		label := host
+		if label == "" {
+			label = fqdn
+		}
+		return TagServiceLabel(rule.ExportName, label)
+	}
 	for _, spec := range rule.SourceDevices {
 		if strings.EqualFold(spec.FQDN, fqdn) {
 			return spec.ShortName

@@ -68,16 +68,8 @@ func TestMeshBridgeViaTailnet(t *testing.T) {
 	beforeWork := controlSnap(t, work)
 
 	path := filepath.Join(t.TempDir(), "tailnetlink.json")
-	bridge := `{"from":"home","to":["work"],"links":[{
-		"name":"db",
-		"local":[{
-			"addr":"app.internal.example.com",
-			"via":"tailnet",
-			"dns_name":"db.example.com",
-			"short_name":"db",
-			"ports":[8080]
-		}]
-	}]}`
+	bridge := `"targets": {"db": {"in": "home", "host": "app.internal.example.com", "ports": [8080]}},
+		"exports": [{"target": "db", "to": ["work"], "name": "db", "dns_name": "db.example.com"}]`
 	body := g.meshJSON([]string{"home", "work"}, bridge)
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
@@ -88,7 +80,7 @@ func TestMeshBridgeViaTailnet(t *testing.T) {
 	}
 	var routed bool
 	for _, rule := range cfg.Bridges {
-		if rule.Name == "home/db" && rule.SourceTailnet == "home" && rule.From == "home" {
+		if rule.Name == "db/db" && rule.SourceTailnet == "home" && rule.From == "home" {
 			routed = true
 		}
 	}
@@ -97,7 +89,7 @@ func TestMeshBridgeViaTailnet(t *testing.T) {
 	}
 
 	r := startManager(t, cfg, "")
-	id := "home/db/local/work/app.internal.example.com/db"
+	id := "db/db/local/work/app.internal.example.com/db"
 	waitFor(t, 45*time.Second, "routed bridge active", func() bool {
 		status, _ := r.bridgeStatus(id)
 		return status == "active"

@@ -42,6 +42,27 @@ func capLabel(s string, max int) string {
 	return strings.TrimRight(s[:max-7], "-") + "-" + hash
 }
 
+// HostLabel is the DNS label used in a tag export's VIP name. A service
+// name loses its svc: prefix. A device hostname loses any domain.
+func HostLabel(name string) string {
+	name = strings.TrimPrefix(name, "svc:")
+	name = strings.TrimSuffix(name, ".")
+	if i := strings.IndexByte(name, '.'); i > 0 {
+		name = name[:i]
+	}
+	s := sanitize(name)
+	if s == "" {
+		return "host"
+	}
+	return s
+}
+
+// TagServiceLabel is the bare VIP name for one device of a tag target:
+// <export name>-<host>, cut and hashed to one DNS label.
+func TagServiceLabel(exportName, discovered string) string {
+	return capLabel(sanitize(exportName)+"-"+HostLabel(discovered), maxLabel)
+}
+
 func sanitize(s string) string {
 	s = strings.ToLower(s)
 	s = invalidChars.ReplaceAllString(s, "-")

@@ -263,7 +263,7 @@ func specsFor(rule config.BridgeRule, dests []destCtx, found map[string]Device) 
 	out := make(map[string]qItem, len(found)*len(dests))
 	for _, dev := range found {
 		dev = copyDevice(dev)
-		svc := ServiceName(rule.SourceTailnet, dev.FQDN, shortNameFor(rule, dev.FQDN))
+		svc := ServiceName(rule.SourceTailnet, dev.FQDN, shortNameFor(rule, dev.FQDN, dev.Name))
 		for _, dest := range dests {
 			out[dest.name+"/"+svc] = qItem{
 				dev:      dev,
@@ -281,7 +281,7 @@ func specsFor(rule config.BridgeRule, dests []destCtx, found map[string]Device) 
 // stays desired until this returns nil.
 func (m *Manager) converge(ctx context.Context, rule config.BridgeRule, dest destCtx, srcSrv *tsnet.Server, dialTimeout time.Duration, item qItem) error {
 	dev := item.dev
-	shortName := shortNameFor(rule, dev.FQDN)
+	shortName := shortNameFor(rule, dev.FQDN, dev.Name)
 	svcName := ServiceName(rule.SourceTailnet, dev.FQDN, shortName)
 	if !item.present {
 		m.mu.Lock()
@@ -340,7 +340,13 @@ func (m *Manager) converge(ctx context.Context, rule config.BridgeRule, dest des
 	}
 
 	fwd := NewForwarder(dest.srv, srcSrv, vip, item.bridgeID, dialTimeout, m.store, m.logger)
-	fwd.rule, fwd.metrics, fwd.authz = rule.Name, m.metricsRef(), m.authzFor(rule, dest.name)
+	if len(rule.Forwards) > 0 {
+		fwd.backendFor = make(map[int]int, len(rule.Forwards))
+		for _, fw := range rule.Forwards {
+			fwd.backendFor[fw.Expose] = fw.Backend
+		}
+	}
+	fwd.rule, fwd.grant, fwd.metrics, fwd.authz = rule.Name, rule.GrantName(), m.metricsRef(), m.authzFor(rule, dest.name)
 	if err := startForwarder(fwd, ctx); err != nil {
 		// Keep the VIP. The name stays desired and the queue tries again.
 		m.dropAdvertised(dest.name, vip.ServiceName)
@@ -367,7 +373,7 @@ func (m *Manager) converge(ctx context.Context, rule config.BridgeRule, dest des
 			srcDomain = m.cfg.Tailnets[rule.SourceTailnet].Tailnet
 		}
 		m.mu.Unlock()
-		m.startDeviceDNS(ctx, item.bridgeID, rule.Name, srcDomain, dev.FQDN, "", dnsNameFor(rule, dev.FQDN), dnsZoneFor(rule, dev.FQDN), vip.VIP, dest)
+		m.startDeviceDNS(ctx, item.bridgeID, rule.Name, srcDomain, dev.FQDN, "", dnsNameFor(rule, dev.FQDN, dev.Name), dnsZoneFor(rule, dev.FQDN), vip.VIP, dest)
 	}
 	m.mu.Lock()
 	m.forwarders[item.bridgeID] = fwd

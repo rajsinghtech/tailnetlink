@@ -1,4 +1,4 @@
-# One border. Put the config at ./tailnetlink.json and the OAuth secrets
+# One process. Put the config at ./tailnetlink.json and the login secrets
 # where the config points (files under ./secrets/ are mounted read-only).
 # Metrics listen on :9090 so container health checks and probes can reach them.
 services:
