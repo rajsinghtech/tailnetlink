@@ -1,15 +1,56 @@
 # Architecture
 
-One process is one **border** (source tailnet to one or more destinations) or one **mesh**. A mesh joins each tailnet once. The same node dials for bridges that leave and hosts VIPs for bridges that arrive. Links that leave one tailnet share a single poll. Each direction has its own reconcile queue.
+One process reads one file. The file is a mesh or a border.
 
-1. OAuth client credentials or workload identity federation mints (or reuses) auth keys for a tsnet node on each side.
-2. Discovery (tag, devices, services, or local addresses) finds backends. A local entry is one VIP: `host:port`, or a host plus `ports`. `via` defaults to the host network. `via: tailnet` dials through the source node's userspace netstack, resolving names with that tailnet's MagicDNS and split DNS, and installing only the advertised subnet prefixes that cover the configured addresses. Nothing is written to other devices, to policy, or to tailnet DNS. Links on one tailnet share a single device list and a single service list each interval.
-3. For each backend, the destination gets a VIP service owned by this border (`tailnetlink/owner=<name>`). Workers reconcile the set of names that should exist and retry failures. A failed poll does not remove anything. A name is dropped only after it has been missing for 3 polls or 2 minutes, at most 50 per poll, and a name is not added and removed at the same time.
-4. The destination node hosts the VIP and listens on every advertised port. Listens on one node are serialized and checked against its advertised set, so concurrent registrations are not lost. The forwarder reads PROXY v1, optionally WhoIs/authz, then dials the backend for that port. Tag, device, and service links dial the discovered tailscale IP through the source node. A local entry dials the host network unless `via` is `tailnet`, in which case the dial and the name lookup both go through the source node.
-5. Optional split-DNS publishes bridged names into the destination (TCP on the DNS VIP; UDP to VIP addresses is not delivered by tsnet today). The zone is the parent of the name unless a source sets `dns_zone`.
+A mesh joins each tailnet once. The same tsnet node dials for bridges that leave that tailnet and hosts VIP services for bridges that arrive. Links that leave one tailnet share one poll. Each destination of a link has its own reconcile queue.
 
-VIP services this process creates carry `tailnetlink/owner` and, for a bridge, `tailnetlink/bridge=<from>/<to>/<link>`. Create, update and delete apply only to those services. Split-DNS updates add or remove this process's resolver addresses and leave every other zone alone. Devices, routes and policy are not changed. Removing a bridge or a tailnet from the running config deletes what that bridge owned and nothing else. A name that already belongs to someone else, including the same short name a link would publish, is a conflict and is left in place.
+A border joins one source and one destination, or one source and the list in `dests`. The source node dials. Each destination node hosts its own VIP services, split DNS, and authz.
 
-A local entry with `via: tailnet` dials through the node of the tailnet the bridge leaves. That node installs only the advertised subnet prefixes that cover the configured addresses. `via` defaults to `pod`, which dials the host network and installs nothing. `config.AcceptedRouteAddrs` is still the union of parseable local IPs on bridges that leave a tailnet; the dialer does not accept every route in that list.
+## Path of one connection
 
-Shutdown does not delete VIP services. Use `tailnetlink prune` when you intend to remove them, or remove the bridge from the config while tailnetlink is running.
+1. OAuth client credentials or a workload-identity JWT mint an auth key, or the node reuses its saved state.
+2. Discovery finds backends by tag, by device FQDN, by VIP service name, or from local addresses. A local entry is one VIP service. `via` defaults to the host network. `via` set to `tailnet` dials through the source node's userspace stack.
+3. For each backend, the destination gets a VIP service owned by this process. Workers make the destination match that set and retry failures. A failed poll removes nothing. A name is removed after it has been missing for 3 polls or 2 minutes, at most 50 names per poll.
+4. The destination node hosts the VIP and listens on each advertised port. Listens on one node are serialized and checked against the node's advertised set. The forwarder reads PROXY v1, runs WhoIs when authz asks for it, then dials the backend.
+5. Optional split DNS publishes bridged names into the destination. The server is TCP on a shared DNS VIP. The zone is the parent of the name unless the source sets `dns_zone`.
+
+A `via:tailnet` dial installs only the advertised subnet prefixes that cover the configured addresses, plus a prefix that covers a split-DNS nameserver used for a name. `RouteAll` stays off. The host routing table is unchanged. The node has no TUN device.
+
+Shutdown leaves VIP services in place. `tailnetlink prune` removes the ones this process owns. Removing a bridge from the running config deletes what that bridge owned.
+
+## Files
+
+```
+cmd/tailnetlink/          flags, signals, prune
+internal/config/
+  config.go               compiled config, Load, file watch
+  border.go               source plus dest or dests
+  mesh.go                 tailnets plus bridges
+  localports.go           several ports on one local VIP
+  validate.go             link and short-name checks
+  dns.go                  SplitHost for dns_zone
+  routes.go               local IPs on bridges that leave a tailnet
+internal/bridge/
+  bridge.go               node lifecycle, reconcile, readiness
+  poller.go               one device list and one service list per tailnet
+  discoverer.go           tag, device, and service selection
+  queue.go                per-destination reconcile queue
+  reconciler.go           create and delete VIP services
+  forwarder.go            TCP proxy from a VIP to a backend
+  local.go                local entries and via:tailnet dials
+  scope.go                most specific advertised subnet prefix
+  routes.go               dial through the source node
+  listen.go               serialized VIP listens
+  naming.go               VIP service names
+  dns.go                  authoritative DNS server
+  splitdns.go             split-DNS resolver addresses
+  authz.go                WhoIs and link grants
+  helpers.go              owner and bridge annotations
+  prune.go                delete services this process owns
+internal/state/           in-memory bridge table and event stream
+internal/server/          read-only HTTP UI
+internal/metrics/         Prometheus metrics and health
+internal/tsapi/           API client, token exchange, rate limit
+```
+
+`internal/config/routes.go` lists local addresses written as `host:port` when the host is an IP, for bridges that leave a tailnet key. The dialer takes its prefixes from `internal/bridge/scope.go` when a `via:tailnet` target needs them.
