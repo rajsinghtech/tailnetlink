@@ -1,8 +1,9 @@
 # Deploy examples
 
-Run one process per border. The image is non-root (`65532`), expects the
-config at `/data/tailnetlink.json`, and listens for metrics on `:9090` so
-probes inside the container work.
+One process reads one config file. That file is a border or a mesh.
+The image is non-root (`65532`), expects the config at
+`/data/tailnetlink.json`, and listens for metrics on `:9090` so probes
+inside the container work.
 
 ```bash
 cp ../config.example.json ./tailnetlink.json
