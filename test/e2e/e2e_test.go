@@ -949,15 +949,15 @@ func waitServiceIn(t *testing.T, ctx context.Context, s *side, name string) neti
 	return vip
 }
 
-// TestRealAuthz: destination policy grants the app capability for link
-// echo-ok only. require_cap allows that link and denies another name.
+// TestRealAuthz: destination policy grants the app capability for export
+// name echo-ok only. require_cap allows that export and denies another name.
 func TestRealAuthz(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 	src, dst := tailnets(t)
 
 	ok := startBorder(t, ctx, src, dst, linkOpts{
-		shortName: "echo-ok-" + suffix(t),
+		shortName: "echo-ok",
 		linkName:  "echo-ok",
 		authz:     config.AuthzConfig{Mode: config.AuthzRequireCap},
 	})
@@ -970,7 +970,7 @@ func TestRealAuthz(t *testing.T) {
 	}
 
 	deny := startBorder(t, ctx, src, dst, linkOpts{
-		shortName: "echo-no-" + suffix(t),
+		shortName: "echo-no",
 		linkName:  "echo-no",
 		authz:     config.AuthzConfig{Mode: config.AuthzRequireCap},
 	})
