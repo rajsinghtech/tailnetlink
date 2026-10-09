@@ -258,7 +258,7 @@ func TestConfigFileChangeMovesPort(t *testing.T) {
 	cl := client(t, ctx, b.dst, "client")
 
 	path := filepath.Join(t.TempDir(), "tailnetlink.json")
-	writeBorder(t, path, b.border(b.deviceLink("web", "backend", "", 8080)))
+	writeBorder(t, path, b.fileConfig(b.deviceLink("web", "backend", "", 8080)))
 	cs, err := config.NewStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -268,11 +268,11 @@ func TestConfigFileChangeMovesPort(t *testing.T) {
 	cs.OnChange(r.reconcile)
 	go cs.Watch(r.ctx, r.logger)
 
-	svc := b.serviceName("backend", "")
+	svc := "svc:web"
 	vip := waitVIP(t, b.dstAPI, svc)
 	echoVia(t, ctx, cl, netip.AddrPortFrom(vip, 8080), "before")
 
-	writeBorder(t, path, b.border(b.deviceLink("web", "backend", "", 8081)))
+	writeBorder(t, path, b.fileConfig(b.deviceLink("web", "backend", "", 8081)))
 	future := time.Now().Add(2 * time.Second)
 	_ = os.Chtimes(path, future, future)
 	waitFor(t, 30*time.Second, "service moved to tcp:8081", func() bool {

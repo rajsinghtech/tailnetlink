@@ -6,16 +6,10 @@ import (
 	"slices"
 )
 
-// AcceptedRouteAddrs is the set of local addresses a tailnet's node may
-// accept subnet routes for. It is the union of parseable IPs in local
-// links on bridges whose from tailnet is that key. Hostnames that are not
-// IPs are skipped. The result is sorted and has no duplicates.
-//
-// The node does not program routes from this list yet. A later change that
-// dials subnet-routed addresses should accept only advertised routes that
-// cover these addresses, and should recompute the set whenever the config
-// is applied. LocalSourceSpec is left unchanged so that change can add
-// ports beside addr without a conflict here.
+// AcceptedRouteAddrs is the set of IP addresses on targets that leave
+// tailnet. Hostnames are skipped. The dialer installs advertised prefixes
+// from the node's netmap, not from this list. The result is sorted and has
+// no duplicates.
 func AcceptedRouteAddrs(cfg *Config, tailnet string) []netip.Addr {
 	if cfg == nil || tailnet == "" {
 		return nil
@@ -27,9 +21,9 @@ func AcceptedRouteAddrs(cfg *Config, tailnet string) []netip.Addr {
 			continue
 		}
 		for _, src := range rule.LocalSources {
-			host, _, err := net.SplitHostPort(src.Addr)
-			if err != nil {
-				continue
+			host := src.Addr
+			if h, _, err := net.SplitHostPort(src.Addr); err == nil {
+				host = h
 			}
 			ip, err := netip.ParseAddr(host)
 			if err != nil || !ip.IsValid() {

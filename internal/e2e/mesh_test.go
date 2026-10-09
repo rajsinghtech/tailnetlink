@@ -66,7 +66,7 @@ func TestMeshUserJSON(t *testing.T) {
 	}
 	var fanOut bool
 	for _, b := range cfg.Bridges {
-		if b.Name == "home/api" && len(b.DestTailnets) == 2 {
+		if b.Name == "api/api" && len(b.DestTailnets) == 2 {
 			fanOut = true
 		}
 	}
@@ -79,10 +79,10 @@ func TestMeshUserJSON(t *testing.T) {
 
 	flow := func() {
 		t.Helper()
-		echoVia(t, ctx, workClient, netip.AddrPortFrom(waitVIP(t, workAPI, "svc:tnl-home-api"), 8080), "home to work")
-		echoVia(t, ctx, partnerClient, netip.AddrPortFrom(waitVIP(t, partnerAPI, "svc:tnl-home-api"), 8080), "home to partner")
-		echoVia(t, ctx, homeClient, netip.AddrPortFrom(waitVIP(t, homeAPI, "svc:tnl-work-build"), 8022), "work to home")
-		echoVia(t, ctx, workClient, netip.AddrPortFrom(waitVIP(t, workAPI, "svc:tnl-partner-billing"), 8443), "partner to work")
+		echoVia(t, ctx, workClient, netip.AddrPortFrom(waitVIP(t, workAPI, "svc:api"), 8080), "home to work")
+		echoVia(t, ctx, partnerClient, netip.AddrPortFrom(waitVIP(t, partnerAPI, "svc:api"), 8080), "home to partner")
+		echoVia(t, ctx, homeClient, netip.AddrPortFrom(waitVIP(t, homeAPI, "svc:builds"), 8022), "work to home")
+		echoVia(t, ctx, workClient, netip.AddrPortFrom(waitVIP(t, workAPI, "svc:billing"), 8443), "partner to work")
 	}
 
 	t.Run("every bridge carries bytes", func(t *testing.T) {
@@ -99,7 +99,7 @@ func TestMeshUserJSON(t *testing.T) {
 			t.Errorf("lab started before it was in the file: %d", r.m.NodeStarts("lab"))
 		}
 		waitFor(t, 20*time.Second, "short_name conflict", func() bool {
-			_, errText := r.bridgeStatus("home/taken/work/other." + g.nets["home"].domain)
+			_, errText := r.bridgeStatus("taken/taken/work/other." + g.nets["home"].domain)
 			return strings.Contains(errText, "conflict")
 		})
 		g.assertForeign(t, colleague, map[string][]tsclient.VIPService{
@@ -111,13 +111,13 @@ func TestMeshUserJSON(t *testing.T) {
 	t.Run("reverse broad selector", func(t *testing.T) {
 		g.rewrite(t, path, g.meshJSON([]string{"home", "work", "partner"}, g.coreBridges(true, false, true)))
 		waitFor(t, 20*time.Second, "unmanaged tagged service exported", func() bool {
-			_, ok := homeAPI.Service("svc:tnl-work-real-loop")
+			_, ok := homeAPI.Service("svc:loop-real-loop")
 			return ok
 		})
-		if _, ok := homeAPI.Service("svc:tnl-work-tnl-home-api"); ok {
+		if _, ok := homeAPI.Service("svc:loop-api"); ok {
 			t.Fatal("managed VIP was published back into the tailnet it came from")
 		}
-		if _, ok := homeAPI.Service("svc:tnl-work-unrelated"); ok {
+		if _, ok := homeAPI.Service("svc:loop-unrelated"); ok {
 			t.Fatal("foreign service was re-exported")
 		}
 		flow()
@@ -138,7 +138,7 @@ func TestMeshUserJSON(t *testing.T) {
 				t.Errorf("adding lab restarted %s (%d starts)", key, got)
 			}
 		}
-		labVIP := waitVIP(t, homeAPI, "svc:tnl-lab-labbox")
+		labVIP := waitVIP(t, homeAPI, "svc:box")
 		echoVia(t, ctx, homeClient, netip.AddrPortFrom(labVIP, 9090), "lab to home")
 		flow()
 
@@ -146,7 +146,7 @@ func TestMeshUserJSON(t *testing.T) {
 		// bridges that were not removed keep moving bytes.
 		g.rewrite(t, path, g.meshJSON([]string{"home", "work", "partner", "lab"}, g.coreBridges(true, true, false)))
 		waitFor(t, 20*time.Second, "billing bridge removed", func() bool {
-			_, ok := workAPI.Service("svc:tnl-partner-billing")
+			_, ok := workAPI.Service("svc:billing")
 			return !ok
 		})
 		for _, key := range []string{"home", "work", "partner", "lab"} {
@@ -154,9 +154,9 @@ func TestMeshUserJSON(t *testing.T) {
 				t.Errorf("removing a bridge restarted %s (%d starts)", key, got)
 			}
 		}
-		echoVia(t, ctx, workClient, netip.AddrPortFrom(waitVIP(t, workAPI, "svc:tnl-home-api"), 8080), "home to work after removal")
-		echoVia(t, ctx, partnerClient, netip.AddrPortFrom(waitVIP(t, partnerAPI, "svc:tnl-home-api"), 8080), "home to partner after removal")
-		echoVia(t, ctx, homeClient, netip.AddrPortFrom(waitVIP(t, homeAPI, "svc:tnl-work-build"), 8022), "work to home after removal")
+		echoVia(t, ctx, workClient, netip.AddrPortFrom(waitVIP(t, workAPI, "svc:api"), 8080), "home to work after removal")
+		echoVia(t, ctx, partnerClient, netip.AddrPortFrom(waitVIP(t, partnerAPI, "svc:api"), 8080), "home to partner after removal")
+		echoVia(t, ctx, homeClient, netip.AddrPortFrom(waitVIP(t, homeAPI, "svc:builds"), 8022), "work to home after removal")
 		echoVia(t, ctx, homeClient, netip.AddrPortFrom(labVIP, 9090), "lab to home after removal")
 		g.assertForeign(t, colleague, map[string][]tsclient.VIPService{
 			"home": {unrelated["home"]}, "work": {unrelated["work"], taken, real},
@@ -209,13 +209,13 @@ func writeSecret(path, sec string) error {
 
 // meshJSON is the file a user would write. keys are the tailnets in the
 // file. bridges is the raw JSON array body.
-func (g *meshRig) meshJSON(keys []string, bridges string) string {
+func (g *meshRig) meshJSON(keys []string, body string) string {
 	var tails []string
 	for _, key := range keys {
 		tn, api := g.nets[key], g.apis[key]
 		tails = append(tails, fmt.Sprintf(`%q: {
 			"tailnet": %q,
-			"oauth": {"client_id": "mesh", "client_secret_file": %q},
+			"auth": {"client_id": "mesh", "client_secret_file": %q},
 			"tags": ["tag:tailnetlink"],
 			"control_url": %q,
 			"api_base_url": %q
@@ -223,34 +223,42 @@ func (g *meshRig) meshJSON(keys []string, bridges string) string {
 	}
 	return fmt.Sprintf(`{
 		"name": "mesh",
-		"dns": {"enabled": false},
+		"dns": false,
 		"poll_interval": "200ms",
 		"dial_timeout": "5s",
-		"node": {"state_dir": %q},
+		"state_dir": %q,
 		"tailnets": {%s},
-		"bridges": [%s]
-	}`, g.stateDir, strings.Join(tails, ",\n"), bridges)
+		%s
+	}`, g.stateDir, strings.Join(tails, ",\n"), body)
 }
 
 // coreBridges is the directional set. withLoop adds the broad return tag.
 // withBilling keeps partner to work. withLab adds lab to home.
 func (g *meshRig) coreBridges(withLoop, withLab, withBilling bool) string {
 	home, work, partner := g.nets["home"].domain, g.nets["work"].domain, g.nets["partner"].domain
-	parts := []string{
-		fmt.Sprintf(`{"from":"home","to":["work","partner"],"links":[{"name":"api","devices":[{"fqdn":"api.%s"}],"ports":[8080]}]}`, home),
-		fmt.Sprintf(`{"from":"work","to":["home"],"links":[{"name":"builds","devices":[{"fqdn":"build.%s"}],"ports":[8022]}]}`, work),
-		fmt.Sprintf(`{"from":"home","to":["work"],"links":[{"name":"taken","devices":[{"fqdn":"other.%s","short_name":"taken"}],"ports":[9]}]}`, home),
+	targets := []string{
+		fmt.Sprintf(`"api": {"in": "home", "device": "api.%s", "ports": [8080]}`, home),
+		fmt.Sprintf(`"builds": {"in": "work", "device": "build.%s", "ports": [8022]}`, work),
+		fmt.Sprintf(`"taken": {"in": "home", "device": "other.%s", "ports": [9]}`, home),
+	}
+	exports := []string{
+		`{"target": "api", "to": ["work", "partner"]}`,
+		`{"target": "builds", "to": ["home"]}`,
+		`{"target": "taken", "to": ["work"], "name": "taken"}`,
 	}
 	if withBilling {
-		parts = append(parts, fmt.Sprintf(`{"from":"partner","to":["work"],"links":[{"name":"billing","devices":[{"fqdn":"billing.%s"}],"ports":[8443]}]}`, partner))
+		targets = append(targets, fmt.Sprintf(`"billing": {"in": "partner", "device": "billing.%s", "ports": [8443]}`, partner))
+		exports = append(exports, `{"target": "billing", "to": ["work"]}`)
 	}
 	if withLoop {
-		parts = append(parts, `{"from":"work","to":["home"],"links":[{"name":"loop","tag":"tag:tailnetlink","ports":[443]}]}`)
+		targets = append(targets, `"loop": {"in": "work", "tag": "tag:tailnetlink", "ports": [443]}`)
+		exports = append(exports, `{"target": "loop", "to": ["home"]}`)
 	}
 	if withLab {
-		parts = append(parts, fmt.Sprintf(`{"from":"lab","to":["home"],"links":[{"name":"box","devices":[{"fqdn":"labbox.%s"}],"ports":[9090]}]}`, g.nets["lab"].domain))
+		targets = append(targets, fmt.Sprintf(`"box": {"in": "lab", "device": "labbox.%s", "ports": [9090]}`, g.nets["lab"].domain))
+		exports = append(exports, `{"target": "box", "to": ["home"]}`)
 	}
-	return strings.Join(parts, ",\n")
+	return `"targets": {` + strings.Join(targets, ",\n") + `}, "exports": [` + strings.Join(exports, ",\n") + `]`
 }
 
 // watch reloads the file the way the process does: a mtime change is parsed

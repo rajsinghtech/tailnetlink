@@ -116,7 +116,7 @@ func (c *Config) Validate() error {
 }
 
 type TailnetConfig struct {
-	OAuth   OAuthCreds `json:"oauth,omitzero"`
+	OAuth   OAuthCreds `json:"auth,omitzero"`
 	Tags    []string   `json:"tags,omitempty"`
 	Tailnet string     `json:"tailnet"`
 
@@ -136,9 +136,11 @@ type TailnetConfig struct {
 	// DNSDisabled turns split-DNS off on this tailnet. The border-wide
 	// switch turns it off on every tailnet.
 	DNSDisabled bool `json:"dns_disabled,omitempty"`
-	// Authz, when it sets a mode, overrides the link authz for bridges
-	// published into this destination.
+	// Authz, when it sets a mode, overrides the export authz for VIP
+	// services published into this tailnet.
 	Authz AuthzConfig `json:"authz,omitzero"`
+	// Hostname is the tsnet node name. Empty means tailnetlink-<key>.
+	Hostname string `json:"hostname,omitempty"`
 }
 
 func (tc TailnetConfig) HasAuth() bool {
@@ -199,7 +201,7 @@ func (o OAuthCreds) Secret() (string, error) {
 		}
 		return s, nil
 	default:
-		return "", errors.New("no client secret: set oauth.client_secret_file or oauth.client_secret_env")
+		return "", errors.New("no client secret: set auth.client_secret_file or auth.client_secret_env")
 	}
 }
 
@@ -225,7 +227,7 @@ func (o OAuthCreds) IDToken() (string, error) {
 		}
 		return s, nil
 	default:
-		return "", errors.New("no id token: set oauth.id_token_file or oauth.id_token_env")
+		return "", errors.New("no id token: set auth.id_token_file or auth.id_token_env")
 	}
 }
 
@@ -247,10 +249,10 @@ func (o OAuthCreds) credentialCount() int {
 
 func (o OAuthCreds) validate() error {
 	if o.inline {
-		return errors.New("oauth.client_secret is not supported: put the secret in a file and set oauth.client_secret_file, or in an environment variable and set oauth.client_secret_env")
+		return errors.New("auth.client_secret is not supported: put the secret in a file and set auth.client_secret_file, or in an environment variable and set auth.client_secret_env")
 	}
 	if o.credentialCount() > 1 {
-		return errors.New("set only one of oauth.client_secret_file, oauth.client_secret_env, oauth.id_token_file and oauth.id_token_env")
+		return errors.New("set only one of auth.client_secret_file, auth.client_secret_env, auth.id_token_file and auth.id_token_env")
 	}
 	return nil
 }
@@ -322,14 +324,30 @@ type BridgeRule struct {
 	LocalSources   []LocalSourceSpec `json:"local_sources,omitempty"`
 	Ports          []int             `json:"ports,omitempty"`
 	Authz          AuthzConfig       `json:"authz,omitzero"`
-	// From is the tailnet key this rule leaves. Border compile sets it on
-	// local links. Mesh compile sets it on every rule to the bridge's from
-	// key. Non-local border rules leave it empty and use SourceTailnet.
+	// From is the tailnet key this rule leaves. Pod targets leave it empty.
 	From string `json:"from,omitempty"`
-	// Link is the link name inside a mesh bridge. The rule Name there is
-	// from/link, so Link keeps the short name for the ownership id. A
-	// border leaves it empty and BridgeRef uses Name.
-	Link string `json:"link,omitempty"`
+	// Target is the targets-map key. ExportName is the VIP name for one
+	// endpoint, and the prefix of each device name for a tag target.
+	Target     string `json:"target,omitempty"`
+	ExportName string `json:"export_name,omitempty"`
+	// Multi is a tag target: one VIP per discovered device.
+	Multi bool `json:"multi,omitempty"`
+	// DNSName is the split-DNS name for one endpoint, or a {host} template
+	// for a tag target. DNSZone is the optional zone for that name.
+	DNSName string `json:"dns_name,omitempty"`
+	DNSZone string `json:"dns_zone,omitempty"`
+	// Forwards maps each VIP port to the backend port. Ports is the VIP
+	// side of the same list, kept for the service record.
+	Forwards []LocalForward `json:"forwards,omitempty"`
+}
+
+// GrantName is the name a require_cap grant lists in links. It is the
+// export name when the rule was compiled from a file.
+func (r BridgeRule) GrantName() string {
+	if r.ExportName != "" {
+		return r.ExportName
+	}
+	return r.Name
 }
 
 // FromTailnet is the tailnet key this rule leaves: From, or else
@@ -341,19 +359,14 @@ func (r BridgeRule) FromTailnet() string {
 	return r.SourceTailnet
 }
 
-// BridgeRef identifies the bridge that owns VIP services this rule publishes
-// into dest. It is from/dest/link, so two bridges that want the same name
-// in one tailnet conflict instead of overwriting each other.
+// BridgeRef is the tailnetlink/export annotation for VIP services this rule
+// publishes into dest. It is <target>/<dest>.
 func (r BridgeRule) BridgeRef(dest string) string {
-	from := r.FromTailnet()
-	if from == "" {
-		from = "local"
+	id := r.Target
+	if id == "" {
+		id = r.Name
 	}
-	link := r.Link
-	if link == "" {
-		link = r.Name
-	}
-	return from + "/" + dest + "/" + link
+	return id + "/" + dest
 }
 
 // DefaultListenAddr is where the web UI listens unless the config or
@@ -510,6 +523,7 @@ func (c *Config) Clone() *Config {
 			b.SourceServices = slices.Clone(b.SourceServices)
 			b.LocalSources = cloneLocalSources(b.LocalSources)
 			b.Ports = slices.Clone(b.Ports)
+			b.Forwards = slices.Clone(b.Forwards)
 			b.Authz.AllowLogins = slices.Clone(b.Authz.AllowLogins)
 			b.Authz.AllowTags = slices.Clone(b.Authz.AllowTags)
 			cp.Bridges[i] = b

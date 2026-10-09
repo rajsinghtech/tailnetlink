@@ -74,6 +74,29 @@ jobs:
 
       - name: Build (no push)
         id: build
+        continue-on-error: true
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: tailnetlink:ci
+          build-args: |
+            VERSION=ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      # Docker Hub answers 429 on the base-image manifest often enough to
+      # fail an otherwise green pull request. One pause and a second build
+      # is enough when the first request was rate limited.
+      - name: Pause before an image retry
+        if: steps.build.outcome == 'failure'
+        run: sleep 45
+
+      - name: Retry the image build
+        if: steps.build.outcome == 'failure'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -94,7 +117,7 @@ jobs:
           test "$(docker run --rm --entrypoint id tailnetlink:ci -u)" = "65532"
           mkdir -p /tmp/tnl-smoke
           cat >/tmp/tnl-smoke/tailnetlink.json <<'JSON'
-          {"name":"smoke","source":{"tailnet":"a.ts.net","oauth":{"client_id":"x","client_secret_env":"A"},"tags":["tag:tailnetlink"]},"dest":{"tailnet":"b.ts.net","oauth":{"client_id":"y","client_secret_env":"B"},"tags":["tag:tailnetlink"]},"links":[{"name":"web","tag":"tag:web","ports":[80]}],"ui":{"enabled":false},"metrics":{"listen_addr":":9090"}}
+          {"name":"smoke","ui":{"enabled":false},"metrics_addr":":9090","tailnets":{"a":{"tailnet":"a.ts.net","auth":{"client_id":"x","client_secret_env":"A"}},"b":{"tailnet":"b.ts.net","auth":{"client_id":"y","client_secret_env":"B"}}},"targets":{"web":{"in":"a","tag":"tag:web","ports":[80]}},"exports":[{"target":"web","to":["b"]}]}
           JSON
           # Strip the leading spaces YAML left on the heredoc body.
           sed -i 's/^[[:space:]]*//' /tmp/tnl-smoke/tailnetlink.json
@@ -148,6 +171,27 @@ jobs:
 
       - name: Build and push
         id: push
+        continue-on-error: true
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:main
+            ghcr.io/${{ github.repository }}:sha-${{ steps.sha.outputs.short }}
+          build-args: |
+            VERSION=main-${{ steps.sha.outputs.short }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Pause before an image retry
+        if: steps.push.outcome == 'failure'
+        run: sleep 45
+
+      - name: Retry the image push
+        id: push_retry
+        if: steps.push.outcome == 'failure'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -162,4 +206,9 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Digest
-        run: echo "pushed ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          digest="${{ steps.push.outputs.digest }}"
+          if [ -z "$digest" ]; then
+            digest="${{ steps.push_retry.outputs.digest }}"
+          fi
+          echo "pushed ghcr.io/${{ github.repository }}@${digest}" >> "$GITHUB_STEP_SUMMARY"

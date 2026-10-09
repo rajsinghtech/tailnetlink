@@ -2,8 +2,6 @@ package bridge
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -20,37 +18,38 @@ import (
 	"tailscale.com/tsnet"
 )
 
-func sideJSON(tailnet, id, base string, extra string) string {
-	s := fmt.Sprintf(`"tailnet": %q, "oauth": {"client_id": %q, "client_secret_env": "TNL_MULTI_SECRET"}, "tags": ["tag:tailnetlink"]`, tailnet, id)
+func edgeTailnet(key, tailnet, id, base, extra string) string {
+	s := fmt.Sprintf(`%q: {"tailnet": %q, "auth": {"client_id": %q, "client_secret_env": "TNL_MULTI_SECRET"}, "tags": ["tag:tailnetlink"]`, key, tailnet, id)
 	if base != "" {
 		s += fmt.Sprintf(`, "api_base_url": %q`, base)
 	}
 	if extra != "" {
 		s += ", " + extra
 	}
-	return "{" + s + "}"
+	return s + "}"
 }
 
-func parseMulti(t *testing.T, dests string) *config.Config {
+func parseEdge(t *testing.T, withPartner bool, workBase, partnerBase, workExtra string) *config.Config {
 	t.Helper()
+	tails := edgeTailnet("home", "keiretsu.ts.net", "src", "", "") + "," + edgeTailnet("work", "example.ts.net", "ex", workBase, workExtra)
+	to := `"work"`
+	if withPartner {
+		tails += "," + edgeTailnet("partner", "partner.example.com", "pa", partnerBase, "")
+		to = `"work", "partner"`
+	}
 	body := `{
 		"name": "edge",
-		"source": ` + sideJSON("keiretsu.ts.net", "src", "", "") + `,
-		"dests": [` + dests + `],
-		"links": [{"name": "web", "tag": "tag:web", "ports": [80], "authz": {"mode": "off"}}]
+		"tailnets": {` + tails + `},
+		"targets": {"web": {"in": "home", "tag": "tag:web", "ports": [80]}},
+		"exports": [{"target": "web", "to": [` + to + `], "authz": {"mode": "off"}}]
 	}`
 	cfg, err := config.Parse([]byte(body))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("parse: %v\n%s", err, body)
 	}
 	cfg.PollInterval = config.Duration{Duration: time.Hour}
 	cfg.DialTimeout = config.Duration{Duration: time.Second}
 	return cfg
-}
-
-func destKeyFor(tailnet string) string {
-	sum := sha256.Sum256([]byte(strings.ToLower(tailnet)))
-	return "edge-dst-" + hex.EncodeToString(sum[:2])
 }
 
 func seedTailnet(m *Manager, key string, api *fakeapi.Server) {
@@ -76,32 +75,22 @@ func devicePolls(api *fakeapi.Server) int {
 func TestDestStateDirsDoNotCollide(t *testing.T) {
 	m := New(state.New(), discardLogger(), nil)
 	root := t.TempDir()
-	single, err := m.nodeDir("edge-dst", config.TailnetConfig{}, root)
+	work, err := m.nodeDir("work", config.TailnetConfig{}, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hashed, err := m.nodeDir(destKeyFor("example.ts.net"), config.TailnetConfig{}, root)
+	partner, err := m.nodeDir("partner", config.TailnetConfig{}, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, err := m.nodeDir(destKeyFor("partner.example.com"), config.TailnetConfig{}, root)
-	if err != nil {
-		t.Fatal(err)
+	if filepath.Base(work) != "work" || filepath.Base(partner) != "partner" || work == partner {
+		t.Fatalf("dirs = %s %s", work, partner)
 	}
-	if filepath.Base(single) != "edge-dst" {
-		t.Errorf("single dest dir = %s", single)
-	}
-	if single == hashed || hashed == other || filepath.Base(hashed) == "edge-dst" {
-		t.Fatalf("dirs collided: %s %s %s", single, hashed, other)
-	}
-	for _, key := range []string{"edge-dst", destKeyFor("example.ts.net"), destKeyFor("partner.example.com")} {
+	for _, key := range []string{"work", "partner", "home"} {
 		host := "tailnetlink-" + key
 		if len(host) > 63 {
 			t.Errorf("hostname %q is %d bytes", host, len(host))
 		}
-	}
-	if destKeyFor("example.ts.net") == destKeyFor("partner.example.com") {
-		t.Fatal("distinct tailnets hashed to one key")
 	}
 }
 
@@ -121,18 +110,17 @@ func TestOneDestFailureStillServes(t *testing.T) {
 		Tags: []string{"tag:web"}, Addresses: []string{"100.64.0.1"},
 	}})
 
-	cfg := parseMulti(t, sideJSON("example.ts.net", "ex", good.URL(), `"authz": {"mode": "allow_logins", "allow_logins": ["alice@example.com"]}`)+","+
-		sideJSON("partner.example.com", "pa", bad.URL(), ""))
-	goodKey, badKey := destKeyFor("example.ts.net"), destKeyFor("partner.example.com")
+	cfg := parseEdge(t, true, good.URL(), bad.URL(), `"authz": {"mode": "allow_logins", "allow_logins": ["alice@example.com"]}`)
+	goodKey, badKey := "work", "partner"
 
 	m := New(state.New(), discardLogger(), nil)
 	adopt(m, cfg)
-	seedTailnet(m, "edge-src", src)
+	seedTailnet(m, "home", src)
 	seedTailnet(m, goodKey, good)
 	t.Cleanup(func() { _ = m.Close(context.Background()) })
 
 	m.Reconcile(context.Background(), cfg)
-	id := "web/" + goodKey + "/web-1.keiretsu.ts.net"
+	id := "web/web/" + goodKey + "/web-1.keiretsu.ts.net"
 	waitFor(t, 5*time.Second, "good dest bridge", func() bool {
 		for _, b := range m.store.GetBridges() {
 			if b.ID == id && b.Status == state.BridgeStatusActive {
@@ -142,7 +130,7 @@ func TestOneDestFailureStillServes(t *testing.T) {
 		return false
 	})
 
-	if _, ok := good.Service("svc:tnl-edge-src-web-1"); !ok {
+	if _, ok := good.Service("svc:web-web-1"); !ok {
 		t.Fatal("healthy dest has no VIP")
 	}
 	if names := bad.ServiceNames(); len(names) != 0 {
@@ -186,7 +174,7 @@ func TestOneDestFailureStillServes(t *testing.T) {
 		if tn.ID != badKey {
 			continue
 		}
-		if tn.Name != "partner.example.com" || tn.Role != "dest" || tn.Connected {
+		if tn.Name != "partner.example.com" || tn.Role != "node" || tn.Connected {
 			t.Errorf("failed dest status = %+v", tn)
 		}
 	}
@@ -200,7 +188,7 @@ func TestOneDestAPIFailureStillServes(t *testing.T) {
 	bad := fakeapi.New(t)
 	bad.Tailnet = "partner.example.com"
 	bad.AssignAddrs = false
-	bad.Fail("PUT", "/vip-services/svc:tnl-edge-src-web-1", 500)
+	bad.Fail("PUT", "/vip-services/svc:web-web-1", 500)
 	src := fakeapi.New(t)
 	src.Tailnet = "keiretsu.ts.net"
 	src.SetDevices([]tsclient.Device{{
@@ -208,18 +196,18 @@ func TestOneDestAPIFailureStillServes(t *testing.T) {
 		Tags: []string{"tag:web"}, Addresses: []string{"100.64.0.1"},
 	}})
 
-	cfg := parseMulti(t, sideJSON("example.ts.net", "ex", "", "")+","+sideJSON("partner.example.com", "pa", "", ""))
-	goodKey, badKey := destKeyFor("example.ts.net"), destKeyFor("partner.example.com")
+	cfg := parseEdge(t, true, "", "", "")
+	goodKey, badKey := "work", "partner"
 	m := New(state.New(), discardLogger(), nil)
 	adopt(m, cfg)
-	seedTailnet(m, "edge-src", src)
+	seedTailnet(m, "home", src)
 	seedTailnet(m, goodKey, good)
 	seedTailnet(m, badKey, bad)
 	t.Cleanup(func() { _ = m.Close(context.Background()) })
 
 	m.Reconcile(context.Background(), cfg)
-	goodID := "web/" + goodKey + "/web-1.keiretsu.ts.net"
-	badID := "web/" + badKey + "/web-1.keiretsu.ts.net"
+	goodID := "web/web/" + goodKey + "/web-1.keiretsu.ts.net"
+	badID := "web/web/" + badKey + "/web-1.keiretsu.ts.net"
 	waitFor(t, 5*time.Second, "good dest active", func() bool {
 		for _, b := range m.store.GetBridges() {
 			if b.ID == goodID && b.Status == state.BridgeStatusActive {
@@ -236,10 +224,10 @@ func TestOneDestAPIFailureStillServes(t *testing.T) {
 		}
 		return false
 	})
-	if _, ok := good.Service("svc:tnl-edge-src-web-1"); !ok {
+	if _, ok := good.Service("svc:web-web-1"); !ok {
 		t.Fatal("healthy dest lost its VIP")
 	}
-	if _, ok := bad.Service("svc:tnl-edge-src-web-1"); ok {
+	if _, ok := bad.Service("svc:web-web-1"); ok {
 		t.Fatal("failed dest kept a VIP")
 	}
 	if devicePolls(src) != 1 {
@@ -262,22 +250,22 @@ func TestHotReloadAddAndRemoveDest(t *testing.T) {
 	second.Tailnet = "partner.example.com"
 	second.AssignAddrs = false
 
-	one := parseMulti(t, sideJSON("example.ts.net", "ex", "", ""))
-	two := parseMulti(t, sideJSON("example.ts.net", "ex", "", "")+","+sideJSON("partner.example.com", "pa", "", ""))
-	firstKey, secondKey := destKeyFor("example.ts.net"), destKeyFor("partner.example.com")
+	one := parseEdge(t, false, "", "", "")
+	two := parseEdge(t, true, "", "", "")
+	firstKey, secondKey := "work", "partner"
 	if one.Tailnets[firstKey].Tailnet != "example.ts.net" || two.Tailnets[firstKey].Tailnet != "example.ts.net" {
 		t.Fatalf("adding a dest changed the first key: %+v %+v", one.Tailnets, two.Tailnets)
 	}
 
 	m := New(state.New(), discardLogger(), nil)
 	adopt(m, one)
-	seedTailnet(m, "edge-src", src)
+	seedTailnet(m, "home", src)
 	seedTailnet(m, firstKey, first)
 	t.Cleanup(func() { _ = m.Close(context.Background()) })
 
 	ctx := context.Background()
 	m.Reconcile(ctx, one)
-	firstID := "web/" + firstKey + "/web-1.keiretsu.ts.net"
+	firstID := "web/web/" + firstKey + "/web-1.keiretsu.ts.net"
 	waitFor(t, 5*time.Second, "first dest", func() bool {
 		for _, b := range m.store.GetBridges() {
 			if b.ID == firstID && b.Status == state.BridgeStatusActive {
@@ -289,7 +277,7 @@ func TestHotReloadAddAndRemoveDest(t *testing.T) {
 
 	seedTailnet(m, secondKey, second)
 	m.Reconcile(ctx, two)
-	secondID := "web/" + secondKey + "/web-1.keiretsu.ts.net"
+	secondID := "web/web/" + secondKey + "/web-1.keiretsu.ts.net"
 	waitFor(t, 5*time.Second, "second dest", func() bool {
 		for _, b := range m.store.GetBridges() {
 			if b.ID == secondID && b.Status == state.BridgeStatusActive {
@@ -298,10 +286,10 @@ func TestHotReloadAddAndRemoveDest(t *testing.T) {
 		}
 		return false
 	})
-	if _, ok := first.Service("svc:tnl-edge-src-web-1"); !ok {
+	if _, ok := first.Service("svc:web-web-1"); !ok {
 		t.Fatal("first dest lost its VIP when a dest was added")
 	}
-	if _, ok := second.Service("svc:tnl-edge-src-web-1"); !ok {
+	if _, ok := second.Service("svc:web-web-1"); !ok {
 		t.Fatal("added dest has no VIP")
 	}
 
@@ -315,10 +303,10 @@ func TestHotReloadAddAndRemoveDest(t *testing.T) {
 		}
 		return false
 	})
-	if _, ok := second.Service("svc:tnl-edge-src-web-1"); ok {
+	if _, ok := second.Service("svc:web-web-1"); ok {
 		t.Fatal("removed dest kept its VIP")
 	}
-	if _, ok := first.Service("svc:tnl-edge-src-web-1"); !ok {
+	if _, ok := first.Service("svc:web-web-1"); !ok {
 		t.Fatal("remaining dest lost its VIP")
 	}
 	for _, b := range m.store.GetBridges() {
@@ -328,7 +316,7 @@ func TestHotReloadAddAndRemoveDest(t *testing.T) {
 	}
 	deleted := false
 	for _, w := range second.Writes() {
-		if w.Method == "DELETE" && strings.Contains(w.Path, "svc:tnl-edge-src-web-1") {
+		if w.Method == "DELETE" && strings.Contains(w.Path, "svc:web-web-1") {
 			deleted = true
 		}
 	}
@@ -344,7 +332,7 @@ func TestLocalRuleSkipsDownDest(t *testing.T) {
 	good.AssignAddrs = false
 	m := New(state.New(), discardLogger(), nil)
 	m.owner = testOwner
-	goodKey, badKey := destKeyFor("example.ts.net"), destKeyFor("partner.example.com")
+	goodKey, badKey := "work", "partner"
 	m.servers[goodKey] = &tsnet.Server{}
 	m.apiClients[goodKey] = good.Client()
 	m.cfg = &config.Config{Tailnets: map[string]config.TailnetConfig{
@@ -389,9 +377,17 @@ func TestLocalRuleSkipsDownDest(t *testing.T) {
 			t.Errorf("down dest has bridge %s", b.ID)
 		}
 	}
-	m.mu.Lock()
-	az := m.forwarders[id].authz
-	m.mu.Unlock()
+	var az config.AuthzConfig
+	waitFor(t, 5*time.Second, "local forwarder", func() bool {
+		m.mu.Lock()
+		fwd := m.forwarders[id]
+		m.mu.Unlock()
+		if fwd == nil {
+			return false
+		}
+		az = fwd.authz
+		return true
+	})
 	if az.Mode != config.AuthzAllowTags {
 		t.Errorf("local authz = %+v", az)
 	}
@@ -492,7 +488,7 @@ func TestSweepIdleDropsWhileRuleIsDown(t *testing.T) {
 	api.PutService(tsclient.VIPService{Name: "svc:theirs", Annotations: map[string]string{"tailnetlink/owner": "other"}})
 	m := New(state.New(), discardLogger(), nil)
 	m.owner = testOwner
-	key := destKeyFor("example.ts.net")
+	key := "work"
 	m.apiClients[key] = api.Client()
 	m.store.UpsertBridge(state.BridgeEntry{
 		ID: "web/" + key + "/host.example.com", RuleName: "web", ServiceName: "svc:app",

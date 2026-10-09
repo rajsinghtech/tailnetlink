@@ -26,11 +26,10 @@ type Device struct {
 // source_devices/source_services only act as DNS/name overrides in that case.
 // Without a tag: source_services takes priority, then source_devices.
 //
-// Tag mode and explicit service mode never pick up tailnetlink's own VIP
-// services (tailnetlink/managed). Tag mode also skips tailnetlink's own
-// nodes. A VIP this process published into a tailnet is not discovered
-// again by a bridge leaving that tailnet, including a selector that names
-// the service or a tag broad enough to match it.
+// Every mode skips VIP services this process created (tailnetlink/managed)
+// and this process's own node. A target in a tailnet does not pick those
+// up again, including a tag broad enough to match them or a service name
+// that points at one.
 //
 // Every change is announced: sends block until the rule reads them or ctx
 // is done, and a device only counts as seen once its add went out.
@@ -41,6 +40,7 @@ type Discoverer struct {
 	services map[string]struct{} // explicit VIP service names; non-nil means service mode
 	poll     time.Duration
 	logger   *slog.Logger
+	skipHost string                     // this process's node hostname in the source tailnet
 	warnFn   func(string)               // called with user-facing warning messages (e.g. "no match for tag")
 	onPoll   func(time.Duration, error) // called after every poll, if set
 	// onSnapshot, when set, receives the full desired set keyed by FQDN
@@ -171,6 +171,9 @@ func (d *Discoverer) applyDevices(ctx context.Context, devices []tsclient.Device
 	var noIPNames []string
 
 	for _, dev := range devices {
+		if skipOwnNode(dev.Hostname, d.skipHost) {
+			continue
+		}
 		if d.devices != nil {
 			// device mode: match by FQDN
 			if _, ok := d.devices[strings.ToLower(dev.Name)]; !ok {
@@ -181,7 +184,7 @@ func (d *Discoverer) applyDevices(ctx context.Context, devices []tsclient.Device
 			for _, t := range dev.Tags {
 				allTags[t] = struct{}{}
 			}
-			if !hasTag(dev.Tags, d.tag) || isTailnetlinkNode(dev.Hostname) {
+			if !hasTag(dev.Tags, d.tag) {
 				continue
 			}
 		}
@@ -429,6 +432,15 @@ func (d *Discoverer) diffAndNotify(ctx context.Context, found map[string]Device,
 // nodes, which are named tailnetlink-<tailnet>.
 func isTailnetlinkNode(hostname string) bool {
 	return strings.HasPrefix(hostname, "tailnetlink-")
+}
+
+// skipOwnNode reports whether hostname is this process's node. The default
+// name starts with tailnetlink-. A configured hostname is compared exactly.
+func skipOwnNode(hostname, self string) bool {
+	if isTailnetlinkNode(hostname) {
+		return true
+	}
+	return self != "" && hostname == self
 }
 
 func hasTag(tags []string, want string) bool {

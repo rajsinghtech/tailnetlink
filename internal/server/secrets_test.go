@@ -34,11 +34,16 @@ func newTestServer(t *testing.T) (string, *config.Store) {
 			t.Fatal(err)
 		}
 	}
-	b := config.Border{
-		Name:   "test",
-		Source: config.Side{Tailnet: "a.example", Tags: []string{"tag:tnl"}, OAuth: config.OAuthCreds{ClientID: "id-a", ClientSecretFile: files[0]}},
-		Dest:   config.Side{Tailnet: "b.example", Tags: []string{"tag:tnl"}, OAuth: config.OAuthCreds{ClientID: "id-b", ClientSecretFile: files[1]}},
-		Links:  []config.Link{{Name: "r", Tag: "tag:web", Ports: []int{80}}},
+	b := config.File{
+		Name: "test",
+		Tailnets: map[string]config.TailnetSpec{
+			"a": {Tailnet: "a.example", Tags: []string{"tag:tnl"}, Auth: config.OAuthCreds{ClientID: "id-a", ClientSecretFile: files[0]}},
+			"b": {Tailnet: "b.example", Tags: []string{"tag:tnl"}, Auth: config.OAuthCreds{ClientID: "id-b", ClientSecretFile: files[1]}},
+		},
+		Targets: map[string]config.TargetSpec{
+			"r": {In: "a", Tag: "tag:web", Ports: config.LocalPortList(80)},
+		},
+		Exports: []config.ExportSpec{{Target: "r", To: []string{"b"}}},
 	}
 	path := filepath.Join(dir, "c.json")
 	data, _ := json.Marshal(b)

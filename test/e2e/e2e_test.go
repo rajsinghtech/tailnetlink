@@ -386,16 +386,19 @@ func startBorder(t *testing.T, ctx context.Context, src, dst *side, o linkOpts) 
 	name := "e2e-" + l.sfx
 	stateDir := t.TempDir()
 	poll, dial := config.Duration{Duration: 5 * time.Second}, config.Duration{Duration: 10 * time.Second}
-	bd := &config.Border{
-		Name:   name,
-		Source: config.Side{OAuth: creds[src.role], Tags: []string{linkTag}, Tailnet: src.id},
-		Dest:   config.Side{OAuth: creds[dst.role], Tags: []string{linkTag}, Tailnet: dst.id},
-		Node:   config.NodeConfig{StateDir: stateDir, Ephemeral: !o.persistent},
-		Links: []config.Link{{
-			Name:    o.linkName,
-			Devices: []config.DeviceSpec{{FQDN: l.backend.fqdn, ShortName: o.shortName}},
-			Ports:   []int{l.echoPort},
-			Authz:   o.authz,
+	bd := &config.File{
+		Name:      name,
+		StateDir:  stateDir,
+		Ephemeral: !o.persistent,
+		Tailnets: map[string]config.TailnetSpec{
+			"src": {Auth: creds[src.role], Tags: []string{linkTag}, Tailnet: src.id, Node: config.NodeSpec{Hostname: "tailnetlink-e2e-" + l.sfx + "-src"}},
+			"dst": {Auth: creds[dst.role], Tags: []string{linkTag}, Tailnet: dst.id, Node: config.NodeSpec{Hostname: "tailnetlink-e2e-" + l.sfx + "-dst"}},
+		},
+		Targets: map[string]config.TargetSpec{
+			o.linkName: {In: "src", Device: l.backend.fqdn, Ports: config.LocalPortList(l.echoPort)},
+		},
+		Exports: []config.ExportSpec{{
+			Target: o.linkName, To: []string{"dst"}, Name: o.shortName, Authz: o.authz,
 		}},
 		PollInterval: &poll,
 		DialTimeout:  &dial,

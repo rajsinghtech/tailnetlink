@@ -1,39 +1,32 @@
 {
-  "name": "home-to-work",
-  "source": {
-    "tailnet": "source-org.ts.net",
-    "oauth": {
-      "client_id": "YOUR_SOURCE_CLIENT_ID",
-      "client_secret_file": "/run/secrets/source-oauth-secret"
+  "name": "home-work",
+  "state_dir": "/var/lib/tailnetlink",
+  "tailnets": {
+    "home": {
+      "tailnet": "keiretsu.ts.net",
+      "auth": {"client_id": "home-client", "id_token_file": "/var/run/secrets/tokens/home"}
     },
-    "tags": ["tag:tailnetlink"]
-  },
-  "dest": {
-    "tailnet": "dest-org.ts.net",
-    "oauth": {
-      "client_id": "YOUR_DEST_CLIENT_ID",
-      "client_secret_env": "TAILNETLINK_DEST_OAUTH_SECRET"
+    "work": {
+      "tailnet": "example.ts.net",
+      "auth": {"client_id": "work-client", "id_token_file": "/var/run/secrets/tokens/work"},
+      "dns": true
     },
-    "tags": ["tag:tailnetlink"]
-  },
-  "links": [
-    {
-      "name": "api-servers",
-      "tag": "tag:api-server",
-      "ports": [8080, 8443]
-    },
-    {
-      "name": "databases",
-      "devices": [
-        { "fqdn": "pg-0.source-org.ts.net", "short_name": "pg-0", "dns_name": "pg-0.db.internal" }
-      ],
-      "ports": [5432]
-    },
-    {
-      "name": "grafana",
-      "local": [
-        { "addr": "127.0.0.1:3000", "expose_port": 80, "dns_name": "grafana.home.internal" }
-      ]
+    "partner": {
+      "tailnet": "partner.example.com",
+      "auth": {"client_id": "partner-client", "client_secret_file": "/run/secrets/partner"},
+      "dns": false
     }
+  },
+  "targets": {
+    "api": {"in": "home", "tag": "tag:api-server", "ports": [8080, 8443]},
+    "db": {"in": "home", "addr": "10.20.0.10", "ports": {"5432": 5432}},
+    "app": {"in": "home", "host": "app.internal.example.com", "ports": [443]},
+    "ollama": {"in": "pod", "addr": "127.0.0.1", "ports": {"80": 11434}}
+  },
+  "exports": [
+    {"target": "api", "to": ["work", "partner"], "dns_name": "{host}.api.example.com"},
+    {"target": "db", "to": ["work"], "name": "db", "dns_name": "db.example.com"},
+    {"target": "app", "to": ["work"], "dns_name": "app.example.com"},
+    {"target": "ollama", "to": ["work"], "dns_name": "ollama.example.com"}
   ]
 }

@@ -45,6 +45,8 @@ type Forwarder struct {
 	logger         *slog.Logger
 	connCounter    atomic.Int64
 	rule           string             // rule name, the metrics label
+	grant          string             // name a require_cap grant lists
+	backendFor     map[int]int        // VIP port → backend port for a discovered device
 	metrics        *metrics.Metrics   // nil means no metrics
 	authz          config.AuthzConfig // who may dial this link
 
@@ -146,7 +148,11 @@ func (f *Forwarder) handle(ctx context.Context, client net.Conn, port int) {
 		return
 	}
 	peer, whoErr := whoIs(ctx, f.listenSrv, realAddr)
-	if err := authorize(f.authz, f.rule, peer, whoErr); err != nil {
+	grant := f.grant
+	if grant == "" {
+		grant = f.rule
+	}
+	if err := authorize(f.authz, grant, peer, whoErr); err != nil {
 		f.logger.Warn("forwarder: authz denied", "peer", realAddr, "err", err)
 		f.store.Log("warn", fmt.Sprintf("authz denied: %s ← %s: %v", f.vip.ServiceName, realAddr, err), nil)
 		return
@@ -245,7 +251,11 @@ func (f *Forwarder) dialBackend(ctx context.Context, port int) (string, net.Conn
 	if f.localAddr != "" || len(f.localTargets) > 0 {
 		return fmt.Sprintf("port %d", port), nil, fmt.Errorf("no local backend for port %d", port)
 	}
-	target := net.JoinHostPort(f.vip.SourceIP.String(), strconv.Itoa(port))
+	backend := port
+	if b, ok := f.backendFor[port]; ok && b > 0 {
+		backend = b
+	}
+	target := net.JoinHostPort(f.vip.SourceIP.String(), strconv.Itoa(backend))
 	conn, err := f.dialSrv.Dial(ctx, "tcp", target)
 	return target, conn, err
 }

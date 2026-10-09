@@ -470,7 +470,7 @@
     <div class="page-header">
       <div>
         <div class="page-title">Services</div>
-        <div class="page-subtitle">Bridged services exposed on the destination tailnet.</div>
+        <div class="page-subtitle">VIP services published by exports.</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center">
         <div class="search-wrap">
@@ -507,8 +507,8 @@
               <div class="empty-state-icon">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 0 0-1-1.73L13 2.27a2 2 0 0 0-2 0L4 6.27A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73L11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
               </div>
-              <div class="empty-title">No services bridged yet</div>
-              <div class="empty-sub">Add a bridge rule to get started.</div>
+              <div class="empty-title">No services yet</div>
+              <div class="empty-sub">Add an export to publish a target.</div>
             </div></td></tr>
           </tbody>
         </table>
@@ -519,8 +519,8 @@
     <div style="margin-top:20px">
       <div class="card">
         <div class="card-header">
-          <span class="card-title">Bridge rules</span>
-          <span class="card-count" id="rules-count">0 rules</span>
+          <span class="card-title">Exports</span>
+          <span class="card-count" id="rules-count">0 exports</span>
         </div>
         <div class="table-wrap">
           <table>
@@ -535,7 +535,7 @@
             </thead>
             <tbody id="rules-tbody">
               <tr><td colspan="5"><div class="empty-state" style="padding:24px">
-                <div class="empty-sub">No bridge rules configured.</div>
+                <div class="empty-sub">No exports configured.</div>
               </div></td></tr>
             </tbody>
           </table>
@@ -549,7 +549,7 @@
     <div class="page-header">
       <div>
         <div class="page-title">Connections</div>
-        <div class="page-subtitle">Active and recent TCP sessions through bridges (last 5 min).</div>
+        <div class="page-subtitle">Active and recent TCP sessions (last 5 min).</div>
       </div>
     </div>
     <div class="card">
@@ -575,7 +575,7 @@
           <tbody id="conns-tbody">
             <tr><td colspan="6"><div class="empty-state">
               <div class="empty-title">No recent connections</div>
-              <div class="empty-sub">Connections appear here when clients connect to bridged services.</div>
+              <div class="empty-sub">Connections appear here when clients open a VIP service.</div>
             </div></td></tr>
           </tbody>
         </table>
@@ -588,7 +588,7 @@
     <div class="page-header">
       <div>
         <div class="page-title">Configuration</div>
-        <div class="page-subtitle">The running config, read-only. OAuth settings are left out. Edit the config file to change it.</div>
+        <div class="page-subtitle">The running config, read-only. The auth block is left out. Edit the config file to change it.</div>
       </div>
     </div>
     <div class="card" style="overflow:visible">
@@ -808,8 +808,8 @@ function renderTopology() {
 
   if (rules.length === 0) {
     grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1;padding:40px 24px">
-      <div class="empty-title">No bridge rules yet</div>
-      <div class="empty-sub">Add a bridge rule to connect services between tailnets.</div>
+      <div class="empty-title">No exports yet</div>
+      <div class="empty-sub">Add an export to publish a target into a tailnet.</div>
     </div>`;
     return;
   }
@@ -823,7 +823,7 @@ function renderTopology() {
     const totalBytes = live.reduce((s, b) => s + (b.bytes_in || 0) + (b.bytes_out || 0), 0);
 
     const host = hostSources(rule);
-    const srcLabel = host ? (host.kind === 'routed' ? 'via source tailnet' : 'local') : (netName(rule.source_tailnet) || '-');
+    const srcLabel = host ? (host.kind === 'routed' ? 'tailnet node' : 'local') : (netName(rule.source_tailnet) || '-');
     const dstLabels = (rule.dest_tailnets || []).map(netName);
     const ports = host
       ? host.sources.flatMap(s => localPortLabels(s).map(p => ':' + p)).join(' ')
@@ -835,7 +835,7 @@ function renderTopology() {
       return arr.length > 4 ? names + ` +${arr.length - 4}` : names;
     };
     const filterHtml = host
-      ? `<span class="badge neutral" style="font-size:11px">${host.kind === 'routed' ? 'via source tailnet' : 'local machine'}</span>`
+      ? `<span class="badge neutral" style="font-size:11px">${host.kind === 'routed' ? 'tailnet node' : 'local machine'}</span>`
       : rule.source_tag
         ? `<span class="tag-chip" style="font-size:11px">${esc(rule.source_tag)}</span>`
         : rule.source_devices && rule.source_devices.length > 0
@@ -923,8 +923,8 @@ function renderBridges() {
   if (filtered.length === 0) {
     tbody.innerHTML = `<tr><td colspan="10"><div class="empty-state">
       <div class="empty-state-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 0 0-1-1.73L13 2.27a2 2 0 0 0-2 0L4 6.27A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73L11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></div>
-      <div class="empty-title">${serviceFilter ? "No matching services" : "No services bridged yet"}</div>
-      <div class="empty-sub">${serviceFilter ? "Try clearing your search." : "Add a bridge rule above to get started."}</div>
+      <div class="empty-title">${serviceFilter ? "No matching services" : "No services yet"}</div>
+      <div class="empty-sub">${serviceFilter ? "Try clearing your search." : "Add an export to publish a target."}</div>
     </div></td></tr>`;
     return;
   }
@@ -935,7 +935,7 @@ function renderBridges() {
     const traffic = fmtBytes((b.bytes_in||0) + (b.bytes_out||0));
     const rule = (state.config.bridges || []).find(r => r.name === b.rule_name);
     const host = rule ? hostSources(rule) : null;
-    const srcLabel = host ? (host.kind === 'routed' ? 'via source tailnet' : 'local') : (rule ? netName(rule.source_tailnet) : '?');
+    const srcLabel = host ? (host.kind === 'routed' ? 'tailnet node' : 'local') : (rule ? netName(rule.source_tailnet) : '?');
     const srcBadgeCls = host ? 'neutral' : 'src';
     const dstTailnet = netName(b.dest_tailnet || '');
     const route = `<span style="white-space:nowrap;font-size:12px">
@@ -966,11 +966,11 @@ function renderRules() {
     return (r[c] ?? '').toString().toLowerCase();
   };
   const rules = sortArr(state.config.bridges || [], col, dir, keyFn);
-  setText('rules-count', rules.length + ' rule' + (rules.length !== 1 ? 's' : ''));
+  setText('rules-count', rules.length + ' export' + (rules.length !== 1 ? 's' : ''));
   updateSortHeaders('rules');
 
   if (rules.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="6"><div class="empty-state" style="padding:24px"><div class="empty-sub">No bridge rules configured.</div></div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6"><div class="empty-state" style="padding:24px"><div class="empty-sub">No exports configured.</div></div></td></tr>`;
     return;
   }
   tbody.innerHTML = rules.map(r => {
@@ -989,7 +989,7 @@ function renderRules() {
         : (r.source_tag || '—');
     return `<tr>
       <td>${esc(r.name)}</td>
-      <td>${host ? `<span class="badge neutral" style="font-size:11px">↑ ${esc(host.kind === 'routed' ? 'via source tailnet' : 'local')}</span>` : `<span class="badge src" style="font-size:11px">↑ ${esc(netName(r.source_tailnet))}</span>`}</td>
+      <td>${host ? `<span class="badge neutral" style="font-size:11px">↑ ${esc(host.kind === 'routed' ? 'tailnet node' : 'local')}</span>` : `<span class="badge src" style="font-size:11px">↑ ${esc(netName(r.source_tailnet))}</span>`}</td>
       <td>${(r.dest_tailnets||[]).map(dt=>`<span class="badge dst" style="font-size:11px">↓ ${esc(netName(dt))}</span>`).join(' ')}</td>
       <td><span class="mono" style="font-size:12px" title="${esc(host ? host.sources.slice(0,2).map(localAddrLabel).join(', ') : srcLabel)}">${esc(host ? (host.sources.slice(0,2).map(localAddrLabel).join(', ') + (host.sources.length > 2 ? ` +${host.sources.length-2}` : '')) : srcLabel)}</span></td>
       <td><div class="port-chips">${ports}</div></td>
@@ -1032,7 +1032,7 @@ function renderConns() {
   if (pool.length === 0) {
     tbody.innerHTML = `<tr><td colspan="6"><div class="empty-state">
       <div class="empty-title">${connsShowAll ? 'No recent connections' : 'No active connections'}</div>
-      <div class="empty-sub">${connsShowAll ? 'Connections appear here when clients connect to bridged services.' : 'Click "Show history" to see recently closed connections.'}</div>
+      <div class="empty-sub">${connsShowAll ? 'Connections appear here when clients open a VIP service.' : 'Click "Show history" to see recently closed connections.'}</div>
     </div></td></tr>`;
     return;
   }
@@ -1070,7 +1070,7 @@ function renderConns() {
     // source_tailnet = where the backend lives = where the traffic goes TO
     const clientTailnet  = bridge ? netName(bridge.dest_tailnet) : '';
     const host = rule ? hostSources(rule) : null;
-    const backendTailnet = host ? (host.kind === 'routed' ? 'via source tailnet' : 'local') : (rule ? netName(rule.source_tailnet) : '');
+    const backendTailnet = host ? (host.kind === 'routed' ? 'tailnet node' : 'local') : (rule ? netName(rule.source_tailnet) : '');
     const ruleName       = bridge ? bridge.rule_name  : '';
 
     const chipSrc = t => `<span class="badge src" style="font-size:10px;margin-top:2px;display:inline-block">${esc(t)}</span>`;
@@ -1153,7 +1153,7 @@ function filterServices() {
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 function localAddrLabel(s) {
-  return s.via === 'tailnet' ? s.addr + ' via tailnet' : s.addr;
+  return s.via === 'tailnet' ? s.addr + ' through the tailnet node' : s.addr;
 }
 function hostSources(rule) {
   const srcs = rule.local_sources || [];

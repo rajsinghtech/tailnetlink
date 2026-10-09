@@ -54,8 +54,14 @@ func waitForOutput(t *testing.T, out *syncBuffer, substr string) {
 // starts, fails to connect and keeps running. extra goes in as is, before
 // the links.
 func borderConfig(extra string) string {
-	side := `{"tailnet":"t.example","api_base_url":"http://127.0.0.1:1","oauth":{"client_id":"id","client_secret_env":"X"},"tags":["tag:t"]}`
-	return `{"name":"me","source":` + side + `,"dest":` + side + `,` + extra + `"links":[{"name":"l","tag":"tag:x","ports":[1]}]}`
+	return `{"name":"me",` + extra + `
+		"tailnets":{
+			"home":{"tailnet":"home.example","api_base_url":"http://127.0.0.1:1","auth":{"client_id":"id","client_secret_env":"X"},"tags":["tag:t"]},
+			"work":{"tailnet":"work.example","api_base_url":"http://127.0.0.1:1","auth":{"client_id":"id","client_secret_env":"X"},"tags":["tag:t"]}
+		},
+		"targets":{"l":{"in":"home","tag":"tag:x","ports":[1]}},
+		"exports":[{"target":"l","to":["work"]}]
+	}`
 }
 
 func emptyConfig(t *testing.T) string {
@@ -215,6 +221,7 @@ func TestBinaryExitsOnSIGTERM(t *testing.T) {
 
 func TestPruneCommand(t *testing.T) {
 	api := fakeapi.New(t)
+	api.Tailnet = ""
 	api.PutService(tsclient.VIPService{Name: "svc:mine", Addrs: []string{"100.100.0.1"}, Annotations: map[string]string{"tailnetlink/owner": "me"}})
 	api.PutService(tsclient.VIPService{Name: "svc:theirs", Annotations: map[string]string{"tailnetlink/owner": "them"}})
 	dir := t.TempDir()
@@ -222,8 +229,10 @@ func TestPruneCommand(t *testing.T) {
 	if err := os.WriteFile(secret, []byte("s"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	side := fmt.Sprintf(`{"tailnet":%q,"api_base_url":%q,"oauth":{"client_id":"id","client_secret_file":%q},"tags":["tag:t"]}`, api.Tailnet, api.URL(), secret)
-	cfg := `{"name":"me","source":` + side + `,"dest":` + side + `,"links":[{"name":"l","tag":"tag:x","ports":[1]}]}`
+	side := func(key, tailnet string) string {
+		return fmt.Sprintf(`%q:{"tailnet":%q,"api_base_url":%q,"auth":{"client_id":"id","client_secret_file":%q},"tags":["tag:t"]}`, key, tailnet, api.URL(), secret)
+	}
+	cfg := `{"name":"me","tailnets":{` + side("home", "home.example") + `,` + side("work", "work.example") + `},"targets":{"l":{"in":"home","tag":"tag:x","ports":[1]}},"exports":[{"target":"l","to":["work"]}]}`
 	p := filepath.Join(dir, "c.json")
 	if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
@@ -233,7 +242,7 @@ func TestPruneCommand(t *testing.T) {
 	if c := run([]string{"prune", "-data", p, "-dry-run"}, &out, nil); c != 0 {
 		t.Fatalf("dry run exit %d:\n%s", c, out.String())
 	}
-	if !strings.Contains(out.String(), "would me-dst: delete service svc:mine") {
+	if !strings.Contains(out.String(), "would work: delete service svc:mine") {
 		t.Errorf("dry run output:\n%s", out.String())
 	}
 	if _, ok := api.Service("svc:mine"); !ok {
@@ -283,7 +292,7 @@ func TestRunRejectsInlineSecret(t *testing.T) {
 	if c := run([]string{"-data", p}, &out, nil); c != 1 {
 		t.Fatalf("exit %d, want 1:\n%s", c, out.String())
 	}
-	if !strings.Contains(out.String(), "oauth.client_secret is not supported") || strings.Contains(out.String(), "inline-value") {
+	if !strings.Contains(out.String(), "auth.client_secret is not supported") || strings.Contains(out.String(), "inline-value") {
 		t.Errorf("output:\n%s", out.String())
 	}
 }
@@ -438,7 +447,7 @@ func TestRunRejectsV1Config(t *testing.T) {
 	if c := run([]string{"-data", p}, &out, nil); c != 1 {
 		t.Fatalf("exit %d, want 1:\n%s", c, out.String())
 	}
-	if !strings.Contains(out.String(), "v1 config") || !strings.Contains(out.String(), "README") {
+	if !strings.Contains(out.String(), "old config") || !strings.Contains(out.String(), "README") {
 		t.Errorf("output:\n%s", out.String())
 	}
 }

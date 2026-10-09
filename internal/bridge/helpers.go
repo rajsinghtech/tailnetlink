@@ -38,7 +38,7 @@ func firstIP(addrs []string) (netip.Addr, bool) {
 const (
 	annotationManaged = "tailnetlink/managed"
 	annotationOwner   = "tailnetlink/owner"
-	annotationBridge  = "tailnetlink/bridge"
+	annotationBridge  = "tailnetlink/export"
 )
 
 // ErrNameConflict is returned when a VIP service with the wanted name exists
