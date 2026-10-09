@@ -377,9 +377,17 @@ func TestLocalRuleSkipsDownDest(t *testing.T) {
 			t.Errorf("down dest has bridge %s", b.ID)
 		}
 	}
-	m.mu.Lock()
-	az := m.forwarders[id].authz
-	m.mu.Unlock()
+	var az config.AuthzConfig
+	waitFor(t, 5*time.Second, "local forwarder", func() bool {
+		m.mu.Lock()
+		fwd := m.forwarders[id]
+		m.mu.Unlock()
+		if fwd == nil {
+			return false
+		}
+		az = fwd.authz
+		return true
+	})
 	if az.Mode != config.AuthzAllowTags {
 		t.Errorf("local authz = %+v", az)
 	}
