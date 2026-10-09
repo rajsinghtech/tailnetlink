@@ -10,7 +10,7 @@
 		{"src": ["tag:tailnetlink"], "dst": ["tag:e2e-backend"], "ip": ["*"]},
 		// Destination side: test clients reach services tagged tag:tailnetlink
 		// and the tailnetlink nodes that host them. App capability grants the
-		// echo-ok link for require_cap authz tests; other link names are denied.
+		// echo-ok export for require_cap authz tests; other export names are denied.
 		{
 			"src": ["tag:e2e-client"],
 			"dst": ["tag:tailnetlink"],
