@@ -203,7 +203,7 @@ func runPrune(args []string, stdout io.Writer) int {
 	dryRun := fs.Bool("dry-run", false, "print what would be deleted without deleting it")
 	fs.Usage = func() {
 		fmt.Fprintln(stdout, "usage: tailnetlink prune [-data file] [-dry-run]")
-		fmt.Fprintln(stdout, "Deletes every VIP service owned by this border name in every configured tailnet,")
+		fmt.Fprintln(stdout, "Deletes every VIP service owned by the name in this file, in every configured tailnet,")
 		fmt.Fprintln(stdout, "and removes their addresses from split-DNS. Stop tailnetlink first.")
 		fs.PrintDefaults()
 	}

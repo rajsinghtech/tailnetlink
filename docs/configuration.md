@@ -98,7 +98,7 @@ An export name is unique among exports into one destination. The file load rejec
 
 ## Readiness
 
-`/readyz` is 200 when at least one export is fully up. An export is fully up when its source node is connected, at least one destination is connected, and a tag, device, or service target has polled within three poll intervals. A `pod` target is ready once a destination is up. A target with `in` set to a tailnet key waits for that node. A destination that has already failed stays out of the check for a destination that is up. A tailnet that is still starting leaves a different export that is already up in the ready set. With no export fully up, the body says why.
+`/readyz` is 200 when at least one export is fully up. An export is fully up when the tailnet named by `in` is connected (a `pod` target has no such node), at least one tailnet in `to` is connected, and a tag, device, or service target has polled within three poll intervals. A `pod` target is ready once a destination is up. A destination whose start has already failed stays out of that check. A destination that is still starting does not block a different export that is already up, and it does not block the same export when another destination in `to` is up. With no export fully up, the body is `no bridge is up`, or the first concrete reason.
 
 ## Authorization
 

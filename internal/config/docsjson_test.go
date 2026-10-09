@@ -10,24 +10,33 @@ import (
 	"github.com/rajsinghtech/tailnetlink/internal/config"
 )
 
-// TestDocsJSONParses loads every fenced json block in the README and in
-// docs. Each block is a complete config file. A fragment or a stale field
-// fails this test.
+// TestDocsJSONParses loads every fenced json block in the repo's markdown.
+// Each block is a complete config file. A fragment or a stale field fails
+// this test. config.example.json is checked the same way.
 func TestDocsJSONParses(t *testing.T) {
 	root := filepath.Join("..", "..")
 	var paths []string
-	paths = append(paths, filepath.Join(root, "README.md"))
-	err := filepath.WalkDir(filepath.Join(root, "docs"), func(path string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() && strings.HasSuffix(path, ".md") {
+		if d.IsDir() {
+			base := d.Name()
+			if base == ".git" || base == "vendor" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, ".md") {
 			paths = append(paths, path)
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("no markdown files found")
 	}
 
 	var blocks int
@@ -48,6 +57,10 @@ func TestDocsJSONParses(t *testing.T) {
 				t.Errorf("%s:%d: %v\n%s", rel, f.line, err, f.body)
 			}
 		}
+	}
+	example := filepath.Join(root, "config.example.json")
+	if _, err := config.Load(example); err != nil {
+		t.Errorf("config.example.json: %v", err)
 	}
 	if blocks == 0 {
 		t.Fatal("no json config examples found")

@@ -98,7 +98,7 @@ A device, service, address, or hostname target publishes one VIP. The name is `n
 
 ```json
 {
-  "name": "mesh",
+  "name": "three-nets",
   "tailnets": {
     "home": {
       "tailnet": "keiretsu.ts.net",
@@ -131,7 +131,7 @@ A device, service, address, or hostname target publishes one VIP. The name is `n
 
 ## Expose a tagged service
 
-The quick start exports `tag:api-server` from `home` to `work` on port 8080. The mesh example adds port 8443 and a second destination. Each device becomes a VIP named `api-<host>`.
+The quick start exports `tag:api-server` from `home` to `work` on port 8080. The three-tailnet example adds port 8443 and a second destination. Each device becomes a VIP named `api-<host>`.
 
 `device` names one source node by FQDN. `service` names one source VIP service, as `billing` does.
 

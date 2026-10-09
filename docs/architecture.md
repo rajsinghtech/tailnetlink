@@ -25,7 +25,7 @@ cmd/tailnetlink/          flags, signals, prune
 internal/config/
   config.go               compiled config, Load, file watch
   file.go                 tailnets, targets, and exports
-  border.go               authz and UI field types
+  border.go               authz modes and the UI block
   localports.go           VIP port to backend port
   validate.go             link and short-name checks
   dns.go                  SplitHost for dns_zone

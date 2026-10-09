@@ -16,7 +16,7 @@ services:
     tmpfs:
       - /tmp
     environment:
-      TAILNETLINK_DEST_OAUTH_SECRET: ${TAILNETLINK_DEST_OAUTH_SECRET:-}
+      TAILNETLINK_WORK_SECRET: ${TAILNETLINK_WORK_SECRET:-}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9090/healthz"]
       interval: 30s

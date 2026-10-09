@@ -10,15 +10,15 @@ Create, update, and delete apply to a service when the owner matches. With an ex
 
 Two processes that share a tailnet use different `name` values. One of them sets `ui.service_name` so the UI VIP names differ.
 
-Removing a bridge or a destination from the file, while the process is running, deletes the VIP services that bridge or destination owns. Devices, routes, and policy stay as they are. Split DNS drops this process's resolver address and leaves every other resolver in place.
+Removing an export from the file, while the process is running, deletes the VIP services that export owns. Removing one tailnet from an export's `to` list deletes only that tailnet's services. Devices, routes, and policy stay as they are. Split DNS drops this process's resolver address and leaves every other resolver in place.
 
 ## Restarts and state
 
-A stop (SIGTERM, a restart, a deploy) leaves VIP services, the DNS VIP, and split DNS in place. The process deletes a service when the link or the side that created it is removed from the config while the process is running.
+A stop (SIGTERM, a restart, a deploy) leaves VIP services, the DNS VIP, and split DNS in place. The process deletes a service when the export that created it is removed from the config while the process is running.
 
-Each node keeps state under `node.state_dir`, mode `0700`.
+Each node keeps state in a directory under `state_dir`, mode `0700`.
 
-Each tailnet key has a directory of the same name. The key `home` uses `home`.
+The directory name is the tailnet key. The key `home` uses `state_dir/home`. The default `state_dir` is `tailnetlink-state` next to the config file.
 
 The default directory is `tailnetlink-state` next to the config file. Keep it on persistent storage. A lost directory means the next start registers new nodes. Two processes use different state directories.
 
@@ -68,28 +68,28 @@ curl -sf http://127.0.0.1:9090/healthz
 
 ## Health and metrics
 
-`/healthz`, `/readyz`, and `/metrics` use their own listener. The default is `127.0.0.1:9090` (`metrics.listen_addr` or `-metrics-listen`). They stay up when the UI is off. In a container, set the address to `:9090`.
+`/healthz`, `/readyz`, and `/metrics` use their own listener. The default is `127.0.0.1:9090` (`metrics_addr` or `-metrics-listen`). They stay up when the UI is off. In a container, set the address to `:9090`.
 
 - `/healthz` is 200 while the process is running.
-- `/readyz` is 200 when the config is applied and a border or a mesh is up, using the rules in [configuration.md](configuration.md). Otherwise it is 503 and the body says why.
-- `/metrics` is Prometheus text. Labels carry rule names, tailnet keys, and fixed values.
+- `/readyz` is 200 when the config is applied and at least one export is fully up, using the rules in [configuration.md](configuration.md). Otherwise it is 503 and the body says why. With no export fully up, the body is `no bridge is up` or the first concrete reason.
+- `/metrics` is Prometheus text. The `rule` label is `<target>/<name>`, the same id the process uses for that export. The `tailnet` label is a tailnet key. Other labels are fixed words.
 
 Each tailnet's API client has its own token bucket: 20 requests per second, burst 40. HTTP 429 and 5xx are retried. A POST on 5xx is sent once, because creating a key or exchanging a token may already have succeeded. `Retry-After` is honored, with a little jitter. A call stops after 4 attempts or 30 seconds of waiting.
 
 | Metric | Labels | Meaning |
 |---|---|---|
 | `tailnetlink_node_up` | `tailnet` | 1 when this process's node in that tailnet is connected |
-| `tailnetlink_bridges` | `status` | Bridges by status (`pending`, `active`, `error`) |
+| `tailnetlink_bridges` | `status` | Exported services by status. `status` is `pending`, `active`, or `error` |
 | `tailnetlink_vip_services` | `tailnet`, `state` | VIP services this process has started hosting (`desired`) and verified in the node's advertised set (`advertised`) |
-| `tailnetlink_connections_active` | `rule` | Connections being forwarded |
+| `tailnetlink_connections_active` | `rule` | Connections being forwarded. `rule` is `<target>/<name>` |
 | `tailnetlink_connections_total` | `rule` | Connections forwarded |
 | `tailnetlink_bytes_total` | `rule`, `direction` | Bytes forwarded. `in` is client to backend. `out` is backend to client |
 | `tailnetlink_dial_failures_total` | `rule` | Failed backend dials |
-| `tailnetlink_routed_dial_failures_total` | `rule`, `reason` | Failed dials through a tailnet node. `no_route`, `denied`, or `error` |
+| `tailnetlink_routed_dial_failures_total` | `rule`, `reason` | Failed dials through a tailnet node. `reason` is `no_route`, `denied`, or `error` |
 | `tailnetlink_api_errors_total` | `endpoint` | Failed API calls. A 404 is omitted |
 | `tailnetlink_api_requests_total` | `endpoint`, `code` | Every API attempt. `code` is the HTTP status, or `error` when there was no response |
 | `tailnetlink_api_request_duration_seconds` | `endpoint` | Duration of one API attempt |
-| `tailnetlink_poll_duration_seconds` | `rule` | Discovery poll time |
+| `tailnetlink_poll_duration_seconds` | `rule` | Discovery poll time. `rule` is `<target>/<name>` |
 | `tailnetlink_poll_errors_total` | `rule` | Failed discovery polls |
 | `tailnetlink_ownership_conflicts_total` | `tailnet` | Wanted service names held by another owner |
 
