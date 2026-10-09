@@ -49,11 +49,11 @@ jobs:
       dst2_fed_client_id: ${{ steps.create.outputs.dst2_fed_client_id }}
       dst2_fed_audience: ${{ steps.create.outputs.dst2_fed_audience }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -93,11 +93,11 @@ jobs:
       contents: read
       id-token: write # tests get child-tailnet tokens through the per-tailnet federated identity
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -148,18 +148,18 @@ jobs:
       contents: read
       id-token: write # child-tailnet token through the per-tailnet federated identity
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
       - name: Fetch tailnet state
         continue-on-error: true # missing if setup died before uploading; outputs and name lookup still work
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: ${{ env.STATE_ARTIFACT }}
           path: state/artifact
