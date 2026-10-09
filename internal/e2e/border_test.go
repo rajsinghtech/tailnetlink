@@ -121,7 +121,10 @@ func TestBorderDNSTurnedOff(t *testing.T) {
 	cl := client(t, ctx, b.dst, "client")
 	bd := b.fileConfig(b.deviceLink("web", "backend", "", 8080))
 	r := startManager(t, loadBorder(t, bd), "")
-	waitVIP(t, b.dstAPI, "svc:tnl-dns-src-ts-net-dns")
+	waitFor(t, 30*time.Second, "DNS VIP and split-DNS are up", func() bool {
+		_, ok := b.dstAPI.Service("svc:tnl-dns-src-ts-net-dns")
+		return ok && len(b.dstAPI.SplitDNS("src.ts.net")) > 0
+	})
 
 	bd.DNS = &config.OnOff{On: false}
 	r.reconcile(loadBorder(t, bd))
