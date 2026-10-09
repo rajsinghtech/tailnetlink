@@ -18,9 +18,7 @@ A stop (SIGTERM, a restart, a deploy) leaves VIP services, the DNS VIP, and spli
 
 Each node keeps state in a directory under `state_dir`, mode `0700`.
 
-The directory name is the tailnet key. The key `home` uses `state_dir/home`. The default `state_dir` is `tailnetlink-state` next to the config file.
-
-The default directory is `tailnetlink-state` next to the config file. Keep it on persistent storage. A lost directory means the next start registers new nodes. Two processes use different state directories.
+The directory name is the tailnet key. The key `home` uses `state_dir/home`. The default `state_dir` is `tailnetlink-state` next to the config file. Keep that directory on persistent storage. A lost directory means the next start registers new nodes. Two processes use different state directories.
 
 A saved node that does not come up within one minute is removed and registered again.
 
