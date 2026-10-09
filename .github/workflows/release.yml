@@ -43,7 +43,25 @@ jobs:
 
       - uses: docker/setup-qemu-action@v4
 
-      - uses: docker/setup-buildx-action@v4
+      - name: Set up Buildx
+        id: buildx
+        continue-on-error: true
+        uses: docker/setup-buildx-action@v4
+        with:
+          # The action pulls moby/buildkit before the Dockerfile runs.
+          # Docker Hub times that pull out. The mirror serves the same tag.
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+
+      - name: Pause before a Buildx retry
+        if: steps.buildx.outcome == 'failure'
+        run: sleep 20
+
+      - name: Retry Buildx setup
+        if: steps.buildx.outcome == 'failure'
+        uses: docker/setup-buildx-action@v4
+        with:
+          name: buildx-retry
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       - uses: docker/login-action@v4
         with:

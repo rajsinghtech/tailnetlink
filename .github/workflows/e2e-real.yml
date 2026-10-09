@@ -143,7 +143,7 @@ jobs:
     needs: [setup-tailnet, e2e]
     if: always() && github.repository == 'rajsinghtech/tailnetlink'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
       id-token: write # child-tailnet token through the per-tailnet federated identity
@@ -177,9 +177,10 @@ jobs:
           cat state/outputs.json
 
       # Finds this run's tailnets by recorded ID and by name
-      # (tailnetlink-ci-<run>-<attempt>-*), deletes each one, confirms with a
-      # list call that it is gone, and retries with backoff. Exits non-zero if
-      # anything is left.
+      # (tailnetlink-ci-<run>-<attempt>-*), deletes each one, and confirms
+      # with a list call that it is gone. A deleted tailnet can stay in that
+      # list for more than half a minute. The delete command keeps trying,
+      # with the wait capped, and exits non-zero if anything is left.
       - name: Delete and verify
         run: |
           go run ./test/e2e/cmd/tailnetctl delete \

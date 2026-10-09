@@ -183,20 +183,26 @@ func (c *Client) Exists(ctx context.Context, id string) (bool, error) {
 
 // Retry controls DeleteAndVerify.
 type Retry struct {
-	Attempts int                 // total delete attempts, default 5
+	Attempts int                 // total delete attempts, default 10
 	Backoff  time.Duration       // first wait, doubled each time, default 2s
+	MaxWait  time.Duration       // cap on one wait, default 15s
 	Sleep    func(time.Duration) // default time.Sleep
 }
 
 // DeleteAndVerify deletes tailnet id, then confirms with a list call that it
-// is gone. It retries the whole sequence with exponential backoff and returns
-// an error if the tailnet is still listed after the last attempt.
+// is gone. A successful delete can leave the tailnet in the list for a while.
+// The call retries the whole sequence with exponential backoff, capped by
+// MaxWait, and returns an error if the tailnet is still listed after the last
+// attempt.
 func (c *Client) DeleteAndVerify(ctx context.Context, child TokenSource, id string, r Retry) error {
 	if r.Attempts <= 0 {
-		r.Attempts = 5
+		r.Attempts = 10
 	}
 	if r.Backoff <= 0 {
 		r.Backoff = 2 * time.Second
+	}
+	if r.MaxWait <= 0 {
+		r.MaxWait = 15 * time.Second
 	}
 	if r.Sleep == nil {
 		r.Sleep = time.Sleep
@@ -205,8 +211,15 @@ func (c *Client) DeleteAndVerify(ctx context.Context, child TokenSource, id stri
 	wait := r.Backoff
 	for i := 0; i < r.Attempts; i++ {
 		if i > 0 {
-			r.Sleep(wait)
+			d := wait
+			if d > r.MaxWait {
+				d = r.MaxWait
+			}
+			r.Sleep(d)
 			wait *= 2
+			if wait > r.MaxWait {
+				wait = r.MaxWait
+			}
 		}
 		if err := c.Delete(ctx, child, id); err != nil {
 			last = err

@@ -95,6 +95,7 @@ type common struct {
 	dryRun      bool
 	attempts    int
 	backoff     time.Duration
+	maxWait     time.Duration
 }
 
 func (a *app) flags(name string, c *common) *flag.FlagSet {
@@ -103,8 +104,9 @@ func (a *app) flags(name string, c *common) *flag.FlagSet {
 	fs.StringVar(&c.apiBase, "api-base", tailnet.DefaultAPIBase, "Tailscale API base URL")
 	fs.StringVar(&c.orgClientID, "org-client-id", OrgFedClientID, "org-level federated identity client ID")
 	fs.BoolVar(&c.dryRun, "dry-run", false, "print what would happen without creating or deleting anything")
-	fs.IntVar(&c.attempts, "attempts", 5, "delete attempts per tailnet")
+	fs.IntVar(&c.attempts, "attempts", 10, "delete attempts per tailnet")
 	fs.DurationVar(&c.backoff, "backoff", 2*time.Second, "first retry wait, doubled each attempt")
+	fs.DurationVar(&c.maxWait, "max-wait", 15*time.Second, "cap on one delete retry wait")
 	return fs
 }
 
@@ -138,7 +140,7 @@ func (a *app) childToken(cl *tailnet.Client, e tailnet.StateEntry) (tailnet.Toke
 }
 
 func (c common) retry(sleep func(time.Duration)) tailnet.Retry {
-	return tailnet.Retry{Attempts: c.attempts, Backoff: c.backoff, Sleep: sleep}
+	return tailnet.Retry{Attempts: c.attempts, Backoff: c.backoff, MaxWait: c.maxWait, Sleep: sleep}
 }
 
 // ---- cap check ----
