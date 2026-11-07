@@ -2,7 +2,7 @@
 # so multi-arch builds don't run the Go toolchain under QEMU.
 # mirror.gcr.io serves the same Docker Hub digests. Hub itself answers 429
 # often enough to fail CI before the build starts.
-FROM --platform=$BUILDPLATFORM mirror.gcr.io/library/golang:1.27-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
+FROM --platform=$BUILDPLATFORM mirror.gcr.io/library/golang:1.27-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS build
 ARG TARGETOS TARGETARCH VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -12,7 +12,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
   -ldflags "-s -w -X main.Version=${VERSION}" \
   -o /tailnetlink ./cmd/tailnetlink
 
-FROM mirror.gcr.io/library/alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+FROM mirror.gcr.io/library/alpine:3.24@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a
 RUN apk add --no-cache ca-certificates \
   && addgroup -S -g 65532 nonroot \
   && adduser -S -u 65532 -G nonroot nonroot \
